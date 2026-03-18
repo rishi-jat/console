@@ -225,6 +225,8 @@ export const CARD_TITLES: Record<string, string> = {
   deployment_rollout_tracker: 'Deployment Rollout Tracker',
   // KEDA
   keda_status: 'KEDA',
+  // Longhorn
+  longhorn_status: 'Longhorn',
 
   // Multi-tenancy
   ovn_status: 'OVN-Kubernetes',
@@ -409,6 +411,8 @@ export const CARD_DESCRIPTIONS: Record<string, string> = {
   deployment_rollout_tracker: 'Tracks deployment rollout progress across clusters.',
   // KEDA
   keda_status: 'KEDA autoscaler status, scaled object metrics, and trigger queue depths.',
+  // Longhorn
+  longhorn_status: 'Longhorn cloud-native storage with volumes, replicas, and backup status.',
 
   // Multi-tenancy
   ovn_status: 'OVN-Kubernetes network status, User Defined Networks, and tenant isolation.',
