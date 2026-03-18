@@ -1,0 +1,1 @@
+export { NotaryStatus } from './NotaryStatus'
