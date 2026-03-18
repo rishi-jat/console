@@ -225,6 +225,8 @@ export const CARD_TITLES: Record<string, string> = {
   deployment_rollout_tracker: 'Deployment Rollout Tracker',
   // KEDA
   keda_status: 'KEDA',
+  // Rook
+  rook_status: 'Rook',
 
   // Multi-tenancy
   ovn_status: 'OVN-Kubernetes',
@@ -409,6 +411,8 @@ export const CARD_DESCRIPTIONS: Record<string, string> = {
   deployment_rollout_tracker: 'Tracks deployment rollout progress across clusters.',
   // KEDA
   keda_status: 'KEDA autoscaler status, scaled object metrics, and trigger queue depths.',
+  // Rook
+  rook_status: 'Rook Ceph orchestration with OSD health, pools, and storage utilization.',
 
   // Multi-tenancy
   ovn_status: 'OVN-Kubernetes network status, User Defined Networks, and tenant isolation.',
