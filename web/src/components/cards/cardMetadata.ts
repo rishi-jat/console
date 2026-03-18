@@ -225,6 +225,8 @@ export const CARD_TITLES: Record<string, string> = {
   deployment_rollout_tracker: 'Deployment Rollout Tracker',
   // KEDA
   keda_status: 'KEDA',
+  // Cilium
+  cilium_status: 'Cilium',
 
   // Multi-tenancy
   ovn_status: 'OVN-Kubernetes',
@@ -409,6 +411,8 @@ export const CARD_DESCRIPTIONS: Record<string, string> = {
   deployment_rollout_tracker: 'Tracks deployment rollout progress across clusters.',
   // KEDA
   keda_status: 'KEDA autoscaler status, scaled object metrics, and trigger queue depths.',
+  // Cilium
+  cilium_status: 'Cilium eBPF networking with agent pods, endpoint status, and policy verdict.',
 
   // Multi-tenancy
   ovn_status: 'OVN-Kubernetes network status, User Defined Networks, and tenant isolation.',
