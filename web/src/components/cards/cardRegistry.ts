@@ -208,6 +208,8 @@ const CloudEventsStatus = safeLazy(() => import('./cloudevents_status'), 'CloudE
 const StrimziStatus = safeLazy(() => import('./strimzi_status'), 'StrimziStatus')
 // KubeVela application delivery card
 const KubeVelaStatus = safeLazy(() => import('./kubevela_status'), 'KubeVelaStatus')
+// OpenFGA card
+const OpenFGAStatus = safeLazy(() => import('./openfga_status'), 'OpenFGAStatus')
 
 // Multi-tenancy cards — share one chunk via barrel import
 const _multiTenancyBundle = import('./multi-tenancy').catch(() => undefined as never)
@@ -488,6 +490,8 @@ const RAW_CARD_COMPONENTS: Record<string, CardComponent> = {
   strimzi_status: StrimziStatus,
   // KubeVela application delivery
   kubevela_status: KubeVelaStatus,
+  // OpenFGA
+  openfga_status: OpenFGAStatus,
 
   // LLM-d stunning visualization cards
   llmd_flow: LLMdFlow,
