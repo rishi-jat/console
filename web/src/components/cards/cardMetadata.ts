@@ -225,6 +225,8 @@ export const CARD_TITLES: Record<string, string> = {
   deployment_rollout_tracker: 'Deployment Rollout Tracker',
   // KEDA
   keda_status: 'KEDA',
+  // SPIFFE/SPIRE
+  spiffe_status: 'SPIFFE/SPIRE',
 
   // Multi-tenancy
   ovn_status: 'OVN-Kubernetes',
@@ -409,6 +411,8 @@ export const CARD_DESCRIPTIONS: Record<string, string> = {
   deployment_rollout_tracker: 'Tracks deployment rollout progress across clusters.',
   // KEDA
   keda_status: 'KEDA autoscaler status, scaled object metrics, and trigger queue depths.',
+  // SPIFFE/SPIRE
+  spiffe_status: 'SPIFFE/SPIRE workload identity with agents, SVIDs issued, and attestation status.',
 
   // Multi-tenancy
   ovn_status: 'OVN-Kubernetes network status, User Defined Networks, and tenant isolation.',

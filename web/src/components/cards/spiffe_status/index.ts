@@ -1,0 +1,1 @@
+export { SpiffeStatus } from './SpiffeStatus'
