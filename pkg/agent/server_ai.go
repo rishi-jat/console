@@ -489,7 +489,34 @@ func (s *Server) handleChatMessageStreaming(conn *websocket.Conn, msg protocol.M
 			})
 		}
 
+		// Heartbeat goroutine: sends periodic progress events to prevent the
+		// frontend's stream-inactivity timer from firing during long-running
+		// tool calls (e.g., `drasi init` which deploys Kubernetes components
+		// and can take several minutes with no output).
+		heartbeatDone := make(chan struct{})
+		go func() {
+			ticker := time.NewTicker(missionHeartbeatInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-heartbeatDone:
+					return
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					safeWrite(ctx, protocol.Message{
+						ID:   msg.ID,
+						Type: protocol.TypeProgress,
+						Payload: protocol.ProgressPayload{
+							Step: "Still working...",
+						},
+					})
+				}
+			}
+		}()
+
 		resp, err = streamingProvider.StreamChatWithProgress(ctx, chatReq, onChunk, onProgress)
+		close(heartbeatDone)
 		if err != nil {
 			if ctx.Err() != nil {
 				// Distinguish timeout from user-initiated cancel (#2375)
@@ -602,10 +629,15 @@ func (s *Server) handleCancelChat(conn *websocket.Conn, msg protocol.Message, wr
 
 	s.activeChatCtxsMu.Lock()
 	cancelFn, ok := s.activeChatCtxs[req.SessionID]
+	if ok {
+		// Call cancelFn inside the lock to prevent a concurrent goroutine from
+		// deleting or overwriting the entry between unlock and the call (#4717).
+		cancelFn()
+		delete(s.activeChatCtxs, req.SessionID)
+	}
 	s.activeChatCtxsMu.Unlock()
 
 	if ok {
-		cancelFn()
 		slog.Info("[Chat] cancelled chat", "sessionID", req.SessionID)
 	} else {
 		slog.Info("[Chat] no active chat to cancel", "sessionID", req.SessionID)
@@ -648,6 +680,7 @@ func (s *Server) handleCancelChatHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	defer r.Body.Close()
 	var req struct {
 		SessionID string `json:"sessionId"`
 	}
@@ -658,10 +691,15 @@ func (s *Server) handleCancelChatHTTP(w http.ResponseWriter, r *http.Request) {
 
 	s.activeChatCtxsMu.Lock()
 	cancelFn, ok := s.activeChatCtxs[req.SessionID]
+	if ok {
+		// Call cancelFn inside the lock to prevent a concurrent goroutine from
+		// deleting or overwriting the entry between unlock and the call (#4717).
+		cancelFn()
+		delete(s.activeChatCtxs, req.SessionID)
+	}
 	s.activeChatCtxsMu.Unlock()
 
 	if ok {
-		cancelFn()
 		slog.Info("[Chat] cancelled chat via HTTP", "sessionID", req.SessionID)
 	} else {
 		slog.Info("[Chat] no active chat to cancel via HTTP", "sessionID", req.SessionID)

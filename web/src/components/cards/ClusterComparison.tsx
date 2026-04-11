@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect } from 'react'
+import { useState, useMemo, useEffect, useRef } from 'react'
 import { Server, Activity, Box, Cpu, ChevronRight } from 'lucide-react'
 import { useClusters } from '../../hooks/useMCP'
 import { useCachedGPUNodes } from '../../hooks/useCachedData'
@@ -9,6 +9,7 @@ import { RefreshIndicator } from '../ui/RefreshIndicator'
 import { useCardLoadingState } from './CardDataContext'
 import { useTranslation } from 'react-i18next'
 import { useDemoMode } from '../../hooks/useDemoMode'
+import { DynamicCardErrorBoundary } from './DynamicCardErrorBoundary'
 
 interface ClusterComparisonProps {
   config?: {
@@ -16,7 +17,9 @@ interface ClusterComparisonProps {
   }
 }
 
-export function ClusterComparison({ config }: ClusterComparisonProps) {
+// #6216: wrapped at the bottom of the file in DynamicCardErrorBoundary so
+// a runtime error in the 254-line component doesn't crash the dashboard.
+function ClusterComparisonInternal({ config }: ClusterComparisonProps) {
   const { t } = useTranslation(['cards', 'common'])
   const { deduplicatedClusters: rawClusters, isLoading: clustersLoading } = useClusters()
   const { nodes: gpuNodes, isDemoFallback, isRefreshing, lastRefresh } = useCachedGPUNodes()
@@ -30,13 +33,11 @@ export function ClusterComparison({ config }: ClusterComparisonProps) {
     isRefreshing,
     hasAnyData: hasData,
     isDemoData: isDemoMode || isDemoFallback,
-    lastRefresh,
-  })
+    lastRefresh })
   const {
     selectedClusters: globalSelectedClusters,
     isAllClustersSelected,
-    customFilter,
-  } = useGlobalFilters()
+    customFilter } = useGlobalFilters()
   const { drillToCluster } = useDrillDownActions()
 
   // Apply global filters
@@ -65,28 +66,34 @@ export function ClusterComparison({ config }: ClusterComparisonProps) {
   }, [rawClusters, globalSelectedClusters, isAllClustersSelected, customFilter])
 
   // Reset local cluster selection when global filters change
+  const prevClusterNamesRef = useRef('')
   useEffect(() => {
-    // Filter out any locally selected clusters that are no longer in the filtered set
+    const names = allClusters.map(c => c.name).sort().join(',')
+    if (names === prevClusterNamesRef.current) return
+    prevClusterNamesRef.current = names
     const availableNames = new Set(allClusters.map(c => c.name))
-    setSelectedClusters(prev => prev.filter(name => availableNames.has(name)))
+    setSelectedClusters(prev => {
+      const filtered = prev.filter(name => availableNames.has(name))
+      return filtered.length === prev.length ? prev : filtered
+    })
   }, [allClusters])
 
-  const gpuByCluster = useMemo(() => {
+  const gpuByCluster = (() => {
     const map: Record<string, number> = {}
     gpuNodes.forEach(node => {
-      const clusterKey = node.cluster.split('/')[0]
+      const clusterKey = (node.cluster ?? '').split('/')[0]
       map[clusterKey] = (map[clusterKey] || 0) + node.gpuCount
     })
     return map
-  }, [gpuNodes])
+  })()
 
-  const clustersToCompare = useMemo(() => {
+  const clustersToCompare = (() => {
     if (selectedClusters.length >= 2) {
       return allClusters.filter(c => selectedClusters.includes(c.name))
     }
     // Default to first 2-3 clusters
     return allClusters.slice(0, 3)
-  }, [allClusters, selectedClusters])
+  })()
 
   const toggleCluster = (name: string) => {
     setSelectedClusters(prev => {
@@ -131,7 +138,8 @@ export function ClusterComparison({ config }: ClusterComparisonProps) {
   ]
 
   const maxValues = metrics.reduce((acc, m) => {
-    acc[m.key] = Math.max(...clustersToCompare.map(c => m.getValue(c)))
+    const values = clustersToCompare.map(c => m.getValue(c))
+    acc[m.key] = values.length > 0 ? Math.max(...values) : 0
     return acc
   }, {} as Record<string, number>)
 
@@ -179,8 +187,7 @@ export function ClusterComparison({ config }: ClusterComparisonProps) {
                       podCount: c.podCount,
                       cpuCores: c.cpuCores,
                       gpuCount: gpuByCluster[c.name] || 0,
-                      healthy: c.healthy,
-                    })}
+                      healthy: c.healthy })}
                     className="flex items-center justify-end gap-1 w-full hover:text-purple-400 transition-colors group min-w-0"
                     title={c.name}
                   >
@@ -246,5 +253,13 @@ export function ClusterComparison({ config }: ClusterComparisonProps) {
         ))}
       </div>
     </div>
+  )
+}
+
+export function ClusterComparison(props: ClusterComparisonProps) {
+  return (
+    <DynamicCardErrorBoundary cardId="ClusterComparison">
+      <ClusterComparisonInternal {...props} />
+    </DynamicCardErrorBoundary>
   )
 }

@@ -1,10 +1,12 @@
-import { useMemo } from 'react'
 import { useSearchParams, useNavigate } from 'react-router-dom'
 import { ArrowLeft, Server, Cpu, MemoryStick, Box, Activity, AlertCircle, GitBranch } from 'lucide-react'
-import { useClusters, ClusterInfo } from '../../hooks/useMCP'
+import { useClusters, useNodes, ClusterInfo } from '../../hooks/useMCP'
 import { Skeleton } from '../ui/Skeleton'
 import { ROUTES } from '../../config/routes'
 import { useTranslation } from 'react-i18next'
+
+// Fallback string shown when a Kubernetes version cannot be resolved for a cluster (issue #6108).
+const K8S_VERSION_UNKNOWN = 'N/A'
 
 interface ClusterMetrics {
   cluster: ClusterInfo
@@ -17,21 +19,21 @@ export function ClusterComparisonPage() {
   const [searchParams] = useSearchParams()
   const navigate = useNavigate()
   const { deduplicatedClusters: clusters, isLoading } = useClusters()
+  // Nodes for all clusters — used to resolve the Kubernetes version for each
+  // cluster from one of its node's kubeletVersion (issue #6108).
+  const { nodes: allNodes } = useNodes()
 
   // Get cluster names from URL
-  const clusterNames = useMemo(() => {
+  const clusterNames = (() => {
     const names = searchParams.get('clusters')?.split(',').filter(Boolean) || []
     return names
-  }, [searchParams])
+  })()
 
   // Filter to only the clusters we're comparing
-  const clustersToCompare = useMemo(() => {
-    return clusters.filter(c => clusterNames.includes(c.name))
-  }, [clusters, clusterNames])
+  const clustersToCompare = clusters.filter(c => clusterNames.includes(c.name))
 
   // Calculate metrics for each cluster
-  const clusterMetrics: ClusterMetrics[] = useMemo(() => {
-    return clustersToCompare.map(cluster => {
+  const clusterMetrics: ClusterMetrics[] = clustersToCompare.map(cluster => {
       const cpuUtilization = cluster.cpuCores && cluster.cpuRequestsCores
         ? Math.round((cluster.cpuRequestsCores / cluster.cpuCores) * 100)
         : 0
@@ -43,10 +45,8 @@ export function ClusterComparisonPage() {
       return {
         cluster,
         cpuUtilization,
-        memoryUtilization,
-      }
+        memoryUtilization }
     })
-  }, [clustersToCompare])
 
   // Find differences (values that vary across clusters)
   const hasDifference = (getValue: (m: ClusterMetrics) => number | string | undefined) => {
@@ -54,11 +54,16 @@ export function ClusterComparisonPage() {
     return new Set(values).size > 1
   }
 
-  // Get Kubernetes version from cluster
-  const getK8sVersion = (_cluster: ClusterInfo) => {
-    // ClusterInfo interface would need to be extended with a 'version' field containing K8s version
-    // Version can be obtained from K8s API server /version endpoint during cluster discovery
-    return 'N/A'
+  // Resolve Kubernetes version by looking up any node in the cluster and using
+  // its kubeletVersion. Aliases (e.g. deduped OpenShift long context names)
+  // are considered so we still match nodes fetched under a different context
+  // name (issue #6108).
+  const getK8sVersion = (cluster: ClusterInfo): string => {
+    const candidateNames = [cluster.name, ...(cluster.aliases || [])]
+    const nodeForCluster = allNodes.find(n =>
+      !!n.kubeletVersion && candidateNames.some(cn => n.cluster === cn || n.cluster?.startsWith(`${cn}/`))
+    )
+    return nodeForCluster?.kubeletVersion || K8S_VERSION_UNKNOWN
   }
 
   const handleBack = () => {
@@ -167,7 +172,15 @@ export function ClusterComparisonPage() {
                 {cluster.nodeCount || 0}
               </div>
               <div className="text-xs text-muted-foreground">
-                {cluster.healthy ? 'All healthy' : 'Issues detected'}
+                {/* Tri-state health display (issue #6109): show "Status unknown"
+                    for clusters whose health probe has not yet reported, and only
+                    show "Issues detected" for clusters that are explicitly not
+                    healthy. Previously, unknown status was conflated with unhealthy. */}
+                {cluster.healthUnknown || cluster.healthy === undefined
+                  ? 'Status unknown'
+                  : cluster.healthy
+                    ? 'All healthy'
+                    : 'Issues detected'}
               </div>
             </div>
 

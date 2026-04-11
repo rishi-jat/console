@@ -5,7 +5,7 @@
  * - Dismissed insights persist only in sessionStorage (current session)
  */
 
-import { useState, useCallback, useMemo } from 'react'
+import { useState, useEffect } from 'react'
 import { useToast } from '../../ui/Toast'
 
 /** localStorage key for acknowledged insight IDs */
@@ -15,6 +15,8 @@ const INSIGHT_DISMISS_KEY = 'dismissed-insights-session'
 
 /** User-facing message when insight preferences fail to save */
 const SAVE_ERROR_MESSAGE = 'Failed to save insight preference. Your browser storage may be full.'
+/** User-facing message when insight preferences fail to load */
+const LOAD_ERROR_MESSAGE = 'Failed to load insight preferences. Previously acknowledged insights may reappear.'
 
 function loadSet(storage: Storage, key: string): Set<string> {
   try {
@@ -46,9 +48,9 @@ function saveSet(storage: Storage, key: string, set: Set<string>, onError?: Erro
 export function useInsightActions() {
   const { showToast } = useToast()
 
-  const onSaveError = useCallback((message: string) => {
+  const onSaveError = (message: string) => {
     showToast(message, 'error')
-  }, [showToast])
+  }
 
   const [acknowledgedIds, setAcknowledgedIds] = useState<Set<string>>(
     () => loadSet(localStorage, INSIGHT_ACKNOWLEDGE_KEY)
@@ -57,34 +59,55 @@ export function useInsightActions() {
     () => loadSet(sessionStorage, INSIGHT_DISMISS_KEY)
   )
 
-  const acknowledgeInsight = useCallback((id: string) => {
+  // Detect load errors on mount and notify user
+  useEffect(() => {
+    const ackRaw = localStorage.getItem(INSIGHT_ACKNOWLEDGE_KEY)
+    const dismissRaw = sessionStorage.getItem(INSIGHT_DISMISS_KEY)
+    let hasError = false
+    if (ackRaw) {
+      try {
+        const parsed = JSON.parse(ackRaw)
+        if (!Array.isArray(parsed)) hasError = true
+      } catch { hasError = true }
+    }
+    if (dismissRaw) {
+      try {
+        const parsed = JSON.parse(dismissRaw)
+        if (!Array.isArray(parsed)) hasError = true
+      } catch { hasError = true }
+    }
+    if (hasError) {
+      showToast(LOAD_ERROR_MESSAGE, 'warning')
+    }
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const acknowledgeInsight = (id: string) => {
     setAcknowledgedIds(prev => {
       const next = new Set(prev)
       next.add(id)
       saveSet(localStorage, INSIGHT_ACKNOWLEDGE_KEY, next, onSaveError)
       return next
     })
-  }, [onSaveError])
+  }
 
-  const dismissInsight = useCallback((id: string) => {
+  const dismissInsight = (id: string) => {
     setDismissedIds(prev => {
       const next = new Set(prev)
       next.add(id)
       saveSet(sessionStorage, INSIGHT_DISMISS_KEY, next, onSaveError)
       return next
     })
-  }, [onSaveError])
+  }
 
-  const isAcknowledged = useCallback((id: string) => acknowledgedIds.has(id), [acknowledgedIds])
-  const isDismissed = useCallback((id: string) => dismissedIds.has(id), [dismissedIds])
+  const isAcknowledged = (id: string) => acknowledgedIds.has(id)
+  const isDismissed = (id: string) => dismissedIds.has(id)
 
-  const acknowledgedCount = useMemo(() => acknowledgedIds.size, [acknowledgedIds])
+  const acknowledgedCount = acknowledgedIds.size
 
   return {
     acknowledgeInsight,
     dismissInsight,
     isAcknowledged,
     isDismissed,
-    acknowledgedCount,
-  }
+    acknowledgedCount }
 }

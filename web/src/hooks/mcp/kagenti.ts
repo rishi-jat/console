@@ -1,7 +1,7 @@
-import { useMemo, useCallback } from 'react'
+import { useMemo } from 'react'
 import { mapSettledWithConcurrency } from '../../lib/utils/concurrency'
 import { isAgentUnavailable, reportAgentDataSuccess } from '../useLocalAgent'
-import { clusterCacheRef, LOCAL_AGENT_URL } from './shared'
+import { clusterCacheRef, LOCAL_AGENT_URL, agentFetch as sharedAgentFetch } from './shared'
 import { useCache } from '../../lib/cache'
 
 // ─── Types ─────────────────────────────────────────────────────────
@@ -126,20 +126,24 @@ async function agentFetch<T>(path: string, cluster: string, namespace?: string):
   const ctrl = new AbortController()
   const tid = setTimeout(() => ctrl.abort(), AGENT_TIMEOUT)
   try {
-    const res = await fetch(`${LOCAL_AGENT_URL}${path}?${params}`, {
+    const res = await sharedAgentFetch(`${LOCAL_AGENT_URL}${path}?${params}`, {
       signal: ctrl.signal,
-      headers: { Accept: 'application/json' },
-    })
+      headers: { Accept: 'application/json' } })
     clearTimeout(tid)
-    if (!res.ok) throw new Error(`Agent ${res.status}`)
+    if (!res.ok) throw new Error(`Agent returned ${res.status} for ${path} (cluster: ${cluster})`)
     return await res.json()
-  } catch {
+  } catch (err) {
     clearTimeout(tid)
-    return null
+    // Log the error so it is visible in the console
+    console.warn(`[kagenti] fetch failed for ${path} (cluster: ${cluster}):`, err)
+    // Re-throw so callers can surface the error to the UI
+    throw err
   }
 }
 
-/** Fetch from agent across all reachable clusters */
+/** Fetch from agent across all reachable clusters.
+ *  Throws if ALL clusters fail so the error propagates to the UI
+ *  instead of silently falling back to demo data. */
 async function agentFetchAllClusters<T>(
   path: string,
   key: string,
@@ -166,9 +170,17 @@ async function agentFetchAllClusters<T>(
   )
 
   const items: T[] = []
+  const errors: string[] = []
   for (const r of (results || [])) {
     if (r.status === 'fulfilled') items.push(...r.value)
+    else errors.push(r.reason?.message || 'unknown error')
   }
+
+  // If every cluster failed, throw so the error reaches the UI
+  if (items.length === 0 && errors.length > 0) {
+    throw new Error(`All kagenti fetches failed: ${errors.join('; ')}`)
+  }
+
   return items
 }
 
@@ -188,8 +200,7 @@ export function useKagentiAgents(options?: { cluster?: string; namespace?: strin
       )
       reportAgentDataSuccess()
       return agents
-    },
-  })
+    } })
 }
 
 export function useKagentiBuilds(options?: { cluster?: string; namespace?: string }) {
@@ -206,8 +217,7 @@ export function useKagentiBuilds(options?: { cluster?: string; namespace?: strin
       )
       reportAgentDataSuccess()
       return builds
-    },
-  })
+    } })
 }
 
 export function useKagentiCards(options?: { cluster?: string; namespace?: string }) {
@@ -224,8 +234,7 @@ export function useKagentiCards(options?: { cluster?: string; namespace?: string
       )
       reportAgentDataSuccess()
       return cards
-    },
-  })
+    } })
 }
 
 export function useKagentiTools(options?: { cluster?: string; namespace?: string }) {
@@ -242,8 +251,7 @@ export function useKagentiTools(options?: { cluster?: string; namespace?: string
       )
       reportAgentDataSuccess()
       return tools
-    },
-  })
+    } })
 }
 
 /** Aggregated summary computed from all kagenti sub-hooks */
@@ -273,7 +281,11 @@ export function useKagentiSummary() {
     }
 
     const spiffeTotal = cards.length
-    const spiffeBound = cards.filter(c => c.identityBinding !== 'none').length
+    // Only count cards with an explicit, non-empty binding that is not "none".
+    // Empty string (missing field) must NOT be counted as SPIFFE-bound.
+    const spiffeBound = cards.filter(c =>
+      c.identityBinding !== '' && c.identityBinding !== 'none',
+    ).length
 
     return {
       agentCount: agents.length,
@@ -285,13 +297,12 @@ export function useKagentiSummary() {
       spiffeBound,
       spiffeTotal,
       clusterBreakdown: Array.from(clusterMap.entries()).map(([cluster, count]) => ({ cluster, agents: count })),
-      frameworks,
-    }
+      frameworks }
   }, [agents, builds, cards, tools, isLoading])
 
-  const refetch = useCallback(async () => {
+  const refetch = async () => {
     await Promise.all([refetchAgents(), refetchBuilds(), refetchCards(), refetchTools()])
-  }, [refetchAgents, refetchBuilds, refetchCards, refetchTools])
+  }
 
   return { summary, isLoading, isDemoData, error, refetch }
 }

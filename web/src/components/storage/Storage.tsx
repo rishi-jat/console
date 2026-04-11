@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { Database, ExternalLink, AlertCircle } from 'lucide-react'
 import { BaseModal, useModalState } from '../../lib/modals'
 import { useUniversalStats, createMergedStatValueGetter } from '../../hooks/useUniversalStats'
@@ -9,6 +9,7 @@ import { StatBlockValue } from '../ui/StatsOverview'
 import { ClusterBadge } from '../ui/ClusterBadge'
 import { DashboardPage } from '../../lib/dashboards/DashboardPage'
 import { getDefaultCards } from '../../config/dashboards'
+import { RotatingTip } from '../ui/RotatingTip'
 import { useTranslation } from 'react-i18next'
 
 // PVC List Modal
@@ -123,8 +124,7 @@ export function Storage() {
   const { deduplicatedClusters: clusters, isLoading, isRefreshing: dataRefreshing, lastUpdated, refetch, error: clustersError } = useClusters()
   const {
     selectedClusters: globalSelectedClusters,
-    isAllClustersSelected,
-  } = useGlobalFilters()
+    isAllClustersSelected } = useGlobalFilters()
   const { pvcs, error: pvcsError } = usePVCs()
   const error = clustersError || pvcsError
   const { drillToPVC, drillToResources } = useDrillDownActions()
@@ -155,8 +155,7 @@ export function Storage() {
     totalStorageGB: reachableClusters.reduce((sum, c) => sum + (c.storageGB || 0), 0),
     totalPVCs: filteredPVCs.length,
     boundPVCs: filteredPVCs.filter(p => p.status === 'Bound').length,
-    pendingPVCs: filteredPVCs.filter(p => p.status === 'Pending').length,
-  }
+    pendingPVCs: filteredPVCs.filter(p => p.status === 'Pending').length }
 
   // Check if we have actual data (not just loading state)
   const hasActualData = filteredClusters.some(c =>
@@ -198,7 +197,7 @@ export function Storage() {
   }
 
   // Stats value getter for the configurable StatsOverview component
-  const getDashboardStatValue = useCallback((blockId: string): StatBlockValue => {
+  const getDashboardStatValue = (blockId: string): StatBlockValue => {
     switch (blockId) {
       case 'ephemeral':
         return {
@@ -236,12 +235,9 @@ export function Storage() {
       default:
         return { value: '-', sublabel: '' }
     }
-  }, [stats, hasDataToShow, drillToResources, filteredPVCs, openPVCModal])
+  }
 
-  const getStatValue = useCallback(
-    (blockId: string) => createMergedStatValueGetter(getDashboardStatValue, getUniversalStatValue)(blockId),
-    [getDashboardStatValue, getUniversalStatValue]
-  )
+  const getStatValue = (blockId: string) => createMergedStatValueGetter(getDashboardStatValue, getUniversalStatValue)(blockId)
 
   return (
     <>
@@ -249,6 +245,7 @@ export function Storage() {
         title="Storage"
         subtitle="Monitor storage resources across clusters"
         icon="HardDrive"
+        rightExtra={<RotatingTip page="storage" />}
         storageKey={STORAGE_CARDS_KEY}
         defaultCards={DEFAULT_STORAGE_CARDS}
         statsType="storage"
@@ -260,8 +257,7 @@ export function Storage() {
         hasData={hasDataToShow}
         emptyState={{
           title: 'Storage Dashboard',
-          description: 'Add cards to monitor PersistentVolumes, StorageClasses, and storage utilization across your clusters.',
-        }}
+          description: 'Add cards to monitor PersistentVolumes, StorageClasses, and storage utilization across your clusters.' }}
       >
         {/* Error Display */}
         {error && (

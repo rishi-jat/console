@@ -39,6 +39,9 @@ export const STORAGE_KEY_TOUR_COMPLETED = 'kubestellar-console-tour-completed'
 export const STORAGE_KEY_ANALYTICS_OPT_OUT = 'kc-analytics-opt-out'
 export const STORAGE_KEY_ANONYMOUS_USER_ID = 'kc-anonymous-user-id'
 
+// ── Dashboard persistence ─────────────────────────────────────────────
+export const STORAGE_KEY_MAIN_DASHBOARD_CARDS = 'kubestellar-main-dashboard-cards'
+
 // ── UI state persistence ───────────────────────────────────────────────
 export const STORAGE_KEY_CLUSTER_LAYOUT = 'kubestellar-cluster-layout-mode'
 export const STORAGE_KEY_NAV_HISTORY = 'kubestellar-nav-history'
@@ -63,6 +66,16 @@ export const STORAGE_KEY_ADOPTER_NUDGE_DISMISSED = 'kc-adopter-nudge-dismissed'
 export const STORAGE_KEY_FIRST_AGENT_CONNECT = 'kc-first-agent-connect'
 export const STORAGE_KEY_VISIT_STREAK = 'ksc-visit-streak'
 export const STORAGE_KEY_SEEN_TIPS = 'ksc-seen-tips'
+export const STORAGE_KEY_NPS_STATE = 'kc-nps-state'
+
+// ── Orbit (Recurring Maintenance) ─────────────────────────────────
+export const STORAGE_KEY_ORBIT_MISSIONS = 'kc-orbit-missions'
+export const STORAGE_KEY_ORBIT_HISTORY = 'kc-orbit-history'
+export const STORAGE_KEY_GROUND_CONTROL_DASHBOARDS = 'kc-ground-control-dashboards'
+
+// ── Snooze persistence ────────────────────────────────────────────────
+export const STORAGE_KEY_SNOOZED_CARDS = 'kubestellar-snoozed-cards'
+export const STORAGE_KEY_SNOOZED_RECOMMENDATIONS = 'kubestellar-snoozed-recommendations'
 
 // ── Notification dedup ────────────────────────────────────────────────
 export const STORAGE_KEY_NOTIFIED_ALERT_KEYS = 'kc-notified-alert-keys'

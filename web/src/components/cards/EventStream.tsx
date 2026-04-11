@@ -1,4 +1,5 @@
-import { AlertTriangle, Info, XCircle, ChevronRight } from 'lucide-react'
+import { AlertTriangle, Info, XCircle, ChevronRight, Radio } from 'lucide-react'
+import { useEffect, useMemo } from 'react'
 import { useCachedEvents } from '../../hooks/useCachedData'
 import type { ClusterEvent } from '../../hooks/useMCP'
 import { useDrillDownActions } from '../../hooks/useDrillDown'
@@ -6,7 +7,7 @@ import { ClusterBadge } from '../ui/ClusterBadge'
 import { LimitedAccessWarning } from '../ui/LimitedAccessWarning'
 import { RefreshIndicator } from '../ui/RefreshIndicator'
 import { DynamicCardErrorBoundary } from './DynamicCardErrorBoundary'
-import { CardSkeleton, CardSearchInput, CardControlsRow, CardPaginationFooter } from '../../lib/cards/CardComponents'
+import { CardSkeleton, CardSearchInput, CardControlsRow, CardPaginationFooter, CardEmptyState } from '../../lib/cards/CardComponents'
 import { useCardData, commonComparators } from '../../lib/cards/cardHooks'
 import { useCardLoadingState } from './CardDataContext'
 import { useDemoMode } from '../../hooks/useDemoMode'
@@ -20,9 +21,32 @@ const SORT_OPTIONS = [
   { value: 'type' as const, label: 'Type' },
 ]
 
-function EventStreamInternal() {
+/** Default API fetch ceiling — large enough to give pagination headroom but
+ * not so large that the JSON payload becomes wasteful. Used when the user
+ * has not configured a `limit` for this card. */
+const DEFAULT_API_FETCH_LIMIT = 100
+
+/** Default page size for the in-card "show N" dropdown when the user has
+ * not configured a `limit` for this card. */
+const DEFAULT_DISPLAY_LIMIT = 5
+
+interface EventStreamConfig {
+  /** User-configurable max events from the Configure Card modal. Drives BOTH
+   * the API fetch ceiling and the initial in-card "show N" dropdown
+   * selection. Without this wiring (#6070) EventStream silently dropped the
+   * user's preference and rendered with the hardcoded defaults. */
+  limit?: number
+  /** Filter to warning/error events only. Surfaced in the same modal section. */
+  warningsOnly?: boolean
+}
+
+function EventStreamInternal({ config }: { config?: EventStreamConfig }) {
   const { t } = useTranslation()
   const { isDemoMode } = useDemoMode()
+  const userLimit =
+    typeof config?.limit === 'number' && config.limit > 0 ? config.limit : null
+  const apiFetchLimit = userLimit ?? DEFAULT_API_FETCH_LIMIT
+  const displayLimit = userLimit ?? DEFAULT_DISPLAY_LIMIT
   // Fetch more events from API to enable pagination (using cached data hook)
   const {
     events: rawEvents,
@@ -33,13 +57,23 @@ function EventStreamInternal() {
     error,
     isFailed,
     consecutiveFailures,
-  } = useCachedEvents(undefined, undefined, { limit: 100, category: 'realtime' })
+  } = useCachedEvents(undefined, undefined, { limit: apiFetchLimit, category: 'realtime' })
+
+  // Apply the warningsOnly user-config filter (#6070 follow-up — same modal
+  // section, also previously dropped because EventStream ignored its config).
+  const filteredRawEvents = useMemo(
+    () =>
+      config?.warningsOnly
+        ? rawEvents.filter(e => e.type === 'Warning' || e.type === 'Error')
+        : rawEvents,
+    [rawEvents, config?.warningsOnly],
+  )
 
   // Report state to CardWrapper for refresh animation
   const { showSkeleton, showEmptyState } = useCardLoadingState({
     isLoading: hookLoading,
     isDemoData: isDemoMode || isDemoFallback,
-    hasAnyData: rawEvents.length > 0,
+    hasAnyData: filteredRawEvents.length > 0,
     isFailed,
     consecutiveFailures,
     isRefreshing,
@@ -74,7 +108,7 @@ function EventStreamInternal() {
     },
     containerRef,
     containerStyle,
-  } = useCardData<ClusterEvent, SortByOption>(rawEvents, {
+  } = useCardData<ClusterEvent, SortByOption>(filteredRawEvents, {
     filter: {
       searchFields: ['message', 'object', 'namespace', 'type'],
       clusterField: 'cluster',
@@ -86,15 +120,36 @@ function EventStreamInternal() {
       defaultField: 'time',
       defaultDirection: 'desc',
       comparators: {
-        time: () => 0, // Keep original order (already sorted by time desc)
+        time: (a, b) => {
+          const timeA = a.lastSeen || a.firstSeen || ''
+          const timeB = b.lastSeen || b.firstSeen || ''
+          return timeA.localeCompare(timeB)
+        },
         count: commonComparators.number('count'),
         type: commonComparators.string('type'),
       },
     },
-    defaultLimit: 5,
+    defaultLimit: displayLimit,
   })
 
-  const { drillToEvents, drillToPod, drillToDeployment } = useDrillDownActions()
+  // #6070: when the user explicitly sets `config.limit` via the card
+  // settings modal, it must override any persisted itemsPerPage from
+  // localStorage (storageKey 'event-stream'). `useCardData` only
+  // consumes `defaultLimit` on initial mount — after that, its state
+  // is sourced from localStorage. Without this effect, a user's
+  // configured limit was silently ignored whenever they'd previously
+  // used the in-card "show N" dropdown, which is exactly the
+  // "show field disregarded, causing a very long card" bug in #6070.
+  // The user's workaround (minimize + maximize to force remount) only
+  // helped transiently because on some remounts localStorage was still
+  // catching up — the config.limit was never the source of truth.
+  useEffect(() => {
+    if (typeof config?.limit === 'number' && config.limit > 0) {
+      setItemsPerPage(config.limit)
+    }
+  }, [config?.limit, setItemsPerPage])
+
+  const { drillToEvents, drillToPod, drillToDeployment, drillToReplicaSet } = useDrillDownActions()
 
   const handleEventClick = (event: ClusterEvent) => {
     // Parse object to get resource type and name
@@ -108,7 +163,9 @@ function EventStreamInternal() {
 
     if (resourceType.toLowerCase() === 'pod') {
       drillToPod(cluster, event.namespace, resourceName, { fromEvent: true })
-    } else if (resourceType.toLowerCase() === 'deployment' || resourceType.toLowerCase() === 'replicaset') {
+    } else if (resourceType.toLowerCase() === 'replicaset') {
+      drillToReplicaSet(cluster, event.namespace, resourceName, { fromEvent: true })
+    } else if (resourceType.toLowerCase() === 'deployment') {
       drillToDeployment(cluster, event.namespace, resourceName, { fromEvent: true })
     } else {
       // Generic events view for other resources
@@ -132,10 +189,11 @@ function EventStreamInternal() {
 
   if (showEmptyState) {
     return (
-      <div className="h-full flex flex-col items-center justify-center min-h-card text-muted-foreground">
-        <p className="text-sm">No events</p>
-        <p className="text-xs mt-1">Cluster events will appear here</p>
-      </div>
+      <CardEmptyState
+        icon={Radio}
+        title="No events"
+        message="Cluster events will appear here when activity is detected."
+      />
     )
   }
 
@@ -188,7 +246,7 @@ function EventStreamInternal() {
       />
 
       {/* Event list */}
-      <div ref={containerRef} className="flex-1 space-y-2 overflow-y-auto min-h-card-content" style={containerStyle}>
+      <div ref={containerRef} className="flex-1 space-y-1.5 overflow-y-auto min-h-card-content" style={containerStyle}>
         {events.length === 0 ? (
           <div className="flex items-center justify-center h-full text-muted-foreground text-sm">
             No recent events
@@ -200,8 +258,8 @@ function EventStreamInternal() {
 
             return (
               <div
-                key={`${event.object}-${idx}`}
-                className="flex items-start gap-3 p-2 rounded-lg hover:bg-secondary/30 transition-colors cursor-pointer group"
+                key={`${event.cluster || 'unknown'}-${event.object}-${event.lastSeen || event.firstSeen || ''}-${event.reason}`}
+                className={`flex items-start gap-3 p-3 rounded-lg hover:bg-secondary/40 transition-colors cursor-pointer group ${idx % 2 === 0 ? 'bg-secondary/10' : 'bg-secondary/25'}`}
                 onClick={() => handleEventClick(event)}
                 title={`Click to view details for ${event.object}`}
               >
@@ -247,10 +305,10 @@ function EventStreamInternal() {
   )
 }
 
-export function EventStream() {
+export function EventStream({ config }: { config?: Record<string, unknown> } = {}) {
   return (
     <DynamicCardErrorBoundary cardId="EventStream">
-      <EventStreamInternal />
+      <EventStreamInternal config={config as EventStreamConfig | undefined} />
     </DynamicCardErrorBoundary>
   )
 }

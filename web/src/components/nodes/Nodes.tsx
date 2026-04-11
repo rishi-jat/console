@@ -1,4 +1,4 @@
-import { useCallback, useRef, useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { AlertCircle } from 'lucide-react'
 import { useClusters, useGPUNodes } from '../../hooks/useMCP'
 import { useGlobalFilters } from '../../hooks/useGlobalFilters'
@@ -8,6 +8,7 @@ import { StatBlockValue } from '../ui/StatsOverview'
 import { formatMemoryStat } from '../../lib/formatStats'
 import { DashboardPage } from '../../lib/dashboards/DashboardPage'
 import { getDefaultCards } from '../../config/dashboards'
+import { RotatingTip } from '../ui/RotatingTip'
 import { useTranslation } from 'react-i18next'
 
 const NODES_CARDS_KEY = 'kubestellar-nodes-cards'
@@ -50,18 +51,36 @@ export function Nodes() {
     return totalMemoryGB > 0 ? Math.round((requestedMemory / totalMemoryGB) * 100) : 0
   })()
 
-  // Cache utilization values to prevent showing 0 during refresh
-  const cachedCpuUtil = useRef(currentCpuUtil)
-  const cachedMemoryUtil = useRef(currentMemoryUtil)
+  // Cache utilization values to avoid showing a transient 0 during refresh, but
+  // still propagate a genuine 0 once real data has been seen at least once
+  // (issue #6107). Previously the fallback used `value > 0 ? value : cached`
+  // which caused a node whose utilization legitimately dropped to 0 to keep
+  // displaying the previous non-zero value forever.
+  //
+  // We only treat a value as "real" when there is at least one reachable
+  // cluster that has actually reported capacity (totalCPU / totalMemoryGB > 0).
+  // Until then, any 0 we see is a placeholder, not a measurement.
+  const hasCpuCapacity = totalCPU > 0
+  const hasMemoryCapacity = totalMemoryGB > 0
+  const [cachedCpuUtil, setCachedCpuUtil] = useState<number | null>(null)
+  const [cachedMemoryUtil, setCachedMemoryUtil] = useState<number | null>(null)
+  // This effect intentionally calls setState to snapshot the last real value.
+  // react-hooks/set-state-in-effect flags this as a cascading-render pattern,
+  // but in this case the effect only fires when the capacity guards flip,
+  // so the cascade is bounded and the pattern is the simplest one compatible
+  // with the react-hooks/refs rule (which forbids reading `.current` during
+  // render).
+  /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
-    if (currentCpuUtil > 0) cachedCpuUtil.current = currentCpuUtil
-    if (currentMemoryUtil > 0) cachedMemoryUtil.current = currentMemoryUtil
-  }, [currentCpuUtil, currentMemoryUtil])
-  const cpuUtilization = currentCpuUtil > 0 ? currentCpuUtil : cachedCpuUtil.current
-  const memoryUtilization = currentMemoryUtil > 0 ? currentMemoryUtil : cachedMemoryUtil.current
+    if (hasCpuCapacity) setCachedCpuUtil(currentCpuUtil)
+    if (hasMemoryCapacity) setCachedMemoryUtil(currentMemoryUtil)
+  }, [currentCpuUtil, currentMemoryUtil, hasCpuCapacity, hasMemoryCapacity])
+  /* eslint-enable react-hooks/set-state-in-effect */
+  const cpuUtilization = hasCpuCapacity ? currentCpuUtil : (cachedCpuUtil ?? 0)
+  const memoryUtilization = hasMemoryCapacity ? currentMemoryUtil : (cachedMemoryUtil ?? 0)
 
   // Stats value getter
-  const getDashboardStatValue = useCallback((blockId: string): StatBlockValue => {
+  const getDashboardStatValue = (blockId: string): StatBlockValue => {
     switch (blockId) {
       case 'nodes':
         return { value: totalNodes, sublabel: t('common:nodes.totalNodes'), onClick: () => drillToAllNodes(), isClickable: totalNodes > 0 }
@@ -86,18 +105,16 @@ export function Nodes() {
       default:
         return { value: 0 }
     }
-  }, [reachableClusters, totalNodes, totalCPU, totalMemoryGB, totalPods, totalGPUs, cpuUtilization, memoryUtilization, drillToAllNodes, drillToAllGPU, drillToAllPods, drillToAllClusters, t])
+  }
 
-  const getStatValue = useCallback(
-    (blockId: string) => createMergedStatValueGetter(getDashboardStatValue, getUniversalStatValue)(blockId),
-    [getDashboardStatValue, getUniversalStatValue]
-  )
+  const getStatValue = (blockId: string) => createMergedStatValueGetter(getDashboardStatValue, getUniversalStatValue)(blockId)
 
   return (
     <DashboardPage
       title={t('common:nodes.title')}
       subtitle={t('common:nodes.subtitle')}
       icon="Server"
+      rightExtra={<RotatingTip page="nodes" />}
       storageKey={NODES_CARDS_KEY}
       defaultCards={DEFAULT_NODES_CARDS}
       statsType="compute"
@@ -109,8 +126,7 @@ export function Nodes() {
       hasData={totalNodes > 0}
       emptyState={{
         title: t('common:nodes.dashboardTitle'),
-        description: t('common:nodes.emptyDescription'),
-      }}
+        description: t('common:nodes.emptyDescription') }}
     >
       {/* Error Display */}
       {error && (

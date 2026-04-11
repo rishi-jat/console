@@ -5,13 +5,13 @@ import {
   Clock,
   Server,
   Bot,
-  Slack,
   Send,
   RefreshCw,
   ChevronDown,
   ChevronUp,
   ExternalLink,
 } from 'lucide-react'
+import { Slack } from '@/lib/icons'
 import { useAlerts, useSlackNotification, useSlackWebhooks } from '../../hooks/useAlerts'
 import { useMissions } from '../../hooks/useMissions'
 import { getSeverityIcon, getSeverityColor } from '../../types/alerts'
@@ -20,7 +20,7 @@ import { useToast } from '../ui/Toast'
 import { Button } from '../ui/Button'
 import { useTranslation } from 'react-i18next'
 import type { TFunction } from 'i18next'
-import { RETRY_DELAY_MS, TOAST_DISMISS_MS } from '../../lib/constants/network'
+import { TOAST_DISMISS_MS } from '../../lib/constants/network'
 
 // Time thresholds for relative time formatting
 const MINUTES_PER_HOUR = 60 // Minutes in an hour
@@ -85,13 +85,27 @@ export function AlertDetail({ alert, onClose }: AlertDetailProps) {
     onClose?.()
   }
 
+  // Track the diagnosis snapshot when "Analyze" was clicked so we can detect NEW results
+  const diagnosisAtStartRef = useRef(alert.aiDiagnosis)
+  const diagnosisTimerRef = useRef<number>(0)
+
   const handleRunDiagnosis = async () => {
+    diagnosisAtStartRef.current = alert.aiDiagnosis // snapshot before starting
     setIsRunningDiagnosis(true)
     runAIDiagnosis(alert.id)
-    // The diagnosis runs async via missions
-    const timeoutId = window.setTimeout(() => setIsRunningDiagnosis(false), RETRY_DELAY_MS)
-    timeoutsRef.current.push(timeoutId)
+    // Safety-net timeout: clear loading after 60s even if diagnosis never completes (#5714)
+    const AI_DIAGNOSIS_SAFETY_TIMEOUT_MS = 60_000
+    clearTimeout(diagnosisTimerRef.current) // clear any previous timer (Copilot followup)
+    diagnosisTimerRef.current = window.setTimeout(() => setIsRunningDiagnosis(false), AI_DIAGNOSIS_SAFETY_TIMEOUT_MS)
   }
+
+  // Clear loading state when a NEW diagnosis result arrives (#5714, Copilot followup)
+  useEffect(() => {
+    if (alert.aiDiagnosis && alert.aiDiagnosis !== diagnosisAtStartRef.current) {
+      setIsRunningDiagnosis(false)
+      clearTimeout(diagnosisTimerRef.current)
+    }
+  }, [alert.aiDiagnosis])
 
   const handleSendSlack = async (webhookId: string) => {
     setIsSendingSlack(true)
@@ -150,7 +164,7 @@ export function AlertDetail({ alert, onClose }: AlertDetailProps) {
       <div className="p-4 space-y-4">
         {/* Message */}
         <div>
-          <p className="text-sm text-foreground">{alert.message}</p>
+          <div className="text-sm text-foreground">{alert.message}</div>
         </div>
 
         {/* Meta Info */}
@@ -225,14 +239,14 @@ export function AlertDetail({ alert, onClose }: AlertDetailProps) {
               {alert.aiDiagnosis.summary && (
                 <div>
                   <span className="text-xs text-muted-foreground">{t('alerts.summary')}</span>
-                  <p className="text-sm text-foreground mt-1">{alert.aiDiagnosis.summary}</p>
+                  <div className="text-sm text-foreground mt-1">{alert.aiDiagnosis.summary}</div>
                 </div>
               )}
 
               {alert.aiDiagnosis.rootCause && (
                 <div>
                   <span className="text-xs text-muted-foreground">{t('alerts.rootCause')}</span>
-                  <p className="text-sm text-foreground mt-1">{alert.aiDiagnosis.rootCause}</p>
+                  <div className="text-sm text-foreground mt-1">{alert.aiDiagnosis.rootCause}</div>
                 </div>
               )}
 
@@ -261,9 +275,9 @@ export function AlertDetail({ alert, onClose }: AlertDetailProps) {
               )}
             </div>
           ) : (
-            <p className="text-sm text-muted-foreground">
+            <div className="text-sm text-muted-foreground">
               {t('alerts.noDiagnosisYet')}
-            </p>
+            </div>
           )}
         </div>
 
@@ -289,9 +303,9 @@ export function AlertDetail({ alert, onClose }: AlertDetailProps) {
               ))}
             </div>
             {slackSent && (
-              <p className="text-xs text-green-400 mt-2">
+              <div className="text-xs text-green-400 mt-2">
                 {t('alerts.slackSent')}
-              </p>
+              </div>
             )}
           </div>
         )}

@@ -12,12 +12,14 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useTranslation } from 'react-i18next'
 import { createPortal } from 'react-dom'
-import { X, Bug, Lightbulb, Send, CheckCircle2, ExternalLink, Linkedin, ImagePlus, Trash2, Copy, Check, AlertTriangle, Loader2 } from 'lucide-react'
+import { X, Bug, Lightbulb, Send, CheckCircle2, ExternalLink, ImagePlus, Trash2, Copy, Check, AlertTriangle, Loader2 } from 'lucide-react'
+import { Linkedin } from '@/lib/icons'
 import { ConfirmDialog } from '../../lib/modals'
 import { StatusBadge } from '../ui/StatusBadge'
 import { useRewards, REWARD_ACTIONS } from '../../hooks/useRewards'
 import { useToast } from '../ui/Toast'
 import { emitFeedbackSubmitted, emitLinkedInShare, emitScreenshotAttached, emitScreenshotUploadFailed, emitScreenshotUploadSuccess } from '../../lib/analytics'
+import { copyBlobToClipboard } from '../../lib/clipboard'
 import { useBranding } from '../../hooks/useBranding'
 import { FETCH_DEFAULT_TIMEOUT_MS, COPY_FEEDBACK_TIMEOUT_MS } from '../../lib/constants'
 import { FEEDBACK_UPLOAD_TIMEOUT_MS } from '../../lib/constants/network'
@@ -126,7 +128,16 @@ export function FeedbackModal({ isOpen, onClose, initialType = 'feature' }: Feed
     try {
       const res = await fetch(preview, { signal: AbortSignal.timeout(FETCH_DEFAULT_TIMEOUT_MS) })
       const blob = await res.blob()
-      await navigator.clipboard.write([new ClipboardItem({ [blob.type]: blob })])
+      // #6229: route through the shared lib/clipboard.copyBlobToClipboard
+      // helper which guards `navigator.clipboard.write` AND
+      // `typeof ClipboardItem === 'function'` so unsupported browsers
+      // (older Safari, Firefox <127, all browsers in non-secure contexts)
+      // get a clean false return instead of an unhandled exception.
+      const ok = await copyBlobToClipboard(blob)
+      if (!ok) {
+        showToast('Could not copy image to clipboard (browser may not support image copy)', 'error')
+        return
+      }
       setCopiedIndex(index)
       setTimeout(() => setCopiedIndex(null), COPY_FEEDBACK_TIMEOUT_MS)
     } catch {
@@ -185,8 +196,7 @@ export function FeedbackModal({ isOpen, onClose, initialType = 'feature' }: Feed
         description: description.trim(),
         request_type: type,
         target_repo: 'console',
-        ...(hasScreenshots && { screenshots: screenshotDataURIs }),
-      }, hasScreenshots ? { timeout: FEEDBACK_UPLOAD_TIMEOUT_MS } : undefined)
+        ...(hasScreenshots && { screenshots: screenshotDataURIs }) }, hasScreenshots ? { timeout: FEEDBACK_UPLOAD_TIMEOUT_MS } : undefined)
       if (hasScreenshots) emitScreenshotUploadSuccess(screenshotDataURIs.length)
 
       emitFeedbackSubmitted(type)
@@ -200,8 +210,7 @@ export function FeedbackModal({ isOpen, onClose, initialType = 'feature' }: Feed
       setSuccess({
         issueUrl: result.github_issue_url,
         screenshotsUploaded: result.screenshots_uploaded,
-        screenshotsFailed: result.screenshots_failed,
-      })
+        screenshotsFailed: result.screenshots_failed })
     } catch (err) {
       console.error('[Screenshot] Failed to submit feedback:', err)
       const message = err instanceof Error ? err.message : 'Failed to submit feedback'
@@ -213,7 +222,7 @@ export function FeedbackModal({ isOpen, onClose, initialType = 'feature' }: Feed
     }
   }
 
-  const forceClose = useCallback(() => {
+  const forceClose = () => {
     setShowDiscardConfirm(false)
     localStorage.removeItem(DRAFT_KEY)
     setSuccess(null)
@@ -222,7 +231,7 @@ export function FeedbackModal({ isOpen, onClose, initialType = 'feature' }: Feed
     setDescription('')
     setScreenshots([])
     onClose()
-  }, [onClose])
+  }
 
   // Use refs for dirty check so handleClose doesn't change on every keystroke
   const titleRef = useRef(title)
@@ -275,7 +284,7 @@ export function FeedbackModal({ isOpen, onClose, initialType = 'feature' }: Feed
   const coins = type === 'bug' ? REWARD_ACTIONS.bug_report.coins : REWARD_ACTIONS.feature_suggestion.coins
 
   return createPortal(
-    <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/60 backdrop-blur-2xl">
+    <div className="fixed inset-0 z-modal flex items-center justify-center bg-black/60 backdrop-blur-sm">
       <ConfirmDialog
         isOpen={showDiscardConfirm}
         onClose={() => setShowDiscardConfirm(false)}
@@ -557,7 +566,7 @@ export function FeedbackButton({ onClick }: { onClick: () => void }) {
   return (
     <button
       onClick={onClick}
-      className="fixed bottom-20 right-4 flex items-center gap-2 px-4 py-2.5 rounded-full bg-purple-500 hover:bg-purple-600 text-white shadow-lg transition-all hover:scale-105 z-40"
+      className="fixed bottom-20 right-4 flex items-center gap-2 px-4 py-2.5 rounded-full bg-purple-500 hover:bg-purple-600 text-white shadow-lg transition-all hover:scale-105 z-sticky"
       title="Submit feedback"
     >
       <Lightbulb className="w-4 h-4" />

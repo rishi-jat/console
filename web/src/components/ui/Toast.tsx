@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, useCallback, useEffect, useRef, ReactNode } from 'react'
+import { createContext, useContext, useState, useEffect, useRef, useCallback, useMemo, ReactNode } from 'react'
 import { X, Check, AlertTriangle, Info } from 'lucide-react'
 import { cn } from '../../lib/cn'
 import { Button } from './Button'
@@ -30,6 +30,8 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   const timeoutsRef = useRef<Map<string, number>>(new Map())
 
   const toastCounter = useRef(0)
+  // Auto-dismiss duration for transient toast notifications
+  const TOAST_AUTO_DISMISS_MS = 3_000
   const showToast = useCallback((message: string, type: ToastType = 'success') => {
     const id = `toast-${Date.now()}-${++toastCounter.current}`
     setToasts((prev) => {
@@ -38,13 +40,13 @@ export function ToastProvider({ children }: { children: ReactNode }) {
       return [...prev, { id, message, type }]
     })
 
-    // Auto-remove after 3 seconds (timeout is harmless if toast was deduplicated)
+    // Auto-remove after TOAST_AUTO_DISMISS_MS (timeout is harmless if toast was deduplicated)
     const timeoutId = window.setTimeout(() => {
       setToasts((prev) => prev.filter((t) => t.id !== id))
       if (timeoutsRef.current.has(id)) {
         timeoutsRef.current.delete(id)
       }
-    }, 3000)
+    }, TOAST_AUTO_DISMISS_MS)
     timeoutsRef.current.set(id, timeoutId)
   }, [])
 
@@ -67,8 +69,12 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     }
   }, [])
 
+  // #6149 — Stable context value so ToastProvider rendering (e.g. when
+  // toasts change) does not force a re-render of every useToast() consumer.
+  const contextValue = useMemo(() => ({ showToast }), [showToast])
+
   return (
-    <ToastContext.Provider value={{ showToast }}>
+    <ToastContext.Provider value={contextValue}>
       {children}
       <ToastContainer toasts={toasts} onRemove={removeToast} />
     </ToastContext.Provider>
@@ -88,7 +94,7 @@ function ToastContainer({ toasts, onRemove }: ToastContainerProps) {
       role="status"
       aria-live="polite"
       aria-atomic="false"
-      className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[10010] flex flex-col items-center space-y-2"
+      className="fixed bottom-6 left-1/2 -translate-x-1/2 z-toast flex flex-col items-center space-y-2"
     >
       {toasts.map((toast) => (
         <ToastItem key={toast.id} toast={toast} onRemove={() => onRemove(toast.id)} />
@@ -107,22 +113,19 @@ function ToastItem({ toast, onRemove }: ToastItemProps) {
     success: <Check className="w-4 h-4" />,
     error: <X className="w-4 h-4" />,
     warning: <AlertTriangle className="w-4 h-4" />,
-    info: <Info className="w-4 h-4" />,
-  }
+    info: <Info className="w-4 h-4" /> }
 
   const colors: Record<ToastType, string> = {
     success: 'bg-green-900/80 border-green-400/70 text-green-100',
     error: 'bg-red-900/80 border-red-400/70 text-red-100',
     warning: 'bg-yellow-900/80 border-yellow-400/70 text-yellow-100',
-    info: 'bg-blue-900/80 border-blue-400/70 text-blue-100',
-  }
+    info: 'bg-blue-900/80 border-blue-400/70 text-blue-100' }
 
   const iconColors: Record<ToastType, string> = {
     success: 'text-green-300',
     error: 'text-red-300',
     warning: 'text-yellow-300',
-    info: 'text-blue-300',
-  }
+    info: 'text-blue-300' }
 
   return (
     <div

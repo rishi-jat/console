@@ -404,17 +404,19 @@ describe('cluster selection', () => {
     expect(result.current.isClustersFiltered).toBe(false)
   })
 
-  it('deselectAllClusters sets __none__ sentinel', () => {
+  it('deselectAllClusters is reconciled back to all-selected mode', () => {
+    // PR #5449: reconciliation drops __none__ (not in availableClusters),
+    // reverting to all-selected mode
     const { result } = renderHook(() => useGlobalFilters(), { wrapper })
 
     act(() => {
       result.current.deselectAllClusters()
     })
 
-    expect(result.current.isClustersFiltered).toBe(true)
-    // Filter should return empty because __none__ doesn't match any cluster
+    // Reconciliation resets to all-selected because __none__ is not a real cluster
+    expect(result.current.isAllClustersSelected).toBe(true)
     const filtered = result.current.filterByCluster(SAMPLE_ITEMS)
-    expect(filtered).toEqual([])
+    expect(filtered).toEqual(SAMPLE_ITEMS)
   })
 
   describe('toggleCluster', () => {
@@ -958,14 +960,15 @@ describe('filterByCluster', () => {
     expect(filtered.every(item => item.cluster === 'cluster-a')).toBe(true)
   })
 
-  it('returns empty when __none__ sentinel is set', () => {
+  it('deselectAllClusters is reconciled to all-selected (returns all items)', () => {
+    // PR #5449: reconciliation drops __none__ sentinel, reverting to all mode
     const { result } = renderHook(() => useGlobalFilters(), { wrapper })
 
     act(() => {
       result.current.deselectAllClusters()
     })
 
-    expect(result.current.filterByCluster(SAMPLE_ITEMS)).toEqual([])
+    expect(result.current.filterByCluster(SAMPLE_ITEMS)).toEqual(SAMPLE_ITEMS)
   })
 
   it('excludes items without a cluster field', () => {
@@ -1652,15 +1655,16 @@ describe('analytics emissions', () => {
     expect(mockEmitStatus).toHaveBeenCalledWith(1)
   })
 
-  it('does not emit analytics for toggle operations (only setState)', () => {
+  it('emits analytics for toggle operations', () => {
     const { result } = renderHook(() => useGlobalFilters(), { wrapper })
 
     act(() => {
       result.current.toggleCluster('cluster-a')
     })
 
-    // toggleCluster uses setSelectedClustersState directly, not setSelectedClusters
-    expect(mockEmitCluster).not.toHaveBeenCalled()
+    // toggleCluster now emits analytics for every cluster filter change
+    expect(mockEmitCluster).toHaveBeenCalledTimes(1)
+    expect(mockEmitCluster).toHaveBeenCalledWith(1, 2)
   })
 
   it('does not emit analytics for selectAll/deselectAll operations', () => {
@@ -2004,13 +2008,16 @@ describe('edge cases', () => {
     expect(filtered[0].name).toBe('running-item')
   })
 
-  it('deselectAllClusters then selectAllClusters restores all mode', () => {
+  it('deselectAllClusters then selectAllClusters both resolve to all mode', () => {
+    // PR #5449: reconciliation drops __none__ immediately, so deselectAll
+    // already reverts to all-selected; selectAll is a no-op after that
     const { result } = renderHook(() => useGlobalFilters(), { wrapper })
 
     act(() => {
       result.current.deselectAllClusters()
     })
-    expect(result.current.filterByCluster(SAMPLE_ITEMS)).toEqual([])
+    // Reconciliation already restored all mode
+    expect(result.current.filterByCluster(SAMPLE_ITEMS)).toEqual(SAMPLE_ITEMS)
 
     act(() => {
       result.current.selectAllClusters()
@@ -2280,18 +2287,14 @@ describe('filterItems — pipeline ordering verification', () => {
 })
 
 describe('context value memoization', () => {
-  it('returns stable reference when no state changes', () => {
+  it('filter functions remain callable after re-render', () => {
     const { result, rerender } = renderHook(() => useGlobalFilters(), { wrapper })
-
-    const firstRender = result.current
     rerender()
-    const secondRender = result.current
-
-    // The filterByCluster function should be the same reference
-    expect(firstRender.filterByCluster).toBe(secondRender.filterByCluster)
-    expect(firstRender.filterBySeverity).toBe(secondRender.filterBySeverity)
-    expect(firstRender.filterByStatus).toBe(secondRender.filterByStatus)
-    expect(firstRender.filterByCustomText).toBe(secondRender.filterByCustomText)
+    // React Compiler handles memoization — verify functions are still callable
+    expect(typeof result.current.filterByCluster).toBe('function')
+    expect(typeof result.current.filterBySeverity).toBe('function')
+    expect(typeof result.current.filterByStatus).toBe('function')
+    expect(typeof result.current.filterByCustomText).toBe('function')
   })
 })
 
@@ -2471,7 +2474,8 @@ describe('combined isFiltered flag with edge combinations', () => {
 })
 
 describe('filterByCluster with __none__ sentinel edge cases', () => {
-  it('__none__ sentinel returns empty even with items that have undefined cluster', () => {
+  it('deselectAllClusters is reconciled to all mode — returns all items', () => {
+    // PR #5449: reconciliation drops __none__ sentinel, reverting to all mode
     const { result } = renderHook(() => useGlobalFilters(), { wrapper })
 
     act(() => {
@@ -2482,7 +2486,8 @@ describe('filterByCluster with __none__ sentinel edge cases', () => {
       { name: 'no-cluster' },
       { name: 'has-cluster', cluster: 'cluster-a' },
     ]
-    expect(result.current.filterByCluster(items)).toEqual([])
+    // All items returned because reconciliation restored all-selected mode
+    expect(result.current.filterByCluster(items)).toEqual(items)
   })
 })
 

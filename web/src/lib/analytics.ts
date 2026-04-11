@@ -15,7 +15,7 @@
 
 import { STORAGE_KEY_ANALYTICS_OPT_OUT, STORAGE_KEY_ANONYMOUS_USER_ID } from './constants'
 import { CHUNK_RELOAD_TS_KEY, isChunkLoadMessage } from './chunkErrors'
-import { isDemoMode } from './demoMode'
+import { isDemoMode, isNetlifyDeployment } from './demoMode'
 
 // DECOY Measurement ID — the proxy rewrites this to the real ID server-side.
 const GA_MEASUREMENT_ID = 'G-0000000000'
@@ -892,8 +892,23 @@ export function emitMissionCompleted(missionType: string, durationSec: number) {
   send('ksc_mission_completed', { mission_type: missionType, duration_sec: durationSec })
 }
 
-export function emitMissionError(missionType: string, errorCode: string) {
-  send('ksc_mission_error', { mission_type: missionType, error_code: errorCode })
+// Max characters to send in the error_detail dimension. GA4 caps event
+// parameter values at 100 chars, so anything longer is truncated to stay
+// within the limit while still surfacing the leading diagnostic text.
+const MISSION_ERROR_DETAIL_MAX_LEN = 100
+
+export function emitMissionError(
+  missionType: string,
+  errorCode: string,
+  errorDetail?: string
+) {
+  const trimmedDetail = errorDetail?.trim()
+  send('ksc_mission_error', {
+    mission_type: missionType,
+    error_code: errorCode,
+    error_detail: trimmedDetail
+      ? trimmedDetail.slice(0, MISSION_ERROR_DETAIL_MAX_LEN)
+      : '' })
 }
 
 export function emitMissionRated(missionType: string, rating: string) {
@@ -966,6 +981,45 @@ export function emitScreenshotUploadSuccess(screenshotCount: number) {
   send('ksc_screenshot_upload_success', { screenshot_count: screenshotCount })
 }
 
+// ── NPS Survey ────────────────────────────────────────────────────
+
+/** Fired when the NPS survey widget becomes visible */
+export function emitNPSSurveyShown() {
+  send('ksc_nps_survey_shown')
+}
+
+/** Fired when user submits an NPS response */
+export function emitNPSResponse(score: number, category: string, feedbackLength?: number) {
+  send('ksc_nps_response', {
+    nps_score: score,
+    nps_category: category,
+    ...(feedbackLength !== undefined && { nps_feedback_length: feedbackLength }),
+  })
+}
+
+/** Fired when user dismisses the NPS widget without responding */
+export function emitNPSDismissed(dismissCount: number) {
+  send('ksc_nps_dismissed', { dismiss_count: dismissCount })
+}
+
+// ── Orbit (Recurring Maintenance) ─────────────────────────────────
+
+export function emitOrbitMissionCreated(orbitType: string, cadence: string) {
+  send('ksc_orbit_mission_created', { orbit_type: orbitType, cadence })
+}
+
+export function emitOrbitMissionRun(orbitType: string, result: string) {
+  send('ksc_orbit_mission_run', { orbit_type: orbitType, result })
+}
+
+export function emitGroundControlDashboardCreated(cardCount: number) {
+  send('ksc_ground_control_dashboard_created', { card_count: cardCount })
+}
+
+export function emitGroundControlCardRequestOpened(project: string) {
+  send('ksc_ground_control_card_request', { project })
+}
+
 // ── Errors ─────────────────────────────────────────────────────────
 
 // Maximum length for error detail strings to avoid oversized payloads
@@ -1002,6 +1056,7 @@ function wasAlreadyReported(msg: string): boolean {
 
 export function emitError(category: string, detail: string, cardId?: string) {
   send('ksc_error', {
+    error_code: category,
     error_category: category,
     error_detail: detail.slice(0, ERROR_DETAIL_MAX_LEN),
     error_page: window.location.pathname,
@@ -1138,6 +1193,9 @@ export function startGlobalErrorTracking() {
       // send(). The kubectlProxy try/catch handles these; they surface here only
       // due to browser microtask ordering.
       if (msg.includes('send was called before connect') || msg.includes('InvalidStateError')) return
+      // Skip BackendUnavailableError on Netlify / console.kubestellar.io — expected
+      // because the Go backend is not deployed there (demo mode uses MSW).
+      if (isNetlifyDeployment && msg.includes('Backend API is currently unavailable')) return
       emitError('unhandled_rejection', msg)
     } finally {
       isEmitting = false
@@ -2035,4 +2093,9 @@ export function emitTipShown(page: string, tip: string) {
 /** Fired when user's visit streak increments (consecutive days visiting) */
 export function emitStreakDay(streakCount: number) {
   send('ksc_streak_day', { streak_count: streakCount })
+}
+
+/** Fired when a user clicks a blog post link; `title` is the clicked post title */
+export function emitBlogPostClicked(title: string) {
+  send('ksc_blog_post_clicked', { blog_title: title })
 }

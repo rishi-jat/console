@@ -1,6 +1,6 @@
-import { ReactNode, useRef, useState, useEffect, useCallback } from 'react'
+import { ReactNode, useRef, useState, useEffect } from 'react'
 import { createPortal } from 'react-dom'
-import { LucideIcon, CheckCircle, AlertTriangle, Info, Search, Filter, ChevronDown, ChevronRight, Server, Stethoscope, Wrench } from 'lucide-react'
+import { LucideIcon, CheckCircle, AlertTriangle, Info, Search, Filter, ChevronDown, ChevronRight, Server, Stethoscope, Wrench, XCircle } from 'lucide-react'
 import { useMissions } from '../../hooks/useMissions'
 import { useApiKeyCheck, ApiKeyPromptModal } from '../../components/cards/console-missions/shared'
 import { Skeleton } from '../../components/ui/Skeleton'
@@ -33,8 +33,7 @@ export function CardSkeleton({
   type = 'list',
   showHeader = true,
   showSearch = false,
-  rowHeight,
-}: CardSkeletonProps) {
+  rowHeight }: CardSkeletonProps) {
   const defaultHeight = type === 'table' ? 48 : type === 'metric' ? 80 : 80
   const height = rowHeight ?? defaultHeight
 
@@ -93,7 +92,7 @@ export interface CardEmptyStateProps {
   /** Secondary message */
   message?: string
   /** Variant determines color scheme */
-  variant?: 'success' | 'info' | 'warning' | 'neutral'
+  variant?: 'success' | 'info' | 'warning' | 'error' | 'neutral'
   /** Optional action button */
   action?: {
     label: string
@@ -105,32 +104,30 @@ const emptyStateVariants = {
   success: {
     iconBg: 'bg-green-500/10',
     iconColor: 'text-green-400',
-    icon: CheckCircle,
-  },
+    icon: CheckCircle },
   info: {
     iconBg: 'bg-blue-500/10',
     iconColor: 'text-blue-400',
-    icon: Info,
-  },
+    icon: Info },
   warning: {
     iconBg: 'bg-yellow-500/10',
     iconColor: 'text-yellow-400',
-    icon: AlertTriangle,
-  },
+    icon: AlertTriangle },
+  error: {
+    iconBg: 'bg-red-500/10',
+    iconColor: 'text-red-400',
+    icon: XCircle },
   neutral: {
     iconBg: 'bg-secondary',
     iconColor: 'text-muted-foreground',
-    icon: Info,
-  },
-}
+    icon: Info } }
 
 export function CardEmptyState({
   icon,
   title,
   message,
   variant = 'neutral',
-  action,
-}: CardEmptyStateProps) {
+  action }: CardEmptyStateProps) {
   const variantConfig = emptyStateVariants[variant]
   const Icon = icon || variantConfig.icon
 
@@ -212,18 +209,17 @@ export function CardSearchInput({
   onChange,
   placeholder = 'Search...',
   className = '',
-  debounceMs,
-}: CardSearchInputProps) {
+  debounceMs }: CardSearchInputProps) {
   const cardType = useCardType()
   const [localValue, setLocalValue] = useState(value)
-  const timerRef = useRef<ReturnType<typeof setTimeout>>()
+  const timerRef = useRef<ReturnType<typeof setTimeout>>(undefined)
 
   // Sync external value changes
   useEffect(() => {
     setLocalValue(value)
   }, [value])
 
-  const handleChange = useCallback((newValue: string) => {
+  const handleChange = (newValue: string) => {
     setLocalValue(newValue)
     if (debounceMs && debounceMs > 0) {
       clearTimeout(timerRef.current)
@@ -231,15 +227,15 @@ export function CardSearchInput({
     } else {
       onChange(newValue)
     }
-  }, [onChange, debounceMs])
+  }
 
   // Fire analytics when user finishes typing (on blur) to avoid per-keystroke spam
-  const handleBlur = useCallback(() => {
+  const handleBlur = () => {
     const current = debounceMs ? localValue : value
     if (current.length > 0) {
       emitCardSearchUsed(current.length, cardType)
     }
-  }, [debounceMs, localValue, value, cardType])
+  }
 
   // Cleanup timer on unmount
   useEffect(() => () => clearTimeout(timerRef.current), [])
@@ -277,7 +273,7 @@ export interface CardClusterFilterProps {
   /** Set dropdown visibility */
   setIsOpen: (open: boolean) => void
   /** Ref for click outside handling */
-  containerRef: React.RefObject<HTMLDivElement>
+  containerRef: React.RefObject<HTMLDivElement | null>
   /** Minimum number of clusters required to show filter (default: 2) */
   minClusters?: number
 }
@@ -290,8 +286,7 @@ export function CardClusterFilter({
   isOpen,
   setIsOpen,
   containerRef,
-  minClusters = 2,
-}: CardClusterFilterProps) {
+  minClusters = 2 }: CardClusterFilterProps) {
   const cardType = useCardType()
   const buttonRef = useRef<HTMLButtonElement>(null)
   const [dropdownPos, setDropdownPos] = useState<{ top: number; left: number } | null>(null)
@@ -301,8 +296,7 @@ export function CardClusterFilter({
       const rect = buttonRef.current.getBoundingClientRect()
       setDropdownPos({
         top: rect.bottom + 4,
-        left: Math.max(8, rect.right - 192),
-      })
+        left: Math.max(8, rect.right - 192) })
     } else {
       setDropdownPos(null)
     }
@@ -327,7 +321,7 @@ export function CardClusterFilter({
 
       {isOpen && dropdownPos && createPortal(
         <div
-          className="fixed w-48 max-h-48 overflow-y-auto rounded-lg bg-card border border-border shadow-lg z-50"
+          className="fixed w-48 max-h-48 overflow-y-auto rounded-lg bg-card border border-border shadow-lg z-dropdown"
           style={{ top: dropdownPos.top, left: dropdownPos.left }}
           onMouseDown={e => e.stopPropagation()}
           onKeyDown={(e) => {
@@ -350,16 +344,19 @@ export function CardClusterFilter({
               All clusters
             </button>
             {availableClusters.map((cluster) => {
-              // Determine cluster state for status indicator
+              // Determine cluster state for status indicator.
+              // Pass `cluster.healthy` through as-is (don't default to true)
+              // so clusters with no health signal surface as `unknown`
+              // rather than silently appearing healthy (#5923, #5942).
               const clusterState: ClusterState = cluster.healthy !== undefined || cluster.reachable !== undefined
                 ? getClusterState(
-                  cluster.healthy ?? true,
+                  cluster.healthy,
                   cluster.reachable,
                   cluster.nodeCount,
                   undefined,
                   cluster.errorType
                 )
-                : 'healthy'
+                : 'unknown'
 
               const isUnreachable = cluster.reachable === false
 
@@ -428,8 +425,7 @@ export function useDropdownPortal(isOpen: boolean) {
       const rect = triggerRef.current.getBoundingClientRect()
       setStyle({
         top: rect.bottom + DROPDOWN_GAP,
-        left: Math.max(8, rect.right - DROPDOWN_WIDTH),
-      })
+        left: Math.max(8, rect.right - DROPDOWN_WIDTH) })
     } else {
       setStyle(null)
     }
@@ -485,8 +481,7 @@ const listItemVariants = {
   success: { bg: 'bg-green-500/20', border: 'border-green-500/20' },
   warning: { bg: 'bg-yellow-500/20', border: 'border-yellow-500/20' },
   error: { bg: 'bg-red-500/20', border: 'border-red-500/20' },
-  info: { bg: 'bg-blue-500/20', border: 'border-blue-500/20' },
-}
+  info: { bg: 'bg-blue-500/20', border: 'border-blue-500/20' } }
 
 export function CardListItem({
   onClick,
@@ -496,8 +491,7 @@ export function CardListItem({
   showChevron = true,
   children,
   title,
-  dataTour,
-}: CardListItemProps) {
+  dataTour }: CardListItemProps) {
   const cardType = useCardType()
   const variantConfig = listItemVariants[variant]
   const bg = bgClass || variantConfig.bg
@@ -517,8 +511,7 @@ export function CardListItem({
       {...(handleClick ? {
         role: 'button' as const,
         tabIndex: 0,
-        onKeyDown: (e: React.KeyboardEvent) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleClick() } },
-      } : {})}
+        onKeyDown: (e: React.KeyboardEvent) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleClick() } } } : {})}
       title={title}
     >
       <div className="flex items-start gap-3">
@@ -552,16 +545,14 @@ const countVariants = {
   default: 'bg-secondary text-muted-foreground',
   success: 'bg-green-500/20 text-green-400',
   warning: 'bg-yellow-500/20 text-yellow-400',
-  error: 'bg-red-500/20 text-red-400',
-}
+  error: 'bg-red-500/20 text-red-400' }
 
 export function CardHeader({
   title,
   count,
   countVariant = 'default',
   extra,
-  controls,
-}: CardHeaderProps) {
+  controls }: CardHeaderProps) {
   return (
     <div className="flex items-center justify-between mb-3">
       <div className="flex items-center gap-2">
@@ -596,14 +587,12 @@ const statusBadgeVariants = {
   warning: 'bg-yellow-500/20 text-yellow-400',
   error: 'bg-red-500/20 text-red-400',
   info: 'bg-blue-500/20 text-blue-400',
-  neutral: 'bg-secondary text-muted-foreground',
-}
+  neutral: 'bg-secondary text-muted-foreground' }
 
 export function CardStatusBadge({
   status,
   variant = 'neutral',
-  size = 'sm',
-}: CardStatusBadgeProps) {
+  size = 'sm' }: CardStatusBadgeProps) {
   const sizeClasses = size === 'sm' ? 'text-xs px-2 py-0.5' : 'text-sm px-2.5 py-1'
 
   return (
@@ -681,7 +670,7 @@ export interface CardControlsRowProps {
     onClear: () => void
     isOpen: boolean
     setIsOpen: (open: boolean) => void
-    containerRef: React.RefObject<HTMLDivElement>
+    containerRef: React.RefObject<HTMLDivElement | null>
     minClusters?: number
   }
   /** Cluster indicator showing selected/total count */
@@ -718,8 +707,7 @@ export function CardControlsRow({
   clusterIndicator,
   cardControls,
   extra,
-  className = '',
-}: CardControlsRowProps) {
+  className = '' }: CardControlsRowProps) {
   return (
     <div className={`flex items-center gap-2 mb-3 ${className}`}>
       {clusterIndicator && (
@@ -785,8 +773,7 @@ export function CardPaginationFooter({
   totalItems,
   itemsPerPage,
   onPageChange,
-  needsPagination,
-}: CardPaginationFooterProps) {
+  needsPagination }: CardPaginationFooterProps) {
   const cardType = useCardType()
 
   if (!needsPagination) return null
@@ -863,8 +850,7 @@ export function CardAIActions({
   diagnosePrompt,
   repairPrompt,
   onDiagnose,
-  onRepair,
-}: CardAIActionsProps) {
+  onRepair }: CardAIActionsProps) {
   const { startMission } = useMissions()
   const { showKeyPrompt, checkKeyAndRun, goToSettings, dismissPrompt } = useApiKeyCheck()
 
@@ -874,7 +860,7 @@ export function CardAIActions({
   const issuesList = issues.map(i => `- ${i.name}: ${i.message}`).join('\n')
   const hasIssues = issues.length > 0
 
-  const handleDiagnose = useCallback((e: React.MouseEvent) => {
+  const handleDiagnose = (e: React.MouseEvent) => {
     e.stopPropagation()
     if (onDiagnose) { onDiagnose(e); return }
     checkKeyAndRun(() => {
@@ -891,12 +877,11 @@ Please provide:
 1. Health assessment summary
 2. Root cause analysis for any issues
 3. Recommended actions to resolve`,
-        context: { kind, name, namespace, cluster, status, issues, ...additionalContext },
-      })
+        context: { kind, name, namespace, cluster, status, issues, ...additionalContext } })
     })
-  }, [checkKeyAndRun, startMission, kind, name, namespace, cluster, status, issues, hasIssues, issuesList, loc, on, additionalContext, onDiagnose, diagnosePrompt])
+  }
 
-  const handleRepair = useCallback((e: React.MouseEvent) => {
+  const handleRepair = (e: React.MouseEvent) => {
     e.stopPropagation()
     if (onRepair) { onRepair(e); return }
     checkKeyAndRun(() => {
@@ -915,10 +900,9 @@ For each issue, please:
 2. Suggest a fix with the exact kubectl commands
 3. Explain potential side effects
 4. Apply fixes step by step with my confirmation`,
-        context: { kind, name, namespace, cluster, status, issues, ...additionalContext },
-      })
+        context: { kind, name, namespace, cluster, status, issues, ...additionalContext } })
     })
-  }, [checkKeyAndRun, startMission, kind, name, namespace, cluster, status, issues, hasIssues, issuesList, loc, on, additionalContext, onRepair, repairPrompt, repairLabel])
+  }
 
   return (
     <div
@@ -968,3 +952,4 @@ export function MetricTile({ label, value, colorClass, icon }: {
     </div>
   )
 }
+

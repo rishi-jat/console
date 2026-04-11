@@ -1,4 +1,4 @@
-import { useEffect, useCallback, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useSearchParams, useLocation, useNavigate } from 'react-router-dom'
 import { GitCompare, CheckSquare, Square, ChevronDown, ChevronRight, AlertCircle } from 'lucide-react'
 import { Button } from '../ui/Button'
@@ -9,10 +9,26 @@ import { useUniversalStats, createMergedStatValueGetter } from '../../hooks/useU
 import { StatBlockValue } from '../ui/StatsOverview'
 import { DashboardPage } from '../../lib/dashboards/DashboardPage'
 import { getDefaultCards } from '../../config/dashboards'
+import { ensureCardInDashboard } from '../../lib/dashboards/migrateStorageKey'
+import { RotatingTip } from '../ui/RotatingTip'
 import { ROUTES } from '../../config/routes'
 import { useTranslation } from 'react-i18next'
 
 const COMPUTE_CARDS_KEY = 'kubestellar-compute-cards'
+
+// Ensure new virtualization cards are present in existing saved layouts.
+// IMPORTANT: Use `card_type` (snake_case) to match the DashboardCard interface.
+// Previously this used `cardType` which caused card.card_type to be undefined,
+// crashing formatCardTitle() with "cardType is undefined" when clicking the
+// "nodes" stat block from the My Clusters dashboard (issue #5902).
+ensureCardInDashboard(COMPUTE_CARDS_KEY, 'vcluster_status', {
+  id: 'compute-6',
+  card_type: 'vcluster_status',
+  position: { w: 6, h: 3, x: 0, y: 6 } })
+ensureCardInDashboard(COMPUTE_CARDS_KEY, 'kubevirt_status', {
+  id: 'compute-7',
+  card_type: 'kubevirt_status',
+  position: { w: 6, h: 3, x: 6, y: 6 } })
 
 // Default cards for the compute dashboard
 const DEFAULT_COMPUTE_CARDS = getDefaultCards('compute')
@@ -28,8 +44,7 @@ export function Compute() {
   const error = clustersError
   const {
     selectedClusters: globalSelectedClusters,
-    isAllClustersSelected,
-  } = useGlobalFilters()
+    isAllClustersSelected } = useGlobalFilters()
   const { drillToResources } = useDrillDownActions()
   const { getStatValue: getUniversalStatValue } = useUniversalStats()
 
@@ -46,10 +61,12 @@ export function Compute() {
     }
   }, [searchParams, setSearchParams, location.pathname])
 
-  // Trigger refresh when navigating to this page (location.key changes on each navigation)
+  // Trigger refresh only when navigating TO this page (not on every navigation event)
   useEffect(() => {
-    refetch()
-  }, [location.key]) // eslint-disable-line react-hooks/exhaustive-deps
+    if (location.pathname === '/compute') {
+      refetch()
+    }
+  }, [location.key, location.pathname]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Filter clusters based on global selection
   const filteredClusters = clusters.filter(c =>
@@ -66,12 +83,16 @@ export function Compute() {
     totalPods: reachableClusters.reduce((sum, c) => sum + (c.podCount || 0), 0),
     totalGPUs: gpuNodes
       .filter(node => isAllClustersSelected || globalSelectedClusters.includes(node.cluster.split('/')[0]))
-      .reduce((sum, node) => sum + node.gpuCount, 0),
-  }
+      .reduce((sum, node) => sum + node.gpuCount, 0) }
 
-  // Check if we have any reachable clusters with actual data (not refreshing)
+  // Check if we have any reachable clusters with actual data (not refreshing).
+  // A cluster counts as "has data" as soon as nodeCount has been reported —
+  // even if the reported value is 0. Previously, valid zero-node clusters were
+  // treated as "no data" and rendered as '-' (issue #6106). Zero nodes is a
+  // meaningful value (e.g. a newly-provisioned cluster before any worker is
+  // attached), not a missing one.
   const hasActualData = filteredClusters.some(c =>
-    c.reachable !== false && c.nodeCount !== undefined && c.nodeCount > 0
+    c.reachable !== false && c.nodeCount !== undefined
   )
 
   // Cache the last known good stats to show during refresh
@@ -123,7 +144,7 @@ export function Compute() {
   })()
 
   // Stats value getter for the configurable StatsOverview component
-  const getDashboardStatValue = useCallback((blockId: string): StatBlockValue => {
+  const getDashboardStatValue = (blockId: string): StatBlockValue => {
     switch (blockId) {
       case 'nodes':
         return { value: formatStatValue(stats?.totalNodes || 0, hasDataToShow), sublabel: 'total nodes', onClick: drillToResources, isClickable: hasDataToShow }
@@ -144,15 +165,12 @@ export function Compute() {
       default:
         return { value: '-', sublabel: '' }
     }
-  }, [stats, hasDataToShow, cpuUtilization, memoryUtilization, drillToResources])
+  }
 
-  const getStatValue = useCallback(
-    (blockId: string) => createMergedStatValueGetter(getDashboardStatValue, getUniversalStatValue)(blockId),
-    [getDashboardStatValue, getUniversalStatValue]
-  )
+  const getStatValue = (blockId: string) => createMergedStatValueGetter(getDashboardStatValue, getUniversalStatValue)(blockId)
 
   // Cluster comparison handlers
-  const toggleClusterSelection = useCallback((clusterName: string) => {
+  const toggleClusterSelection = (clusterName: string) => {
     setSelectedForComparison(prev => {
       if (prev.includes(clusterName)) {
         return prev.filter(name => name !== clusterName)
@@ -161,17 +179,17 @@ export function Compute() {
       if (prev.length >= 4) return prev
       return [...prev, clusterName]
     })
-  }, [])
+  }
 
-  const handleCompare = useCallback(() => {
+  const handleCompare = () => {
     if (selectedForComparison.length >= 2) {
-      navigate(`${ROUTES.COMPUTE_COMPARE}?clusters=${selectedForComparison.join(',')}`)
+      navigate(`${ROUTES.COMPUTE_COMPARE}?clusters=${selectedForComparison.map(encodeURIComponent).join(',')}`)
     }
-  }, [selectedForComparison, navigate])
+  }
 
-  const clearSelection = useCallback(() => {
+  const clearSelection = () => {
     setSelectedForComparison([])
-  }, [])
+  }
 
   // Cluster comparison section (rendered between stats and cards)
   const clusterComparisonSection = (
@@ -283,6 +301,7 @@ export function Compute() {
       title="Compute"
       subtitle="Monitor compute resources across clusters"
       icon="Cpu"
+      rightExtra={<RotatingTip page="compute" />}
       storageKey={COMPUTE_CARDS_KEY}
       defaultCards={DEFAULT_COMPUTE_CARDS}
       statsType="compute"
@@ -295,8 +314,7 @@ export function Compute() {
       beforeCards={clusterComparisonSection}
       emptyState={{
         title: 'Compute Dashboard',
-        description: 'Add cards to monitor CPU and memory utilization, node health, and resource quotas across your clusters.',
-      }}
+        description: 'Add cards to monitor CPU and memory utilization, node health, and resource quotas across your clusters.' }}
     >
       {/* Error Display */}
       {error && (

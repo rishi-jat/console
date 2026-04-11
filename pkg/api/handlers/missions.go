@@ -313,11 +313,15 @@ func (h *MissionsHandler) BrowseConsoleKB(c *fiber.Ctx) error {
 		return c.Send(body)
 	}
 
-	// Files to hide from the browser UI — infrastructure/metadata files that
-	// are not missions and would confuse users browsing the library.
+	// Files and directories to hide from the browser UI — infrastructure
+	// and metadata entries that are not missions and would confuse users.
 	hiddenFiles := map[string]bool{
-		".gitkeep":   true,
-		"index.json": true,
+		".gitkeep":         true,
+		"index.json":       true,
+		"search-state.json": true,
+	}
+	hiddenDirs := map[string]bool{
+		".github": true,
 	}
 
 	var entries []fiber.Map
@@ -329,6 +333,14 @@ func (h *MissionsHandler) BrowseConsoleKB(c *fiber.Ctx) error {
 		name, _ := e["name"].(string)
 		// Skip infrastructure files that are not missions
 		if entryType == "file" && hiddenFiles[name] {
+			continue
+		}
+		// Skip internal directories (e.g. .github)
+		if entryType == "directory" && hiddenDirs[name] {
+			continue
+		}
+		// Skip dotfiles/dotdirs not explicitly listed above
+		if strings.HasPrefix(name, ".") {
 			continue
 		}
 		path, _ := e["path"].(string)
@@ -600,10 +612,22 @@ func (h *MissionsHandler) ShareToGitHub(c *fiber.Ctx) error {
 		return c.Status(502).JSON(fiber.Map{"error": "fork response missing full_name"})
 	}
 
-	// Step 2: Get HEAD SHA from fork's main branch, then create new branch ref.
+	// Detect the target repo's default branch (e.g. "main", "master", or custom).
+	// The fork response includes the parent's default_branch, but we also fall back
+	// to querying the upstream repo directly if the field is missing.
+	defaultBranch := "main"
+	if parent, ok := forkData["parent"].(map[string]interface{}); ok {
+		if db, ok := parent["default_branch"].(string); ok && db != "" {
+			defaultBranch = db
+		}
+	} else if db, ok := forkData["default_branch"].(string); ok && db != "" {
+		defaultBranch = db
+	}
+
+	// Step 2: Get HEAD SHA from fork's default branch, then create new branch ref.
 	// After fork creation, GitHub may not have the ref ready immediately (#2382).
 	// Retry with exponential backoff to handle this race condition.
-	mainRefURL := fmt.Sprintf("%s/repos/%s/git/ref/heads/main", h.githubAPIURL, forkFullName)
+	mainRefURL := fmt.Sprintf("%s/repos/%s/git/ref/heads/%s", h.githubAPIURL, forkFullName, defaultBranch)
 	var headSHA string
 	backoff := forkHeadSHAInitialBackoff
 	for attempt := 0; attempt < forkHeadSHAMaxRetries; attempt++ {
@@ -643,7 +667,7 @@ func (h *MissionsHandler) ShareToGitHub(c *fiber.Ctx) error {
 		}
 	}
 	if headSHA == "" {
-		return c.Status(502).JSON(fiber.Map{"error": "could not resolve HEAD SHA for fork's main branch after retries"})
+		return c.Status(502).JSON(fiber.Map{"error": fmt.Sprintf("could not resolve HEAD SHA for fork's %s branch after retries", defaultBranch)})
 	}
 
 	refURL := fmt.Sprintf("%s/repos/%s/git/refs", h.githubAPIURL, forkFullName)
@@ -714,7 +738,7 @@ func (h *MissionsHandler) ShareToGitHub(c *fiber.Ctx) error {
 	prPayload, err := json.Marshal(map[string]interface{}{
 		"title": req.Message,
 		"head":  strings.Split(forkFullName, "/")[0] + ":" + req.Branch,
-		"base":  "main",
+		"base":  defaultBranch,
 		"body":  "Mission shared via KubeStellar Console",
 	})
 	if err != nil {

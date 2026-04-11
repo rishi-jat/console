@@ -1,5 +1,6 @@
-import { useMemo, useCallback } from 'react'
-import { ChevronRight } from 'lucide-react'
+import { useMemo } from 'react'
+import { useNavigate } from 'react-router-dom'
+import { ChevronRight, Plus, Rocket } from 'lucide-react'
 import { useDeploymentIssues, usePodIssues, useClusters, useDeployments } from '../../hooks/useMCP'
 import { useGlobalFilters } from '../../hooks/useGlobalFilters'
 import { useDrillDownActions } from '../../hooks/useDrillDown'
@@ -13,6 +14,8 @@ import { Skeleton } from '../ui/Skeleton'
 import { StatBlockValue } from '../ui/StatsOverview'
 import { DashboardPage } from '../../lib/dashboards/DashboardPage'
 import { getDefaultCards } from '../../config/dashboards'
+import { RotatingTip } from '../ui/RotatingTip'
+import { ROUTES } from '../../config/routes'
 import { useTranslation } from 'react-i18next'
 
 const WORKLOADS_CARDS_KEY = 'kubestellar-workloads-cards'
@@ -31,6 +34,7 @@ interface AppSummary {
 
 export function Workloads() {
   const { t } = useTranslation()
+  const navigate = useNavigate()
   // Data fetching
   const { issues: podIssues, isLoading: podIssuesLoading, isRefreshing: podIssuesRefreshing, lastUpdated, refetch: refetchPodIssues } = usePodIssues()
   const { issues: deploymentIssues, isLoading: deploymentIssuesLoading, isRefreshing: deploymentIssuesRefreshing, refetch: refetchDeploymentIssues } = useDeploymentIssues()
@@ -51,18 +55,17 @@ export function Workloads() {
   const showSkeletons = ((allDeployments.length === 0 && podIssues.length === 0 && deploymentIssues.length === 0) && isLoading) || forceSkeletonForOffline || isModeSwitching
 
   // Combined refresh
-  const handleRefresh = useCallback(() => {
+  const handleRefresh = () => {
     refetchPodIssues()
     refetchDeploymentIssues()
     refetchDeployments()
     refetchClusters()
-  }, [refetchPodIssues, refetchDeploymentIssues, refetchDeployments, refetchClusters])
+  }
 
   const {
     selectedClusters: globalSelectedClusters,
     isAllClustersSelected,
-    customFilter,
-  } = useGlobalFilters()
+    customFilter } = useGlobalFilters()
 
   // Group applications by namespace with global filter applied
   const apps = useMemo(() => {
@@ -112,8 +115,7 @@ export function Workloads() {
           deploymentCount: 0,
           podIssues: 0,
           deploymentIssues: 0,
-          status: 'healthy',
-        })
+          status: 'healthy' })
       }
       const app = appMap.get(key)!
       app.deploymentCount++
@@ -128,8 +130,7 @@ export function Workloads() {
           deploymentCount: 0,
           podIssues: 0,
           deploymentIssues: 0,
-          status: 'healthy',
-        })
+          status: 'healthy' })
       }
       const app = appMap.get(key)!
       app.podIssues++
@@ -145,8 +146,7 @@ export function Workloads() {
           deploymentCount: 0,
           podIssues: 0,
           deploymentIssues: 0,
-          status: 'healthy',
-        })
+          status: 'healthy' })
       }
       const app = appMap.get(key)!
       app.deploymentIssues++
@@ -171,11 +171,10 @@ export function Workloads() {
     critical: apps.filter(a => a.status === 'error').length,
     totalDeployments: apps.reduce((sum, a) => sum + a.deploymentCount, 0),
     totalPodIssues: podIssues.length,
-    totalDeploymentIssues: deploymentIssues.length,
-  }), [apps, podIssues, deploymentIssues])
+    totalDeploymentIssues: deploymentIssues.length }), [apps, podIssues, deploymentIssues])
 
   // Dashboard-specific stats value getter
-  const getDashboardStatValue = useCallback((blockId: string): StatBlockValue => {
+  const getDashboardStatValue = (blockId: string): StatBlockValue => {
     switch (blockId) {
       case 'namespaces':
         return { value: stats.total, sublabel: 'active namespaces', onClick: () => drillToAllNamespaces(), isClickable: apps.length > 0 }
@@ -194,13 +193,26 @@ export function Workloads() {
       default:
         return { value: '-', sublabel: '' }
     }
-  }, [stats, apps, drillToAllNamespaces, drillToAllDeployments, drillToAllPods])
+  }
 
   return (
     <DashboardPage
       title="Workloads"
       subtitle="View and manage deployed applications across clusters"
       icon="Layers"
+      rightExtra={
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => navigate(ROUTES.DEPLOY)}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-purple-600 hover:bg-purple-500 text-white transition-colors"
+            title={t('workloads.addWorkload', 'Deploy a new workload')}
+          >
+            <Plus className="w-3.5 h-3.5" />
+            {t('workloads.addWorkload', 'Add Workload')}
+          </button>
+          <RotatingTip page="workloads" />
+        </div>
+      }
       storageKey={WORKLOADS_CARDS_KEY}
       defaultCards={DEFAULT_WORKLOAD_CARDS}
       statsType="workloads"
@@ -212,8 +224,7 @@ export function Workloads() {
       hasData={apps.length > 0 || !showSkeletons}
       emptyState={{
         title: 'Workloads Dashboard',
-        description: 'Add cards to monitor deployments, pods, and application health across your clusters.',
-      }}
+        description: 'Add cards to monitor deployments, pods, and application health across your clusters.' }}
     >
       {/* Workloads List */}
       {showSkeletons ? (
@@ -236,8 +247,15 @@ export function Workloads() {
       ) : apps.length === 0 ? (
         <div className="text-center py-12">
           <div className="text-6xl mb-4">📦</div>
-          <p className="text-lg text-foreground">No workloads found</p>
-          <p className="text-sm text-muted-foreground">No deployments detected across your clusters</p>
+          <p className="text-lg text-foreground">{t('workloads.noWorkloadsTitle', 'No workloads found')}</p>
+          <p className="text-sm text-muted-foreground mb-6">{t('workloads.noWorkloadsDesc', 'No deployments detected across your clusters')}</p>
+          <button
+            onClick={() => navigate(ROUTES.DEPLOY)}
+            className="inline-flex items-center gap-2 px-5 py-2.5 text-sm font-medium rounded-lg bg-purple-600 hover:bg-purple-500 text-white transition-colors"
+          >
+            <Rocket className="w-4 h-4" />
+            {t('workloads.deployWorkload', 'Deploy a Workload')}
+          </button>
         </div>
       ) : (
         <div className="space-y-3">

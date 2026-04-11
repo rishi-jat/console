@@ -3,7 +3,8 @@
  */
 
 import { useState } from 'react'
-import { Coins, Trophy, Gift, Github, Bug, Lightbulb, Star, ChevronRight, GitPullRequest, GitMerge, RefreshCw, ExternalLink, AlertCircle } from 'lucide-react'
+import { Coins, Trophy, Gift, Bug, Lightbulb, Star, ChevronRight, GitPullRequest, GitMerge, RefreshCw, ExternalLink, AlertCircle } from 'lucide-react'
+import { Github } from '@/lib/icons'
 import { StatusBadge } from '../ui/StatusBadge'
 import { useRewards, REWARD_ACTIONS, ACHIEVEMENTS } from '../../hooks/useRewards'
 import { GitHubInviteModal, GitHubInviteButton } from './GitHubInvite'
@@ -14,7 +15,7 @@ import type { GitHubContribution } from '../../types/rewards'
 export function RewardsPanel() {
   const [showGitHubInvite, setShowGitHubInvite] = useState(false)
   const [isRefreshing, setIsRefreshing] = useState(false)
-  const { totalCoins, earnedAchievements, recentEvents, hasEarnedAction, getActionCount, githubRewards, githubPoints, refreshGitHubRewards } = useRewards()
+  const { totalCoins, earnedAchievements, recentEvents, hasEarnedAction, getActionCount, githubRewards, githubPoints, localCoins, bonusPoints, refreshGitHubRewards } = useRewards()
 
   const handleRefreshGitHub = async () => {
     setIsRefreshing(true)
@@ -42,6 +43,27 @@ export function RewardsPanel() {
             <p className="text-sm text-yellow-400">Earn more below!</p>
           </div>
         </div>
+        {(githubPoints > 0 || localCoins > 0) && (
+          <div className="mt-3 pt-3 border-t border-yellow-500/10 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
+            <span title="Points from GitHub contributions (PRs, issues) — shown on the public leaderboard">
+              GitHub: <span className="text-green-400 font-medium">{githubPoints.toLocaleString()}</span>
+            </span>
+            {bonusPoints > 0 && (
+              <>
+                <span className="text-muted-foreground/40">+</span>
+                <span title="Bonus points awarded by maintainer for challenges, videos, etc.">
+                  Bonus: <span className="text-pink-400 font-medium">{bonusPoints.toLocaleString()}</span>
+                </span>
+              </>
+            )}
+            <span className="text-muted-foreground/40">+</span>
+            <span title="Coins from in-app activity (missions, games, sharing) — stored in your browser only">
+              Console: <span className="text-purple-400 font-medium">{localCoins.toLocaleString()}</span>
+            </span>
+            <span className="text-muted-foreground/40">=</span>
+            <span className="text-yellow-400 font-medium">{totalCoins.toLocaleString()}</span>
+          </div>
+        )}
       </div>
 
       {/* Ways to Earn */}
@@ -166,7 +188,7 @@ export function RewardsPanel() {
                 </StatusBadge>
               )}
               {githubRewards.breakdown.other_issues > 0 && (
-                <StatusBadge color="purple" rounded="full" className="!bg-gray-500/20 !text-muted-foreground" icon={<AlertCircle className="w-3 h-3" />}>
+                <StatusBadge color="purple" rounded="full" className="!bg-gray-500/20 !text-muted-foreground dark:!bg-gray-400/20" icon={<AlertCircle className="w-3 h-3" />}>
                   {githubRewards.breakdown.other_issues} Issues
                 </StatusBadge>
               )}

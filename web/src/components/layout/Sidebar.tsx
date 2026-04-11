@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useCallback, lazy, Suspense } from 'react'
 import { useTranslation } from 'react-i18next'
 import { NavLink, useNavigate, useLocation } from 'react-router-dom'
-import { Plus, ChevronLeft, ChevronRight, CheckCircle2, AlertTriangle, WifiOff, GripVertical, X, User, Pin, PinOff } from 'lucide-react'
+import { Plus, ChevronLeft, ChevronRight, CheckCircle2, AlertTriangle, WifiOff, GripVertical, X, User, Pin, PinOff, Satellite } from 'lucide-react'
 import { iconRegistry } from '../../lib/icons'
 import { cn } from '../../lib/cn'
 import { SnoozedCards } from './SnoozedCards'
@@ -19,6 +19,9 @@ import { ROUTES } from '../../config/routes'
 import { DASHBOARD_CONFIGS } from '../../config/dashboards/index'
 import { emitSidebarNavigated, emitDashboardRenamed } from '../../lib/analytics'
 import { prefetchDashboard } from '../../lib/prefetchDashboard'
+import { useVersionCheck } from '../../hooks/useVersionCheck'
+import { STORAGE_KEY_GROUND_CONTROL_DASHBOARDS } from '../../lib/constants/storage'
+import { safeGetJSON } from '../../lib/utils/localStorage'
 
 // Lazy-load SidebarCustomizer — it pulls in dnd-kit and heavy UI (~50 KB)
 const SidebarCustomizer = lazy(() =>
@@ -41,7 +44,17 @@ const HREF_TO_DASHBOARD_ID: Record<string, string> = {
   '/logs': 'logs', '/data-compliance': 'data-compliance', '/arcade': 'arcade',
   '/deploy': 'deploy', '/ai-agents': 'ai-agents',
   '/llm-d-benchmarks': 'llm-d-benchmarks', '/cluster-admin': 'cluster-admin',
-  '/insights': 'insights',
+  '/insights': 'insights' }
+
+/** Prefix for custom dashboard routes */
+const CUSTOM_DASHBOARD_PREFIX = '/custom-dashboard/'
+
+/** Check if a sidebar item's href points to a Ground Control dashboard */
+function isGroundControlItem(href: string): boolean {
+  if (!href.startsWith(CUSTOM_DASHBOARD_PREFIX)) return false
+  const dashboardId = href.slice(CUSTOM_DASHBOARD_PREFIX.length)
+  const gcMapping = safeGetJSON<Record<string, unknown>>(STORAGE_KEY_GROUND_CONTROL_DASHBOARDS) ?? {}
+  return dashboardId in gcMapping
 }
 
 export function Sidebar() {
@@ -51,6 +64,7 @@ export function Sidebar() {
   const dashboardContext = useDashboardContextOptional()
   const { isFullScreen: isMissionFullScreen } = useMissions()
   const { viewerCount, hasError: viewersError, isLoading: viewersLoading } = useActiveUsers()
+  const { hasUpdate, channel, latestMainSHA } = useVersionCheck()
   const { t } = useTranslation()
   const navigate = useNavigate()
   const location = useLocation()
@@ -76,23 +90,23 @@ export function Sidebar() {
     }
   }, [])
 
-  const handleSidebarMouseEnter = useCallback(() => {
+  const handleSidebarMouseEnter = () => {
     clearAutoHideTimer()
     if (!isPinned && config.collapsed && !isMobile) {
       setCollapsed(false)
     }
-  }, [clearAutoHideTimer, isPinned, config.collapsed, isMobile, setCollapsed])
+  }
 
-  const handleSidebarMouseLeave = useCallback(() => {
+  const handleSidebarMouseLeave = () => {
     if (!isPinned && !isMobile) {
       clearAutoHideTimer()
       autoHideTimerRef.current = setTimeout(() => {
         setCollapsed(true)
       }, SIDEBAR_AUTO_HIDE_MS)
     }
-  }, [isPinned, isMobile, clearAutoHideTimer, setCollapsed])
+  }
 
-  const toggleSidebarPin = useCallback(() => {
+  const toggleSidebarPin = () => {
     setIsPinned(prev => {
       const next = !prev
       try { localStorage.setItem('sidebar-left-pinned', String(next)) } catch { /* ignore */ }
@@ -103,7 +117,7 @@ export function Sidebar() {
       }
       return next
     })
-  }, [clearAutoHideTimer, config.collapsed, setCollapsed])
+  }
 
   useEffect(() => () => clearAutoHideTimer(), [clearAutoHideTimer])
 
@@ -115,7 +129,7 @@ export function Sidebar() {
 
   // Resize handle state
   const [isResizing, setIsResizing] = useState(false)
-  const handleResizeStart = useCallback((e: React.MouseEvent) => {
+  const handleResizeStart = (e: React.MouseEvent) => {
     e.preventDefault()
     setIsResizing(true)
     const startX = e.clientX
@@ -141,7 +155,7 @@ export function Sidebar() {
     document.body.style.userSelect = 'none'
     document.addEventListener('mousemove', handleMouseMove)
     document.addEventListener('mouseup', handleMouseUp)
-  }, [config.width, setWidth])
+  }
 
   // Sidebar customizer modal state
   const [showCustomizer, setShowCustomizer] = useState(false)
@@ -359,8 +373,8 @@ export function Sidebar() {
             className={({ isActive }) => cn(
               'flex items-center gap-3 rounded-lg text-sm font-medium transition-all duration-200',
               isActive
-                ? 'bg-purple-500/20 text-purple-400'
-                : 'text-muted-foreground hover:text-foreground hover:bg-secondary/50',
+                ? 'bg-purple-500/15 text-purple-400 border-l-[3px] border-purple-500 shadow-[inset_0_0_12px_rgba(168,85,247,0.08)]'
+                : 'text-muted-foreground hover:text-foreground hover:bg-secondary/50 border-l-[3px] border-transparent',
               isCollapsed ? 'justify-center p-3' : 'px-3 py-2'
             )}
             title={item.isCustom && item.href.startsWith('/custom-dashboard/') ? `${item.name} — ${t('sidebar.doubleClickRename')}` : item.name}
@@ -369,11 +383,15 @@ export function Sidebar() {
             {!isCollapsed && (() => {
               const dashId = HREF_TO_DASHBOARD_ID[item.href]
               const count = dashId ? DASHBOARD_CONFIGS[dashId]?.cards?.length : null
+              const isGC = isGroundControlItem(item.href)
               return (
-                <span className="flex-1 min-w-0">
-                  {item.name}
+                <span className="flex-1 min-w-0 flex items-center gap-1">
+                  <span className="truncate">{item.name}</span>
+                  {isGC && (
+                    <Satellite className="w-3.5 h-3.5 text-purple-400 flex-shrink-0" aria-label="Ground Control dashboard" />
+                  )}
                   {count != null && (
-                    <span className="text-[10px] text-muted-foreground/40 tabular-nums ml-1">{count}</span>
+                    <span className="text-[10px] text-muted-foreground/40 tabular-nums ml-0.5 flex-shrink-0">{count}</span>
                   )}
                 </span>
               )
@@ -415,7 +433,7 @@ export function Sidebar() {
       {/* Mobile backdrop */}
       {isMobile && config.isMobileOpen && (
         <div
-          className="fixed inset-0 bg-black/60 backdrop-blur-2xl z-30 md:hidden"
+          className="fixed inset-0 bg-black/60 backdrop-blur-sm z-overlay md:hidden"
           onClick={closeMobileSidebar}
         />
       )}
@@ -442,10 +460,13 @@ export function Sidebar() {
           {config.primaryNav.map(item => renderNavItem(item, 'primary'))}
         </nav>
 
-        {/* Add more dashboards */}
+        {/* Add more dashboards — opens Console Studio at Dashboards section */}
         {!isCollapsed && (
           <button
-            onClick={() => setShowCustomizer(true)}
+            onClick={() => {
+              // Always open SidebarCustomizer — reliable from any page
+              setShowCustomizer(true)
+            }}
             className="w-full flex items-center gap-3 px-3 py-1.5 mt-1 text-xs text-muted-foreground/60 hover:text-muted-foreground hover:bg-secondary/30 rounded-lg transition-colors"
           >
             <Plus className="w-3.5 h-3.5" />
@@ -529,19 +550,31 @@ export function Sidebar() {
 
         {/* Viewer count + commit hash */}
         {!isCollapsed && (
-          <div className="mt-auto pt-4 flex items-center justify-center gap-2">
-            <div
-              className="flex items-center gap-1 px-2 text-muted-foreground/60"
-              title={t('sidebar.activeViewers', { count: viewerCount })}
-            >
-              <User className={cn('w-3 h-3', viewersError && 'text-red-400')} />
-              <span className="text-2xs tabular-nums">
-                {viewersError ? '!' : viewersLoading ? '…' : viewerCount}
+          <div className="mt-auto pt-4 flex flex-col items-center gap-1">
+            <div className="flex items-center justify-center gap-2">
+              <div
+                className="flex items-center gap-1 px-2 text-muted-foreground/60"
+                title={t('sidebar.activeViewers', { count: viewerCount })}
+              >
+                <User className={cn('w-3 h-3', viewersError && 'text-red-400')} />
+                <span className="text-2xs tabular-nums">
+                  {viewersError ? '!' : viewersLoading ? '…' : viewerCount}
+                </span>
+              </div>
+              <span className="text-2xs text-muted-foreground/40 font-mono" title={`Commit: ${__COMMIT_HASH__}`}>
+                {__COMMIT_HASH__.substring(0, 7)}
               </span>
             </div>
-            <span className="text-2xs text-muted-foreground/40 font-mono" title={`Commit: ${__COMMIT_HASH__}`}>
-              {__COMMIT_HASH__.substring(0, 7)}
-            </span>
+            {/* Developer mode: warn when running an older commit */}
+            {channel === 'developer' && hasUpdate && (
+              <div
+                className="flex items-center gap-1 text-2xs text-yellow-400/80"
+                title={`Behind main — latest: ${latestMainSHA?.substring(0, 7) ?? 'unknown'}`}
+              >
+                <AlertTriangle className="w-3 h-3" />
+                <span>{t('sidebar.behindMain', 'Behind main')}</span>
+              </div>
+            )}
           </div>
         )}
       </aside>
@@ -549,7 +582,7 @@ export function Sidebar() {
       {/* Collapse + Pin controls — top-right of sidebar, above resize handle */}
       {!isMobile && !isMissionFullScreen && (
         <div
-          className="fixed top-[4.5rem] z-[45] flex flex-col gap-1.5 items-center transition-[left] duration-300"
+          className="fixed top-[4.5rem] z-sticky flex flex-col gap-1.5 items-center transition-[left] duration-300"
           style={{ left: sidebarWidth + 4 }}
         >
           <button
@@ -578,8 +611,8 @@ export function Sidebar() {
             className={cn(
               "p-1.5 rounded-full border border-border bg-background shadow-md transition-colors",
               isPinned
-                ? "bg-purple-500/15 text-purple-400 hover:bg-purple-500/25 border-purple-500/30"
-                : "text-muted-foreground hover:text-foreground hover:bg-black/5 dark:hover:bg-white/10"
+                ? "bg-purple-900 text-purple-400 hover:bg-purple-800 border-purple-500/50"
+                : "bg-background text-muted-foreground hover:text-foreground hover:bg-black/5 dark:hover:bg-white/10"
             )}
             title={isPinned ? t('layout.sidebar.unpinSidebar') : t('layout.sidebar.pinSidebar')}
           >
@@ -593,7 +626,7 @@ export function Sidebar() {
         <div
           onMouseDown={handleResizeStart}
           className={cn(
-            "fixed bottom-0 cursor-col-resize z-[45] hover:bg-purple-500/30 transition-colors",
+            "fixed bottom-0 cursor-col-resize z-sticky hover:bg-purple-500/30 transition-colors",
             isResizing && "bg-purple-500/50"
           )}
           style={{ top: 160, left: sidebarWidth - 3, width: 6 }}

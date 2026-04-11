@@ -8,24 +8,33 @@ import { useCardLoadingState } from './CardDataContext'
 import { CardClusterFilter } from '../../lib/cards/CardComponents'
 import { useChartFilters } from '../../lib/cards/cardHooks'
 import { ClusterStatusDot } from '../ui/ClusterStatusBadge'
+import { RefreshIndicator } from '../ui/RefreshIndicator'
 
 export function NetworkOverview() {
-  const { deduplicatedClusters: clusters, isLoading } = useClusters()
-  const { services, isLoading: servicesLoading, isRefreshing, isDemoFallback, consecutiveFailures, isFailed } = useCachedServices()
+  const { deduplicatedClusters: clusters, isLoading, isRefreshing: clustersRefreshing, lastRefresh: clustersLastRefreshDate } = useClusters()
+  // #6271: useClusters returns lastRefresh as `Date | null`, but the
+  // freshness merge below expects a numeric epoch. Normalize once.
+  const clustersLastRefresh: number | null = clustersLastRefreshDate instanceof Date
+    ? clustersLastRefreshDate.getTime()
+    : (typeof clustersLastRefreshDate === 'number' ? clustersLastRefreshDate : null)
+  const { services, isLoading: servicesLoading, isRefreshing, isDemoFallback, consecutiveFailures, isFailed, lastRefresh: servicesLastRefresh } = useCachedServices()
 
   const { selectedClusters, isAllClustersSelected } = useGlobalFilters()
   const { drillToService } = useDrillDownActions()
 
-  // Report card data state
+  // Report card data state.
+  // #6267: include clustersRefreshing so the card-level state matches
+  // the freshness indicator's combined refresh signal — otherwise a
+  // cluster cache refresh would tick the indicator without ticking the
+  // CardWrapper refresh animation.
   const combinedLoading = isLoading || servicesLoading
   const { showSkeleton, showEmptyState } = useCardLoadingState({
     isLoading: combinedLoading,
-    isRefreshing,
+    isRefreshing: isRefreshing || clustersRefreshing,
     isDemoData: isDemoFallback,
     hasAnyData: services.length > 0,
     isFailed,
-    consecutiveFailures,
-  })
+    consecutiveFailures })
 
   // Local cluster filter
   const {
@@ -35,25 +44,23 @@ export function NetworkOverview() {
     availableClusters,
     showClusterFilter,
     setShowClusterFilter,
-    clusterFilterRef,
-  } = useChartFilters({
-    storageKey: 'network-overview',
-  })
+    clusterFilterRef } = useChartFilters({
+    storageKey: 'network-overview' })
 
   // Filter clusters by global selection first
-  const globalFilteredClusters = useMemo(() => {
+  const globalFilteredClusters = (() => {
     if (isAllClustersSelected) return clusters
     return clusters.filter(c => selectedClusters.includes(c.name))
-  }, [clusters, selectedClusters, isAllClustersSelected])
+  })()
 
   // Apply local cluster filter
-  const filteredClusters = useMemo(() => {
+  const filteredClusters = (() => {
     if (localClusterFilter.length === 0) return globalFilteredClusters
     return globalFilteredClusters.filter(c => localClusterFilter.includes(c.name))
-  }, [globalFilteredClusters, localClusterFilter])
+  })()
 
   // Filter services by selection
-  const filteredServices = useMemo(() => {
+  const filteredServices = (() => {
     let result = services
     if (!isAllClustersSelected) {
       result = result.filter(s => s.cluster && selectedClusters.includes(s.cluster))
@@ -62,7 +69,7 @@ export function NetworkOverview() {
       result = result.filter(s => s.cluster && localClusterFilter.includes(s.cluster))
     }
     return result
-  }, [services, selectedClusters, isAllClustersSelected, localClusterFilter])
+  })()
 
   // Calculate network stats
   const stats = useMemo(() => {
@@ -94,8 +101,7 @@ export function NetworkOverview() {
       clustersWithServices: new Set(filteredServices.map(s => s.cluster)).size,
       healthyClusters,
       degradedClusters,
-      offlineClusters,
-    }
+      offlineClusters }
   }, [filteredServices, filteredClusters])
 
   if (showSkeleton) {
@@ -145,7 +151,28 @@ export function NetworkOverview() {
 
       {/* Controls */}
       <div className="flex items-center justify-between mb-4">
-        <div />
+        {/* part 5: freshness indicator.
+            #6265: this card uses BOTH useClusters() and useCachedServices(),
+            so the indicator must reflect the OLDER of the two timestamps
+            (otherwise stale cluster health could appear fresh). Hide the
+            timestamp entirely in demo mode — useCache may preserve a
+            lastRefresh from a prior live session that doesn't reflect the
+            demo data being shown. */}
+        <RefreshIndicator
+          isRefreshing={isRefreshing || clustersRefreshing}
+          lastUpdated={(() => {
+            if (isDemoFallback) return null
+            const cl = typeof clustersLastRefresh === 'number' ? clustersLastRefresh : null
+            const sv = typeof servicesLastRefresh === 'number' ? servicesLastRefresh : null
+            if (cl !== null && sv !== null) return new Date(Math.min(cl, sv))
+            if (cl !== null) return new Date(cl)
+            if (sv !== null) return new Date(sv)
+            return null
+          })()}
+          size="sm"
+          showLabel={true}
+          staleThresholdMinutes={5}
+        />
         <div className="flex items-center gap-2">
           {/* Cluster count indicator */}
           {localClusterFilter.length > 0 && (

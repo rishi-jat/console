@@ -78,7 +78,6 @@ import { ingressStatusConfig } from './ingress-status'
 import { jobStatusConfig } from './job-status'
 import { kubeBertConfig } from './kube-bert'
 import { kubeChessConfig } from './kube-chess'
-import { kubeCraftConfig } from './kube-craft'
 import { kubeDoomConfig } from './kube-doom'
 import { kubeGalagaConfig } from './kube-galaga'
 import { kubeKartConfig } from './kube-kart'
@@ -90,6 +89,7 @@ import { kubecostOverviewConfig } from './kubecost-overview'
 import { kubectlConfig } from './kubectl'
 import { kubedleConfig } from './kubedle'
 import { kubescapeScanConfig } from './kubescape-scan'
+import { kubevirtStatusConfig } from './kubevirt-status'
 import { kustomizationStatusConfig } from './kustomization-status'
 import { kyvernoPoliciesConfig } from './kyverno-policies'
 import { limitRangeStatusConfig } from './limit-range-status'
@@ -122,6 +122,7 @@ import { podBrothersConfig } from './pod-brothers'
 import { podCrosserConfig } from './pod-crosser'
 import { podHealthTrendConfig } from './pod-health-trend'
 import { podIssuesConfig } from './pod-issues'
+import { podLogsConfig } from './pod-logs'
 import { podPitfallConfig } from './pod-pitfall'
 import { podSweeperConfig } from './pod-sweeper'
 import { policyViolationsConfig } from './policy-violations'
@@ -160,6 +161,7 @@ import { trivyScanConfig } from './trivy-scan'
 import { upgradeStatusConfig } from './upgrade-status'
 import { userManagementConfig } from './user-management'
 import { vaultSecretsConfig } from './vault-secrets'
+import { vclusterStatusConfig } from './vcluster-status'
 import { warningEventsConfig } from './warning-events'
 import { weatherConfig } from './weather'
 import { workloadDeploymentConfig } from './workload-deployment'
@@ -241,7 +243,6 @@ export const CARD_CONFIGS: CardConfigRegistry = {
   job_status: jobStatusConfig,
   kube_bert: kubeBertConfig,
   kube_chess: kubeChessConfig,
-  kube_craft: kubeCraftConfig,
   kube_doom: kubeDoomConfig,
   kube_galaga: kubeGalagaConfig,
   kube_kart: kubeKartConfig,
@@ -253,6 +254,7 @@ export const CARD_CONFIGS: CardConfigRegistry = {
   kubectl: kubectlConfig,
   kubedle: kubedleConfig,
   kubescape_scan: kubescapeScanConfig,
+  kubevirt_status: kubevirtStatusConfig,
   kustomization_status: kustomizationStatusConfig,
   kyverno_policies: kyvernoPoliciesConfig,
   limit_range_status: limitRangeStatusConfig,
@@ -285,6 +287,7 @@ export const CARD_CONFIGS: CardConfigRegistry = {
   pod_crosser: podCrosserConfig,
   pod_health_trend: podHealthTrendConfig,
   pod_issues: podIssuesConfig,
+  pod_logs: podLogsConfig,
   pod_pitfall: podPitfallConfig,
   pod_sweeper: podSweeperConfig,
   policy_violations: policyViolationsConfig,
@@ -323,6 +326,7 @@ export const CARD_CONFIGS: CardConfigRegistry = {
   upgrade_status: upgradeStatusConfig,
   user_management: userManagementConfig,
   vault_secrets: vaultSecretsConfig,
+  vcluster_status: vclusterStatusConfig,
   warning_events: warningEventsConfig,
   weather: weatherConfig,
   workload_deployment: workloadDeploymentConfig,
@@ -492,7 +496,6 @@ export {
   jobStatusConfig,
   kubeBertConfig,
   kubeChessConfig,
-  kubeCraftConfig,
   kubeDoomConfig,
   kubeGalagaConfig,
   kubeKartConfig,
@@ -504,6 +507,7 @@ export {
   kubectlConfig,
   kubedleConfig,
   kubescapeScanConfig,
+  kubevirtStatusConfig,
   kustomizationStatusConfig,
   kyvernoPoliciesConfig,
   limitRangeStatusConfig,
@@ -535,6 +539,7 @@ export {
   podCrosserConfig,
   podHealthTrendConfig,
   podIssuesConfig,
+  podLogsConfig,
   podPitfallConfig,
   podSweeperConfig,
   policyViolationsConfig,
@@ -573,6 +578,7 @@ export {
   upgradeStatusConfig,
   userManagementConfig,
   vaultSecretsConfig,
+  vclusterStatusConfig,
   warningEventsConfig,
   weatherConfig,
   workloadDeploymentConfig,

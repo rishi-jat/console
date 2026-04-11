@@ -10,7 +10,7 @@
  * Phase 3: Flight Plan (SVG blueprint + deploy)
  */
 
-import { useEffect, useCallback, useState } from 'react'
+import { useEffect, useCallback, useState, lazy, Suspense } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   X,
@@ -30,7 +30,9 @@ import { useToast } from '../ui/Toast'
 import { useMissionControl } from './useMissionControl'
 import { FixerDefinitionPanel } from './FixerDefinitionPanel'
 import { ClusterAssignmentPanel } from './ClusterAssignmentPanel'
-import { FlightPlanBlueprint } from './FlightPlanBlueprint'
+const FlightPlanBlueprint = lazy(() =>
+  import('./FlightPlanBlueprint').then(m => ({ default: m.FlightPlanBlueprint }))
+)
 import { LaunchSequence } from './LaunchSequence'
 import type { WizardPhase } from './types'
 
@@ -73,7 +75,7 @@ export function MissionControlDialog({ open, onClose }: MissionControlDialogProp
   // Escape to close
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose()
+      if (e.key === 'Escape') { e.stopImmediatePropagation(); onClose() }
     },
     [onClose]
   )
@@ -107,7 +109,7 @@ export function MissionControlDialog({ open, onClose }: MissionControlDialogProp
   const isComplete = state.phase === 'complete'
 
   const canAdvance =
-    (state.phase === 'define' && state.projects.length > 0) ||
+    (state.phase === 'define' && state.projects.length > 0 && !state.aiStreaming) ||
     (state.phase === 'assign' && state.assignments.some((a) => a.projectNames.length > 0)) ||
     state.phase === 'blueprint'
 
@@ -126,6 +128,9 @@ export function MissionControlDialog({ open, onClose }: MissionControlDialogProp
 
   const handleNewMission = () => {
     mc.reset()
+    // Reset the stepper's "highest reached" state so only Phase 1 is
+    // reachable in the new mission (#5504)
+    setHighestReached(0)
   }
 
   /** Inset (in px) from viewport edges so the backdrop peeks through */
@@ -137,7 +142,7 @@ export function MissionControlDialog({ open, onClose }: MissionControlDialogProp
         <>
           {/* ── Backdrop ──────────────────────────────────────────── */}
           <motion.div
-            className="fixed inset-0 z-[199] bg-black/60 backdrop-blur-sm"
+            className="fixed inset-0 z-modal bg-black/60 backdrop-blur-sm"
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
@@ -150,8 +155,8 @@ export function MissionControlDialog({ open, onClose }: MissionControlDialogProp
           <motion.div
             role="dialog"
             aria-modal="true"
-            aria-label="Mission Control"
-            className="fixed z-[200] flex flex-col bg-background rounded-xl border border-border shadow-2xl shadow-black/30 overflow-hidden"
+            aria-label={state.title || 'Mission Control'}
+            className="fixed z-modal flex flex-col bg-background rounded-xl border border-border shadow-2xl shadow-black/30 overflow-hidden"
             style={{
               inset: `${MODAL_INSET_PX}px`,
             }}
@@ -178,7 +183,7 @@ export function MissionControlDialog({ open, onClose }: MissionControlDialogProp
                 </div>
                 <div>
                   <div className="flex items-center gap-2">
-                    <h1 className="text-lg font-semibold">Mission Control</h1>
+                    <h1 className="text-lg font-semibold">{state.title || 'Mission Control'}</h1>
                     {state.isDryRun && (
                       <span className="px-2 py-0.5 text-2xs font-bold uppercase tracking-wider rounded bg-yellow-500/20 text-yellow-400 border border-yellow-500/30">
                         DRY RUN
@@ -301,13 +306,15 @@ export function MissionControlDialog({ open, onClose }: MissionControlDialogProp
                 )}
                 {state.phase === 'blueprint' && (
                   <PhaseWrapper key="blueprint">
-                    <FlightPlanBlueprint
-                      state={state}
-                      onOverlayChange={mc.setOverlay}
-                      onDeployModeChange={mc.setDeployMode}
-                      onMoveProject={mc.moveProjectToCluster}
-                      installedProjects={mc.installedProjects}
-                    />
+                    <Suspense fallback={null}>
+                      <FlightPlanBlueprint
+                        state={state}
+                        onOverlayChange={mc.setOverlay}
+                        onDeployModeChange={mc.setDeployMode}
+                        onMoveProject={mc.moveProjectToCluster}
+                        installedProjects={mc.installedProjects}
+                      />
+                    </Suspense>
                   </PhaseWrapper>
                 )}
                 {(isLaunching || isComplete) && (

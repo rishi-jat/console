@@ -7,11 +7,11 @@
  */
 
 import { useState, useMemo } from 'react'
+import { useTranslation } from 'react-i18next'
 import {
   Shield, CheckCircle, XCircle, AlertCircle, Info,
   ChevronUp, ChevronDown, ChevronLeft, ChevronRight,
-  Search, X, Filter,
-} from 'lucide-react'
+  Search, X, Filter } from 'lucide-react'
 import { useTrestle, type OscalControlResult } from '../../../hooks/useTrestle'
 import { useGlobalFilters } from '../../../hooks/useGlobalFilters'
 import { StatusBadge } from '../../ui/StatusBadge'
@@ -65,6 +65,7 @@ interface ControlRow extends OscalControlResult {
 }
 
 export function ComplianceDrillDown({ data }: Props) {
+  const { t } = useTranslation()
   const filterStatus = (data.filterStatus as string) || ''
   const { statuses } = useTrestle()
   const { selectedClusters } = useGlobalFilters()
@@ -98,12 +99,12 @@ export function ComplianceDrillDown({ data }: Props) {
   }, [statuses, selectedClusters])
 
   // Unique values for filter dropdowns
-  const uniqueClusters = useMemo(() => [...new Set(allRows.map(r => r.cluster))].sort(), [allRows])
+  const uniqueClusters = [...new Set(allRows.map(r => r.cluster))].sort()
   const uniqueProfiles = useMemo(() => [...new Set(allRows.map(r => r.profile).filter(Boolean))].sort(), [allRows])
-  const uniqueStatuses = useMemo(() => [...new Set(allRows.map(r => r.status))].sort(), [allRows])
+  const uniqueStatuses = [...new Set(allRows.map(r => r.status))].sort()
 
   // Filtered rows
-  const filteredRows = useMemo(() => {
+  const filteredRows = (() => {
     let rows = allRows
     if (statusFilter) rows = rows.filter(r => r.status === statusFilter)
     if (severityFilter) rows = rows.filter(r => r.severity === severityFilter)
@@ -118,10 +119,10 @@ export function ComplianceDrillDown({ data }: Props) {
       )
     }
     return rows
-  }, [allRows, statusFilter, severityFilter, clusterFilter, profileFilter, searchQuery])
+  })()
 
   // Sorted rows
-  const sortedRows = useMemo(() => {
+  const sortedRows = (() => {
     const sorted = [...filteredRows]
     sorted.sort((a, b) => {
       let cmp = 0
@@ -145,14 +146,11 @@ export function ComplianceDrillDown({ data }: Props) {
       return sortDir === 'asc' ? cmp : -cmp
     })
     return sorted
-  }, [filteredRows, sortField, sortDir])
+  })()
 
   // Paginated rows
   const totalPages = Math.ceil(sortedRows.length / PAGE_SIZE)
-  const pagedRows = useMemo(
-    () => sortedRows.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE),
-    [sortedRows, page],
-  )
+  const pagedRows = sortedRows.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE)
 
   // Reset page when filters change
   const resetPage = () => setPage(0)
@@ -286,7 +284,7 @@ export function ComplianceDrillDown({ data }: Props) {
               onChange={e => { setStatusFilter(e.target.value); resetPage() }}
               className="px-3 py-2 rounded-lg border border-border bg-card/50 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
             >
-              <option value="">All Statuses</option>
+              <option value="">{t('drilldown.compliance.allStatuses')}</option>
               {uniqueStatuses.map(s => (
                 <option key={s} value={s}>{statusLabel(s)}</option>
               ))}
@@ -296,18 +294,18 @@ export function ComplianceDrillDown({ data }: Props) {
               onChange={e => { setSeverityFilter(e.target.value); resetPage() }}
               className="px-3 py-2 rounded-lg border border-border bg-card/50 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
             >
-              <option value="">All Severities</option>
-              <option value="critical">Critical</option>
-              <option value="high">High</option>
-              <option value="medium">Medium</option>
-              <option value="low">Low</option>
+              <option value="">{t('drilldown.compliance.allSeverities')}</option>
+              <option value="critical">{t('drilldown.compliance.critical')}</option>
+              <option value="high">{t('drilldown.compliance.high')}</option>
+              <option value="medium">{t('drilldown.compliance.medium')}</option>
+              <option value="low">{t('drilldown.compliance.low')}</option>
             </select>
             <select
               value={clusterFilter}
               onChange={e => { setClusterFilter(e.target.value); resetPage() }}
               className="px-3 py-2 rounded-lg border border-border bg-card/50 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
             >
-              <option value="">All Clusters</option>
+              <option value="">{t('drilldown.compliance.allClusters')}</option>
               {uniqueClusters.map(c => (
                 <option key={c} value={c}>{c}</option>
               ))}
@@ -317,7 +315,7 @@ export function ComplianceDrillDown({ data }: Props) {
               onChange={e => { setProfileFilter(e.target.value); resetPage() }}
               className="px-3 py-2 rounded-lg border border-border bg-card/50 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
             >
-              <option value="">All Profiles</option>
+              <option value="">{t('drilldown.compliance.allProfiles')}</option>
               {uniqueProfiles.map(p => (
                 <option key={p} value={p}>{p}</option>
               ))}

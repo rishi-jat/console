@@ -23,7 +23,7 @@ export function PredictionSettingsSection({
   const [saved, setSaved] = useState(false)
   const { getStats, clearFeedback, feedbackCount } = usePredictionFeedback()
   const stats = getStats()
-  const savedTimerRef = useRef<ReturnType<typeof setTimeout>>()
+  const savedTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined)
 
   useEffect(() => {
     return () => clearTimeout(savedTimerRef.current)
@@ -104,6 +104,8 @@ export function PredictionSettingsSection({
             </div>
           </div>
           <button
+            role="switch"
+            aria-checked={settings.aiEnabled}
             onClick={handleToggleAI}
             className={`relative w-12 h-6 rounded-full transition-colors ${
               settings.aiEnabled ? 'bg-blue-500' : 'bg-secondary'
@@ -111,7 +113,7 @@ export function PredictionSettingsSection({
             aria-label={settings.aiEnabled ? 'Disable AI predictions' : 'Enable AI predictions'}
           >
             <span
-              className={`absolute top-1 w-4 h-4 rounded-full bg-white transition-transform ${
+              className={`absolute top-1 w-4 h-4 rounded-full bg-white dark:bg-gray-100 transition-transform ${
                 settings.aiEnabled ? 'left-7' : 'left-1'
               }`}
             />
@@ -202,6 +204,8 @@ export function PredictionSettingsSection({
                 </div>
               </div>
               <button
+                role="switch"
+                aria-checked={settings.consensusMode}
                 onClick={handleToggleConsensus}
                 className={`relative w-10 h-5 rounded-full transition-colors ${
                   settings.consensusMode ? 'bg-purple-500' : 'bg-secondary'
@@ -209,7 +213,7 @@ export function PredictionSettingsSection({
                 aria-label={settings.consensusMode ? 'Disable consensus mode' : 'Enable consensus mode'}
               >
                 <span
-                  className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform ${
+                  className={`absolute top-0.5 w-4 h-4 rounded-full bg-white dark:bg-gray-100 transition-transform ${
                     settings.consensusMode ? 'left-5' : 'left-0.5'
                   }`}
                 />

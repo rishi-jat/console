@@ -5,7 +5,7 @@
  * AI recommendations overlay.
  */
 
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
+import { useState, useEffect, useMemo, useRef } from 'react'
 import { Loader2, Wand2, Shuffle, LayoutGrid, Table, Plus, X } from 'lucide-react'
 import { motion } from 'framer-motion'
 import ReactMarkdown from 'react-markdown'
@@ -41,9 +41,13 @@ export function ClusterAssignmentPanel({
   onSetAssignment,
   aiStreaming,
   planningMission,
-  installedOnCluster = new Map(),
-}: ClusterAssignmentPanelProps) {
-  const { clusters, isLoading: clustersLoading } = useClusters()
+  installedOnCluster = new Map() }: ClusterAssignmentPanelProps) {
+  // Use deduplicatedClusters so multiple kubeconfig contexts pointing at the
+  // same physical cluster (e.g. several user identities for the same
+  // OpenShift API server) collapse into a single picker entry. Using the raw
+  // `clusters` field surfaces every context, which produced rows like
+  // "Andrew.Anderson@ibm.com" repeated four times.
+  const { deduplicatedClusters: clusters, isLoading: clustersLoading } = useClusters()
   const { releases: helmReleases } = useHelmReleases()
   const [viewMode, setViewMode] = useState<ViewMode>('cards')
   const [autoAssignDone, setAutoAssignDone] = useState(false)
@@ -58,15 +62,9 @@ export function ClusterAssignmentPanel({
     [clusters]
   )
   // Active clusters = healthy minus excluded
-  const healthyClusters = useMemo(
-    () => allHealthyClusters.filter((c) => !excludedClusters.has(c.name)),
-    [allHealthyClusters, excludedClusters]
-  )
+  const healthyClusters = allHealthyClusters.filter((c) => !excludedClusters.has(c.name))
   // Excluded but available
-  const removedClusters = useMemo(
-    () => allHealthyClusters.filter((c) => excludedClusters.has(c.name)),
-    [allHealthyClusters, excludedClusters]
-  )
+  const removedClusters = allHealthyClusters.filter((c) => excludedClusters.has(c.name))
 
   const projectNames = state.projects.map((p) => p.name)
 
@@ -99,13 +97,13 @@ export function ClusterAssignmentPanel({
     return notes
   }, [helmReleases, healthyClusters, state.projects])
 
-  const handleAutoAssign = useCallback(() => {
+  const handleAutoAssign = () => {
     if (healthyClusters.length === 0) return
     onAutoAssign(healthyClusters)
     setAutoAssignDone(true)
-  }, [healthyClusters, onAutoAssign])
+  }
 
-  const handleAISuggest = useCallback(() => {
+  const handleAISuggest = () => {
     if (healthyClusters.length === 0) return
     const clustersJson = JSON.stringify(
       healthyClusters.map((c) => ({
@@ -118,13 +116,12 @@ export function ClusterAssignmentPanel({
         storageGB: c.storageGB,
         cpuUsageCores: c.cpuUsageCores,
         memoryUsageGB: c.memoryUsageGB,
-        namespaces: c.namespaces?.length ?? 0,
-      })),
+        namespaces: c.namespaces?.length ?? 0 })),
       null,
       2
     )
     onAskAI(state.projects, clustersJson)
-  }, [healthyClusters, state.projects, onAskAI])
+  }
 
   // Show cluster picker on first mount so user can select clusters before auto-assign
   useEffect(() => {
@@ -202,7 +199,16 @@ export function ClusterAssignmentPanel({
                       <Button
                         variant="ghost"
                         size="sm"
-                        onClick={() => setExcludedClusters((prev) => new Set([...prev, c.name]))}
+                        onClick={() => {
+                          setExcludedClusters((prev) => new Set([...prev, c.name]))
+                          // Clear any existing assignments for the excluded cluster (#5534)
+                          const existing = state.assignments.find((a) => a.clusterName === c.name)
+                          if (existing) {
+                            for (const pName of existing.projectNames) {
+                              onSetAssignment(c.name, pName, false)
+                            }
+                          }
+                        }}
                         className="!p-0.5 text-muted-foreground hover:text-destructive"
                         title="Remove from mission"
                         icon={<X className="w-3 h-3" />}
@@ -326,8 +332,7 @@ export function ClusterAssignmentPanel({
                           })
                         }),
                         ...(aiAssignment.warnings ?? []),
-                      ],
-                    }
+                      ] }
                   : aiAssignment
                 return (
                 <ClusterReadinessCard

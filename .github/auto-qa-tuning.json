@@ -1,157 +1,103 @@
 {
   "schema_version": 1,
-  "last_updated": "2026-04-04T03:47:49Z",
+  "last_updated": "2026-04-08T03:58:11Z",
   "rolling_window_days": 30,
   "categories": {
     "performance": {
       "merged": 8,
-      "closed": 6,
-      "acceptance_rate": 0.57,
+      "closed": 9,
+      "acceptance_rate": 0.47,
       "status": "normal",
-      "last_evaluated": "2026-03-28T03:48:11Z"
+      "last_evaluated": "2026-04-07T03:57:21Z"
     },
     "security": {
       "merged": 21,
-      "closed": 19,
-      "acceptance_rate": 0.53,
+      "closed": 29,
+      "acceptance_rate": 0.42,
       "status": "normal",
-      "last_evaluated": "2026-04-04T03:47:49Z"
+      "last_evaluated": "2026-04-07T03:57:21Z"
     },
     "a11y": {
       "merged": 34,
-      "closed": 17,
-      "acceptance_rate": 0.67,
+      "closed": 21,
+      "acceptance_rate": 0.62,
       "status": "normal",
-      "last_evaluated": "2026-04-03T03:55:27Z"
+      "last_evaluated": "2026-04-07T03:57:21Z"
     },
     "operator": {
       "merged": 11,
-      "closed": 31,
-      "acceptance_rate": 0.26,
-      "status": "normal",
-      "last_evaluated": "2026-04-04T03:47:49Z"
+      "closed": 129,
+      "acceptance_rate": 0.08,
+      "status": "blocked",
+      "last_evaluated": "2026-04-08T03:58:11Z"
     },
     "sre": {
       "merged": 2,
-      "closed": 3,
-      "acceptance_rate": 0.4,
-      "status": "normal",
-      "last_evaluated": "2026-04-04T03:47:49Z"
+      "closed": 21,
+      "acceptance_rate": 0.09,
+      "status": "blocked",
+      "last_evaluated": "2026-04-08T03:58:11Z"
     },
     "features": {
       "merged": 3,
-      "closed": 2,
-      "acceptance_rate": 0.6,
+      "closed": 8,
+      "acceptance_rate": 0.27,
       "status": "normal",
-      "last_evaluated": "2026-04-04T03:47:49Z"
+      "last_evaluated": "2026-04-08T03:58:11Z"
     },
     "resilience": {
       "merged": 37,
-      "closed": 38,
-      "acceptance_rate": 0.49,
+      "closed": 53,
+      "acceptance_rate": 0.41,
       "status": "normal",
-      "last_evaluated": "2026-04-04T03:47:49Z"
+      "last_evaluated": "2026-04-08T03:58:11Z"
     },
     "consistency": {
       "merged": 15,
-      "closed": 16,
-      "acceptance_rate": 0.48,
+      "closed": 18,
+      "acceptance_rate": 0.45,
       "status": "normal",
-      "last_evaluated": "2026-03-29T03:59:27Z"
+      "last_evaluated": "2026-04-05T03:59:32Z"
     }
   },
   "weekly_insights": {
-    "best_pr_size": "L",
+    "best_pr_size": "S",
     "size_acceptance": {},
     "type_acceptance": {},
     "common_rejection_reasons": [
-      "- PR #3606: Superseded — the root cause was the Auto-QA grep pattern, not the source registrations. Fixed in #3619 by updating the grep to match unquoted object keys.",
-      "- PR #3604: Duplicate — already fixed and merged via #3613.",
-      "- PR #3599: Closing this PR as superseded. The card.position optional chaining fixes (3 of 4 files) were already applied to main via prior merges. The remaining fix (consolidating the duplicate useMCP import in Deploy.tsx) has been applied in PR #3749.",
-      "- PR #3579: Closing: this PR is investigation-only with no source code changes. The underlying issue (#3576) about Loader2 ReferenceError is addressed by PR #3578 which adds explicit Loader2 to the dynamic card sandbox scope.",
-      "- PR #3577: Closing: this PR is investigation-only with no source code changes. The underlying issue (#3575) about Loader2 ReferenceError is addressed by PR #3578 which adds explicit Loader2 to the dynamic card sandbox scope."
+      "- PR #4650: Closing — fixing directly.",
+      "- PR #4648: Closing — fixing directly.",
+      "- PR #4641: Closing — already fixed in PR #4642 (merged).",
+      "- PR #4640: Closing — already fixed in PR #4642 (merged).",
+      "- PR #4639: Closing — already fixed in PR #4642 (merged)."
     ],
     "best_change_type": "bug_fix",
-    "last_report_date": "2026-03-29"
+    "last_report_date": "2026-04-05"
   },
   "cncf_insights": {
-    "last_scan_date": "2026-04-01",
+    "last_scan_date": "2026-04-08",
     "suggested_checks": [
       {
-        "pattern": "error_ux",
-        "count": 5,
-        "added": "2026-04-01",
-        "priority": "medium"
-      },
-      {
-        "pattern": "accessibility",
-        "count": 5,
-        "added": "2026-04-01",
-        "priority": "medium"
-      },
-      {
         "pattern": "navigation_ux",
-        "count": 7,
-        "added": "2026-04-01",
-        "priority": "medium"
-      },
-      {
-        "pattern": "data_viz",
-        "count": 6,
-        "added": "2026-04-01",
+        "count": 9,
+        "added": "2026-04-08",
         "priority": "medium"
       },
       {
         "pattern": "form_ux",
-        "count": 11,
-        "added": "2026-04-01",
+        "count": 12,
+        "added": "2026-04-08",
         "priority": "medium"
       },
       {
         "pattern": "realtime_ux",
-        "count": 10,
-        "added": "2026-04-01",
+        "count": 12,
+        "added": "2026-04-08",
         "priority": "medium"
       }
     ]
   },
   "history": [
-    {
-      "date": "2026-02-28",
-      "total_merged": 74,
-      "total_closed": 39,
-      "categories_blocked": [],
-      "categories_boosted": [
-        "consistency"
-      ]
-    },
-    {
-      "date": "2026-03-01",
-      "total_merged": 78,
-      "total_closed": 39,
-      "categories_blocked": [],
-      "categories_boosted": [
-        "consistency"
-      ]
-    },
-    {
-      "date": "2026-03-03",
-      "total_merged": 79,
-      "total_closed": 44,
-      "categories_blocked": [],
-      "categories_boosted": [
-        "consistency"
-      ]
-    },
-    {
-      "date": "2026-03-05",
-      "total_merged": 83,
-      "total_closed": 44,
-      "categories_blocked": [],
-      "categories_boosted": [
-        "consistency"
-      ]
-    },
     {
       "date": "2026-03-06",
       "total_merged": 93,
@@ -335,18 +281,58 @@
       "total_closed": 132,
       "categories_blocked": [],
       "categories_boosted": []
+    },
+    {
+      "date": "2026-04-05",
+      "total_merged": 131,
+      "total_closed": 178,
+      "categories_blocked": [
+        "operator",
+        "sre"
+      ],
+      "categories_boosted": []
+    },
+    {
+      "date": "2026-04-06",
+      "total_merged": 131,
+      "total_closed": 228,
+      "categories_blocked": [
+        "operator",
+        "sre"
+      ],
+      "categories_boosted": []
+    },
+    {
+      "date": "2026-04-07",
+      "total_merged": 131,
+      "total_closed": 278,
+      "categories_blocked": [
+        "operator",
+        "sre"
+      ],
+      "categories_boosted": []
+    },
+    {
+      "date": "2026-04-08",
+      "total_merged": 131,
+      "total_closed": 288,
+      "categories_blocked": [
+        "operator",
+        "sre"
+      ],
+      "categories_boosted": []
     }
   ],
   "rotation_weights": {
-    "performance": 0.86,
-    "security": 0.8,
-    "a11y": 1.01,
-    "operator": 0.39,
-    "sre": 0.6,
-    "features": 0.9,
-    "resilience": 0.74,
-    "consistency": 0.72
+    "performance": 0.71,
+    "security": 0.63,
+    "a11y": 0.93,
+    "operator": 0,
+    "sre": 0,
+    "features": 0.41,
+    "resilience": 0.62,
+    "consistency": 0.68
   },
   "max_issues_override": 2,
-  "pr_guidance": "Keep PRs small and focused. Smaller PRs have higher acceptance rates."
+  "pr_guidance": "Keep changes under 50 lines (size S) for best acceptance rate. Split larger fixes into multiple PRs."
 }

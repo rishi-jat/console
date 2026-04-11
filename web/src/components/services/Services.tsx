@@ -1,4 +1,3 @@
-import { useCallback } from 'react'
 import { AlertCircle } from 'lucide-react'
 import { useClusters, useServices } from '../../hooks/useMCP'
 import { useGlobalFilters } from '../../hooks/useGlobalFilters'
@@ -7,6 +6,7 @@ import { useUniversalStats, createMergedStatValueGetter } from '../../hooks/useU
 import { StatBlockValue } from '../ui/StatsOverview'
 import { DashboardPage } from '../../lib/dashboards/DashboardPage'
 import { getDefaultCards } from '../../config/dashboards'
+import { RotatingTip } from '../ui/RotatingTip'
 
 const SERVICES_CARDS_KEY = 'kubestellar-services-cards'
 
@@ -38,9 +38,18 @@ export function Services() {
   const loadBalancers = filteredServices.filter(s => s.type === 'LoadBalancer').length
   const nodePortServices = filteredServices.filter(s => s.type === 'NodePort').length
   const clusterIPServices = filteredServices.filter(s => s.type === 'ClusterIP').length
+  // Issue #6150: "Endpoints" stat must reflect the actual number of
+  // ready backend addresses (pods) across all services, not the number
+  // of services. Each service's `endpoints` field is the sum of ready
+  // addresses from its core/v1 Endpoints object as populated by the
+  // backend. Services with no matching pods contribute 0.
+  const totalEndpoints = filteredServices.reduce(
+    (sum, svc) => sum + (svc.endpoints ?? 0),
+    0,
+  )
 
   // Stats value getter
-  const getDashboardStatValue = useCallback((blockId: string): StatBlockValue => {
+  const getDashboardStatValue = (blockId: string): StatBlockValue => {
     switch (blockId) {
       case 'clusters':
         return { value: reachableClusters.length, sublabel: 'clusters', onClick: () => drillToAllClusters(), isClickable: reachableClusters.length > 0 }
@@ -57,22 +66,20 @@ export function Services() {
       case 'ingresses':
         return { value: 0, sublabel: 'ingresses', isClickable: false }
       case 'endpoints':
-        return { value: totalServices, sublabel: 'endpoints', onClick: () => drillToAllServices(), isClickable: totalServices > 0 }
+        return { value: totalEndpoints, sublabel: 'endpoints', onClick: () => drillToAllServices(), isClickable: totalEndpoints > 0 }
       default:
         return { value: 0 }
     }
-  }, [reachableClusters.length, totalServices, loadBalancers, nodePortServices, clusterIPServices, drillToAllServices, drillToAllClusters])
+  }
 
-  const getStatValue = useCallback(
-    (blockId: string) => createMergedStatValueGetter(getDashboardStatValue, getUniversalStatValue)(blockId),
-    [getDashboardStatValue, getUniversalStatValue]
-  )
+  const getStatValue = (blockId: string) => createMergedStatValueGetter(getDashboardStatValue, getUniversalStatValue)(blockId)
 
   return (
     <DashboardPage
       title="Services"
       subtitle="Monitor Kubernetes services and network connectivity"
       icon="Network"
+      rightExtra={<RotatingTip page="services" />}
       storageKey={SERVICES_CARDS_KEY}
       defaultCards={DEFAULT_SERVICES_CARDS}
       statsType="network"
@@ -84,8 +91,7 @@ export function Services() {
       hasData={reachableClusters.length > 0}
       emptyState={{
         title: 'Services Dashboard',
-        description: 'Add cards to monitor Kubernetes services, endpoints, and network connectivity across your clusters.',
-      }}
+        description: 'Add cards to monitor Kubernetes services, endpoints, and network connectivity across your clusters.' }}
     >
       {/* Error Display */}
       {error && (

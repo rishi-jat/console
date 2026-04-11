@@ -69,8 +69,8 @@ const NO_CACHED_HOOK_EXEMPT = new Set([
   'ContainerTetris.tsx', 'FlappyPod.tsx', 'PodSweeper.tsx', 'Game2048.tsx',
   'Checkers.tsx', 'KubeChess.tsx', 'Solitaire.tsx', 'MatchGame.tsx',
   'Kubedle.tsx', 'SudokuGame.tsx', 'PodBrothers.tsx', 'KubeKart.tsx',
-  'KubePong.tsx', 'KubeSnake.tsx', 'KubeGalaga.tsx', 'KubeCraft.tsx',
-  'KubeCraft3D.tsx', 'KubeDoom.tsx', 'PodCrosser.tsx',
+  'KubePong.tsx', 'KubeSnake.tsx', 'KubeGalaga.tsx',
+  'KubeDoom.tsx', 'PodCrosser.tsx',
   // Embed/iframe cards
   'IframeEmbed.tsx', 'MobileBrowser.tsx',
   // Pure UI cards
@@ -108,7 +108,6 @@ const KNOWN_VIOLATIONS: Record<string, Set<string>> = {
   'GatewayStatus.tsx': new Set(['bare-isLoading']),
   'GPUStatus.tsx': new Set(['bare-isLoading']),
   'HelmHistory.tsx': new Set(['bare-isLoading']),
-  'HelmReleaseStatus.tsx': new Set(['missing-isRefreshing']),
   'insights/CrossClusterEventCorrelation.tsx': new Set(['missing-isRefreshing']),
   'kagenti/KagentiAgentDiscovery.tsx': new Set(['bare-isLoading']),
   'kagenti/KagentiAgentFleet.tsx': new Set(['bare-isLoading']),

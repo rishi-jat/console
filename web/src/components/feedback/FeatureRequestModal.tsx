@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { X, Bug, Sparkles, Loader2, ExternalLink, Bell, Check, Clock, GitPullRequest, GitMerge, Eye, Pencil, RefreshCw, MessageSquare, Settings, Github, Coins, Lightbulb, AlertCircle, AlertTriangle, Linkedin, Trophy, Monitor, BookOpen, ImagePlus, Trash2, Copy, Maximize2, FileText, Save, RotateCcw } from 'lucide-react'
+import { X, Bug, Sparkles, Loader2, ExternalLink, Bell, Check, Clock, GitPullRequest, GitMerge, Eye, Pencil, RefreshCw, MessageSquare, Settings, Coins, Lightbulb, AlertCircle, AlertTriangle, Trophy, Monitor, BookOpen, ImagePlus, Trash2, Copy, Maximize2, FileText, Save, RotateCcw } from 'lucide-react'
+import { Github, Linkedin } from '@/lib/icons'
 import { Button } from '../ui/Button'
 import { StatusBadge } from '../ui/StatusBadge'
 import { BaseModal } from '../../lib/modals'
@@ -11,8 +12,7 @@ import {
   isTriaged,
   type RequestType,
   type RequestStatus,
-  type TargetRepo,
-} from '../../hooks/useFeatureRequests'
+  type TargetRepo } from '../../hooks/useFeatureRequests'
 import { useAuth } from '../../lib/auth'
 import { useRewards } from '../../hooks/useRewards'
 import { BACKEND_DEFAULT_URL, STORAGE_KEY_TOKEN, DEMO_TOKEN_VALUE, FETCH_DEFAULT_TIMEOUT_MS, COPY_FEEDBACK_TIMEOUT_MS } from '../../lib/constants'
@@ -20,6 +20,7 @@ import { FEEDBACK_UPLOAD_TIMEOUT_MS } from '../../lib/constants/network'
 import { GITHUB_TOKEN_CREATE_URL, GITHUB_TOKEN_FINE_GRAINED_PERMISSIONS } from '../../lib/constants/github-token'
 import { compressScreenshot } from '../../lib/imageCompression'
 import { emitLinkedInShare } from '../../lib/analytics'
+import { copyBlobToClipboard } from '../../lib/clipboard'
 import { isDemoModeForced } from '../../lib/demoMode'
 import { useToast } from '../ui/Toast'
 import { useTranslation } from 'react-i18next'
@@ -80,8 +81,7 @@ function getStatusInfo(status: RequestStatus, closedByUser?: boolean): { label: 
     fix_ready: { color: 'text-green-400', bgColor: 'bg-green-500/20' },
     fix_complete: { color: 'text-green-400', bgColor: 'bg-green-500/20' },
     unable_to_fix: { color: 'text-orange-400', bgColor: 'bg-orange-500/20' },
-    closed: { color: 'text-muted-foreground', bgColor: 'bg-gray-500/20' },
-  }
+    closed: { color: 'text-muted-foreground', bgColor: 'bg-gray-500/20' } }
   // Show different label for closed status based on who closed it
   let label = STATUS_LABELS[status]
   if (status === 'closed' && closedByUser) {
@@ -207,7 +207,14 @@ export function FeatureRequestModal({ isOpen, onClose, initialTab, initialReques
     try {
       const res = await fetch(preview, { signal: AbortSignal.timeout(FETCH_DEFAULT_TIMEOUT_MS) })
       const blob = await res.blob()
-      await navigator.clipboard.write([new ClipboardItem({ [blob.type]: blob })])
+      // #6229: shared clipboard helper guards `navigator.clipboard.write`
+      // AND `typeof ClipboardItem === 'function'`. See FeedbackModal for
+      // the same change.
+      const ok = await copyBlobToClipboard(blob)
+      if (!ok) {
+        showToast('Could not copy image to clipboard (browser may not support image copy)', 'error')
+        return
+      }
       setCopiedIndex(index)
       setTimeout(() => setCopiedIndex(null), COPY_FEEDBACK_TIMEOUT_MS)
     } catch {
@@ -236,8 +243,7 @@ export function FeatureRequestModal({ isOpen, onClose, initialTab, initialReques
 
     fetch(`${BACKEND_DEFAULT_URL}/api/github/token/status`, {
       headers: token ? { Authorization: `Bearer ${token}` } : {},
-      signal: AbortSignal.timeout(FETCH_DEFAULT_TIMEOUT_MS),
-    })
+      signal: AbortSignal.timeout(FETCH_DEFAULT_TIMEOUT_MS) })
       .then(res => res.ok ? res.json() : null)
       .then(data => {
         if (data && !data.hasToken) {
@@ -254,8 +260,7 @@ export function FeatureRequestModal({ isOpen, onClose, initialTab, initialReques
     try {
       const res = await fetch(`${BACKEND_DEFAULT_URL}/api/feedback/preview/${prNumber}`, {
         headers: { Authorization: `Bearer ${token}` },
-        signal: AbortSignal.timeout(FETCH_DEFAULT_TIMEOUT_MS),
-      })
+        signal: AbortSignal.timeout(FETCH_DEFAULT_TIMEOUT_MS) })
       if (res.ok) {
         const data = await res.json()
         setPreviewResults(prev => ({ ...prev, [prNumber]: data }))
@@ -319,38 +324,54 @@ export function FeatureRequestModal({ isOpen, onClose, initialTab, initialReques
     }
   }
 
-  /** Save current form content as a draft (new or update existing) */
-  const handleSaveDraft = useCallback(() => {
+  /** Save current form content as a draft (new or update existing).
+   * Screenshots are persisted as base64 data URIs (the preview field
+   * produced by FileReader.readAsDataURL) so they survive a full
+   * reload. The File object itself cannot be serialized. #6102
+   */
+  const handleSaveDraft = () => {
     if (description.trim().length < 5) {
       showToast('Draft is too short to save', 'error')
       return
     }
-    const id = saveDraft({ requestType, targetRepo, description }, editingDraftId || undefined)
+    const screenshotDataURIs = screenshots.map(s => s.preview)
+    const id = saveDraft(
+      { requestType, targetRepo, description, screenshots: screenshotDataURIs },
+      editingDraftId || undefined,
+    )
     if (id) {
       setEditingDraftId(id)
       showToast(editingDraftId ? 'Draft updated' : 'Draft saved', 'success')
     }
-  }, [description, requestType, targetRepo, editingDraftId, saveDraft, showToast])
+  }
 
   /** Restore a draft into the submit form */
-  const handleRestoreDraft = useCallback((draft: FeedbackDraft) => {
+  const handleRestoreDraft = (draft: FeedbackDraft) => {
     setRequestType(draft.requestType)
     setTargetRepo(draft.targetRepo)
     setDescription(draft.description)
     setEditingDraftId(draft.id)
+    // Restore screenshots from the draft. We recreate a minimal File
+    // stub (the upload pipeline only needs `preview`; the `file` field
+    // is used for displaying size/name in the uploader UI). #6102
+    const restoredScreenshots = (draft.screenshots || []).map((preview, idx) => ({
+      file: new File([], `draft-screenshot-${idx + 1}.png`, { type: 'image/png' }),
+      preview,
+    }))
+    setScreenshots(restoredScreenshots)
     setActiveTab('submit')
     showToast('Draft loaded into editor', 'success')
-  }, [showToast])
+  }
 
   /** Delete a draft and remove from editing state if it was active */
-  const handleDeleteDraft = useCallback((id: string) => {
+  const handleDeleteDraft = (id: string) => {
     deleteDraft(id)
     if (editingDraftId === id) {
       setEditingDraftId(null)
     }
     setConfirmDeleteDraft(null)
     showToast('Draft deleted', 'success')
-  }, [deleteDraft, editingDraftId, showToast])
+  }
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -393,13 +414,11 @@ export function FeatureRequestModal({ isOpen, onClose, initialTab, initialReques
         description: extractedDesc,
         request_type: requestType,
         target_repo: targetRepo,
-        ...(hasScreenshots && { screenshots: screenshotDataURIs }),
-      }, hasScreenshots ? { timeout: FEEDBACK_UPLOAD_TIMEOUT_MS } : undefined)
+        ...(hasScreenshots && { screenshots: screenshotDataURIs }) }, hasScreenshots ? { timeout: FEEDBACK_UPLOAD_TIMEOUT_MS } : undefined)
       setSuccess({
         issueUrl: result.github_issue_url,
         screenshotsUploaded: result.screenshots_uploaded,
-        screenshotsFailed: result.screenshots_failed,
-      })
+        screenshotsFailed: result.screenshots_failed })
       // If submitting from a draft, delete it now that it's been submitted
       if (editingDraftId) {
         deleteDraft(editingDraftId)
@@ -464,8 +483,8 @@ export function FeatureRequestModal({ isOpen, onClose, initialTab, initialReques
     <BaseModal isOpen={isOpen} onClose={handleClose} size="lg" closeOnBackdrop={false} closeOnEscape={true} className="!h-[80vh]">
       {/* Discard/Save Draft confirmation — 3-way choice: Save Draft, Discard, Keep Editing */}
       {showDiscardConfirm && (
-        <div className="fixed inset-0 z-[10002] flex items-center justify-center bg-black/60 backdrop-blur-sm">
-          <div className="bg-background border border-border rounded-lg shadow-xl p-6 max-w-sm w-full mx-4" onClick={e => e.stopPropagation()}>
+        <div className="fixed inset-0 z-critical flex items-center justify-center bg-black/60 backdrop-blur-sm" role="presentation">
+          <div className="bg-background border border-border rounded-lg shadow-xl p-6 max-w-sm w-full mx-4" role="dialog" aria-modal="true" onClick={e => e.stopPropagation()}>
             <div className="flex items-center gap-3 mb-3">
               <div className="w-10 h-10 rounded-full bg-yellow-500/20 flex items-center justify-center flex-shrink-0">
                 <AlertTriangle className="w-5 h-5 text-yellow-400" />
@@ -507,10 +526,10 @@ export function FeatureRequestModal({ isOpen, onClose, initialTab, initialReques
       {showLoginPrompt && (
         <>
           <div
-            className="fixed inset-0 bg-black/60 backdrop-blur-2xl z-[10001]"
+            className="fixed inset-0 bg-black/60 backdrop-blur-sm z-critical"
             onClick={() => setShowLoginPrompt(false)}
           />
-          <div className="fixed inset-0 z-[10001] flex items-center justify-center p-4 pointer-events-none">
+          <div className="fixed inset-0 z-critical flex items-center justify-center p-4 pointer-events-none">
             {isDemoModeForced ? (
               /* Demo mode: simple prompt to get their own console */
               <div
@@ -1921,7 +1940,7 @@ export function FeatureRequestModal({ isOpen, onClose, initialTab, initialReques
       {isPreviewFullscreen && (
         <div
           ref={fullscreenOverlayRef}
-          className="fixed inset-0 z-[100] flex items-center justify-center bg-black/70 backdrop-blur-sm"
+          className="fixed inset-0 z-overlay flex items-center justify-center bg-black/60 backdrop-blur-sm"
           onClick={(e) => {
             if (e.target === fullscreenOverlayRef.current) {
               setIsPreviewFullscreen(false)
@@ -1959,7 +1978,7 @@ export function FeatureRequestModal({ isOpen, onClose, initialTab, initialReques
       {previewImageSrc && (
         <div
           ref={screenshotPreviewRef}
-          className="fixed inset-0 z-[100] flex items-center justify-center bg-black/70 backdrop-blur-sm"
+          className="fixed inset-0 z-overlay flex items-center justify-center bg-black/60 backdrop-blur-sm"
           onClick={(e) => {
             if (e.target === screenshotPreviewRef.current) {
               setPreviewImageSrc(null)

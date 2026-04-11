@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -13,7 +14,10 @@ import (
 )
 
 const (
+	// kagentCRDTimeout is the shared context timeout for sequential CRD operations
 	kagentCRDTimeout = 30 * time.Second
+	// kagentCRDPerCallTimeout is the per-call timeout when CRD calls run concurrently
+	kagentCRDPerCallTimeout = 15 * time.Second
 )
 
 // kagent.dev CRD Group/Version/Resource definitions
@@ -115,6 +119,11 @@ func (s *Server) handleKagentCRDAgents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !s.validateToken(r) {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
 	if s.k8sClient == nil {
 		json.NewEncoder(w).Encode(map[string]any{"agents": []any{}})
 		return
@@ -123,6 +132,7 @@ func (s *Server) handleKagentCRDAgents(w http.ResponseWriter, r *http.Request) {
 	cluster := r.URL.Query().Get("cluster")
 	namespace := r.URL.Query().Get("namespace")
 	if cluster == "" {
+		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]any{"agents": []any{}, "error": "cluster parameter required"})
 		return
 	}
@@ -133,6 +143,7 @@ func (s *Server) handleKagentCRDAgents(w http.ResponseWriter, r *http.Request) {
 	dynClient, err := s.k8sClient.GetDynamicClient(cluster)
 	if err != nil {
 		slog.Info("error fetching kagent agents for cluster request")
+		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(map[string]any{"agents": []any{}, "error": "internal server error"})
 		return
 	}
@@ -151,8 +162,14 @@ func (s *Server) handleKagentCRDAgents(w http.ResponseWriter, r *http.Request) {
 
 	agents := make([]kagentCRDAgent, 0, len(list.Items))
 	for _, item := range list.Items {
-		specMap, _ := item.Object["spec"].(map[string]any)
-		statusMap, _ := item.Object["status"].(map[string]any)
+		specMap, ok := item.Object["spec"].(map[string]any)
+		if !ok {
+			specMap = nil
+		}
+		statusMap, ok := item.Object["status"].(map[string]any)
+		if !ok {
+			statusMap = nil
+		}
 
 		a := kagentCRDAgent{
 			Name:      item.GetName(),
@@ -205,6 +222,11 @@ func (s *Server) handleKagentCRDTools(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !s.validateToken(r) {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
 	if s.k8sClient == nil {
 		json.NewEncoder(w).Encode(map[string]any{"tools": []any{}})
 		return
@@ -213,6 +235,7 @@ func (s *Server) handleKagentCRDTools(w http.ResponseWriter, r *http.Request) {
 	cluster := r.URL.Query().Get("cluster")
 	namespace := r.URL.Query().Get("namespace")
 	if cluster == "" {
+		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]any{"tools": []any{}, "error": "cluster parameter required"})
 		return
 	}
@@ -223,6 +246,7 @@ func (s *Server) handleKagentCRDTools(w http.ResponseWriter, r *http.Request) {
 	dynClient, err := s.k8sClient.GetDynamicClient(cluster)
 	if err != nil {
 		slog.Info("error fetching kagent tools for cluster request")
+		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(map[string]any{"tools": []any{}, "error": "internal server error"})
 		return
 	}
@@ -238,8 +262,14 @@ func (s *Server) handleKagentCRDTools(w http.ResponseWriter, r *http.Request) {
 	}
 	if err == nil {
 		for _, item := range tsList.Items {
-			specMap, _ := item.Object["spec"].(map[string]any)
-			statusMap, _ := item.Object["status"].(map[string]any)
+			specMap, ok := item.Object["spec"].(map[string]any)
+			if !ok {
+				specMap = nil
+			}
+			statusMap, ok := item.Object["status"].(map[string]any)
+			if !ok {
+				statusMap = nil
+			}
 
 			t := kagentCRDTool{
 				Name:      item.GetName(),
@@ -267,8 +297,14 @@ func (s *Server) handleKagentCRDTools(w http.ResponseWriter, r *http.Request) {
 	}
 	if err == nil {
 		for _, item := range rmsList.Items {
-			specMap, _ := item.Object["spec"].(map[string]any)
-			statusMap, _ := item.Object["status"].(map[string]any)
+			specMap, ok := item.Object["spec"].(map[string]any)
+			if !ok {
+				specMap = nil
+			}
+			statusMap, ok := item.Object["status"].(map[string]any)
+			if !ok {
+				statusMap = nil
+			}
 
 			t := kagentCRDTool{
 				Name:      item.GetName(),
@@ -319,6 +355,11 @@ func (s *Server) handleKagentCRDModels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !s.validateToken(r) {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
 	if s.k8sClient == nil {
 		json.NewEncoder(w).Encode(map[string]any{"models": []any{}})
 		return
@@ -327,6 +368,7 @@ func (s *Server) handleKagentCRDModels(w http.ResponseWriter, r *http.Request) {
 	cluster := r.URL.Query().Get("cluster")
 	namespace := r.URL.Query().Get("namespace")
 	if cluster == "" {
+		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]any{"models": []any{}, "error": "cluster parameter required"})
 		return
 	}
@@ -337,6 +379,7 @@ func (s *Server) handleKagentCRDModels(w http.ResponseWriter, r *http.Request) {
 	dynClient, err := s.k8sClient.GetDynamicClient(cluster)
 	if err != nil {
 		slog.Info("error fetching kagent models for cluster request")
+		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(map[string]any{"models": []any{}, "error": "internal server error"})
 		return
 	}
@@ -352,7 +395,10 @@ func (s *Server) handleKagentCRDModels(w http.ResponseWriter, r *http.Request) {
 	}
 	if err == nil {
 		for _, item := range mcList.Items {
-			specMap, _ := item.Object["spec"].(map[string]any)
+			specMap, ok := item.Object["spec"].(map[string]any)
+			if !ok {
+				specMap = nil
+			}
 
 			m := kagentCRDModel{
 				Name:      item.GetName(),
@@ -377,8 +423,14 @@ func (s *Server) handleKagentCRDModels(w http.ResponseWriter, r *http.Request) {
 	}
 	if err == nil {
 		for _, item := range mpcList.Items {
-			specMap, _ := item.Object["spec"].(map[string]any)
-			statusMap, _ := item.Object["status"].(map[string]any)
+			specMap, ok := item.Object["spec"].(map[string]any)
+			if !ok {
+				specMap = nil
+			}
+			statusMap, ok := item.Object["status"].(map[string]any)
+			if !ok {
+				statusMap = nil
+			}
 
 			m := kagentCRDModel{
 				Name:      item.GetName(),
@@ -429,6 +481,11 @@ func (s *Server) handleKagentCRDMemories(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	if !s.validateToken(r) {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
 	if s.k8sClient == nil {
 		json.NewEncoder(w).Encode(map[string]any{"memories": []any{}})
 		return
@@ -437,6 +494,7 @@ func (s *Server) handleKagentCRDMemories(w http.ResponseWriter, r *http.Request)
 	cluster := r.URL.Query().Get("cluster")
 	namespace := r.URL.Query().Get("namespace")
 	if cluster == "" {
+		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]any{"memories": []any{}, "error": "cluster parameter required"})
 		return
 	}
@@ -447,6 +505,7 @@ func (s *Server) handleKagentCRDMemories(w http.ResponseWriter, r *http.Request)
 	dynClient, err := s.k8sClient.GetDynamicClient(cluster)
 	if err != nil {
 		slog.Info("error fetching kagent memories for cluster request")
+		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(map[string]any{"memories": []any{}, "error": "internal server error"})
 		return
 	}
@@ -464,7 +523,10 @@ func (s *Server) handleKagentCRDMemories(w http.ResponseWriter, r *http.Request)
 
 	memories := make([]kagentCRDMemory, 0, len(list.Items))
 	for _, item := range list.Items {
-		specMap, _ := item.Object["spec"].(map[string]any)
+		specMap, ok := item.Object["spec"].(map[string]any)
+		if !ok {
+			specMap = nil
+		}
 
 		m := kagentCRDMemory{
 			Name:      item.GetName(),
@@ -480,12 +542,19 @@ func (s *Server) handleKagentCRDMemories(w http.ResponseWriter, r *http.Request)
 	json.NewEncoder(w).Encode(map[string]any{"memories": memories, "source": "agent"})
 }
 
-// handleKagentCRDSummary returns an aggregated summary of kagent.dev resources for a cluster
+// handleKagentCRDSummary returns an aggregated summary of kagent.dev resources for a cluster.
+// All 6 CRD queries run concurrently with per-call timeouts to prevent slow calls from
+// starving later ones (fixes #5354).
 func (s *Server) handleKagentCRDSummary(w http.ResponseWriter, r *http.Request) {
 	s.setCORSHeaders(w, r)
 	w.Header().Set("Content-Type", "application/json")
 	if r.Method == "OPTIONS" {
 		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	if !s.validateToken(r) {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
 
@@ -500,16 +569,15 @@ func (s *Server) handleKagentCRDSummary(w http.ResponseWriter, r *http.Request) 
 
 	cluster := r.URL.Query().Get("cluster")
 	if cluster == "" {
+		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]any{"error": "cluster parameter required"})
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), kagentCRDTimeout)
-	defer cancel()
-
 	dynClient, err := s.k8sClient.GetDynamicClient(cluster)
 	if err != nil {
 		slog.Info("error fetching kagent CRD summary for cluster request")
+		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(map[string]any{
 			"agentCount": 0, "toolServerCount": 0, "remoteMCPServerCount": 0,
 			"modelConfigCount": 0, "modelProviderConfigCount": 0, "memoryCount": 0,
@@ -521,55 +589,129 @@ func (s *Server) handleKagentCRDSummary(w http.ResponseWriter, r *http.Request) 
 
 	var agentCount, toolServerCount, remoteMCPServerCount int
 	var modelConfigCount, modelProviderConfigCount, memoryCount int
+	var mu sync.Mutex
 	byProvider := map[string]int{}
+	var warnings []string
+
+	var wg sync.WaitGroup
+	const numCRDQueries = 6
+	wg.Add(numCRDQueries)
 
 	// Count agents
-	if agentList, err := dynClient.Resource(agentGVR).List(ctx, metav1.ListOptions{}); err == nil {
+	go func() {
+		defer wg.Done()
+		ctx, cancel := context.WithTimeout(r.Context(), kagentCRDPerCallTimeout)
+		defer cancel()
+		agentList, listErr := dynClient.Resource(agentGVR).List(ctx, metav1.ListOptions{})
+		mu.Lock()
+		defer mu.Unlock()
+		if listErr != nil {
+			slog.Warn("kagent CRD summary: agents query failed", "error", listErr)
+			warnings = append(warnings, "agents query timed out or failed")
+			return
+		}
 		agentCount = len(agentList.Items)
-	}
+	}()
 
 	// Count tool servers
-	if tsList, err := dynClient.Resource(toolServerGVR).List(ctx, metav1.ListOptions{}); err == nil {
+	go func() {
+		defer wg.Done()
+		ctx, cancel := context.WithTimeout(r.Context(), kagentCRDPerCallTimeout)
+		defer cancel()
+		tsList, listErr := dynClient.Resource(toolServerGVR).List(ctx, metav1.ListOptions{})
+		mu.Lock()
+		defer mu.Unlock()
+		if listErr != nil {
+			slog.Warn("kagent CRD summary: toolServers query failed", "error", listErr)
+			warnings = append(warnings, "toolServers query timed out or failed")
+			return
+		}
 		toolServerCount = len(tsList.Items)
-	}
+	}()
 
 	// Count remote MCP servers
-	if rmsList, err := dynClient.Resource(remoteMCPServerGVR).List(ctx, metav1.ListOptions{}); err == nil {
+	go func() {
+		defer wg.Done()
+		ctx, cancel := context.WithTimeout(r.Context(), kagentCRDPerCallTimeout)
+		defer cancel()
+		rmsList, listErr := dynClient.Resource(remoteMCPServerGVR).List(ctx, metav1.ListOptions{})
+		mu.Lock()
+		defer mu.Unlock()
+		if listErr != nil {
+			slog.Warn("kagent CRD summary: remoteMCPServers query failed", "error", listErr)
+			warnings = append(warnings, "remoteMCPServers query timed out or failed")
+			return
+		}
 		remoteMCPServerCount = len(rmsList.Items)
-	}
+	}()
 
 	// Count model configs and collect providers
-	if mcList, err := dynClient.Resource(modelConfigGVR).List(ctx, metav1.ListOptions{}); err == nil {
+	go func() {
+		defer wg.Done()
+		ctx, cancel := context.WithTimeout(r.Context(), kagentCRDPerCallTimeout)
+		defer cancel()
+		mcList, listErr := dynClient.Resource(modelConfigGVR).List(ctx, metav1.ListOptions{})
+		mu.Lock()
+		defer mu.Unlock()
+		if listErr != nil {
+			slog.Warn("kagent CRD summary: modelConfigs query failed", "error", listErr)
+			warnings = append(warnings, "modelConfigs query timed out or failed")
+			return
+		}
 		modelConfigCount = len(mcList.Items)
 		for _, item := range mcList.Items {
-			specMap, _ := item.Object["spec"].(map[string]any)
-			if specMap != nil {
+			specMap, ok := item.Object["spec"].(map[string]any)
+			if ok && specMap != nil {
 				provider := nestedString(specMap, "provider")
 				if provider != "" {
 					byProvider[provider]++
 				}
 			}
 		}
-	}
+	}()
 
 	// Count model provider configs and collect providers
-	if mpcList, err := dynClient.Resource(modelProviderConfigGVR).List(ctx, metav1.ListOptions{}); err == nil {
+	go func() {
+		defer wg.Done()
+		ctx, cancel := context.WithTimeout(r.Context(), kagentCRDPerCallTimeout)
+		defer cancel()
+		mpcList, listErr := dynClient.Resource(modelProviderConfigGVR).List(ctx, metav1.ListOptions{})
+		mu.Lock()
+		defer mu.Unlock()
+		if listErr != nil {
+			slog.Warn("kagent CRD summary: modelProviderConfigs query failed", "error", listErr)
+			warnings = append(warnings, "modelProviderConfigs query timed out or failed")
+			return
+		}
 		modelProviderConfigCount = len(mpcList.Items)
 		for _, item := range mpcList.Items {
-			specMap, _ := item.Object["spec"].(map[string]any)
-			if specMap != nil {
+			specMap, ok := item.Object["spec"].(map[string]any)
+			if ok && specMap != nil {
 				provider := nestedString(specMap, "provider")
 				if provider != "" {
 					byProvider[provider]++
 				}
 			}
 		}
-	}
+	}()
 
 	// Count memories
-	if memList, err := dynClient.Resource(memoryGVR).List(ctx, metav1.ListOptions{}); err == nil {
+	go func() {
+		defer wg.Done()
+		ctx, cancel := context.WithTimeout(r.Context(), kagentCRDPerCallTimeout)
+		defer cancel()
+		memList, listErr := dynClient.Resource(memoryGVR).List(ctx, metav1.ListOptions{})
+		mu.Lock()
+		defer mu.Unlock()
+		if listErr != nil {
+			slog.Warn("kagent CRD summary: memories query failed", "error", listErr)
+			warnings = append(warnings, "memories query timed out or failed")
+			return
+		}
 		memoryCount = len(memList.Items)
-	}
+	}()
+
+	wg.Wait()
 
 	byCluster := map[string]any{
 		cluster: map[string]int{
@@ -582,7 +724,7 @@ func (s *Server) handleKagentCRDSummary(w http.ResponseWriter, r *http.Request) 
 		},
 	}
 
-	json.NewEncoder(w).Encode(map[string]any{
+	result := map[string]any{
 		"agentCount":               agentCount,
 		"toolServerCount":          toolServerCount,
 		"remoteMCPServerCount":     remoteMCPServerCount,
@@ -592,5 +734,10 @@ func (s *Server) handleKagentCRDSummary(w http.ResponseWriter, r *http.Request) 
 		"byCluster":                byCluster,
 		"byProvider":               byProvider,
 		"source":                   "agent",
-	})
+	}
+	if len(warnings) > 0 {
+		result["warnings"] = warnings
+	}
+
+	json.NewEncoder(w).Encode(result)
 }

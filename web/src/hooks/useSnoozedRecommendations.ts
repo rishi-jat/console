@@ -1,78 +1,142 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect } from 'react'
 import { CardRecommendation } from './useCardRecommendations'
+import { POLL_INTERVAL_SLOW_MS } from '../lib/constants/network'
+import { STORAGE_KEY_SNOOZED_RECOMMENDATIONS } from '../lib/constants/storage'
 import { emitSnoozed, emitUnsnoozed } from '../lib/analytics'
+
+/** Default snooze duration for recommendations: 24 hours */
+const DEFAULT_REC_SNOOZE_DURATION_MS = 24 * 60 * 60 * 1000
 
 export interface SnoozedRecommendation {
   id: string
   recommendation: CardRecommendation
-  snoozedAt: Date
+  snoozedAt: number // timestamp (ms)
+  expiresAt: number // timestamp (ms)
 }
 
-// Simple in-memory store - in production this would sync with backend
-let snoozedRecs: SnoozedRecommendation[] = []
-const dismissedRecIds: Set<string> = new Set()
+interface StoredState {
+  recs: SnoozedRecommendation[]
+  dismissed: string[] // recommendation IDs that are permanently dismissed
+}
+
+// Module-level state for cross-component sharing
+let state: StoredState = { recs: [], dismissed: [] }
 const listeners: Set<() => void> = new Set()
 
 function notifyListeners() {
   listeners.forEach((listener) => listener())
 }
 
+function loadState(): StoredState {
+  try {
+    const stored = localStorage.getItem(STORAGE_KEY_SNOOZED_RECOMMENDATIONS)
+    if (stored) {
+      const parsed = JSON.parse(stored)
+      // Clean up expired snoozes on load
+      const now = Date.now()
+      parsed.recs = (parsed.recs || []).filter(
+        (r: SnoozedRecommendation) => r.expiresAt > now
+      )
+      parsed.dismissed = parsed.dismissed || []
+      return parsed
+    }
+  } catch {
+    // Ignore parse errors
+  }
+  return { recs: [], dismissed: [] }
+}
+
+function saveState() {
+  try {
+    localStorage.setItem(STORAGE_KEY_SNOOZED_RECOMMENDATIONS, JSON.stringify(state))
+  } catch {
+    // Ignore write errors (e.g. private browsing, quota exceeded)
+  }
+}
+
+// Initialize on module load
+state = loadState()
+
 export function useSnoozedRecommendations() {
-  const [recs, setRecs] = useState<SnoozedRecommendation[]>(snoozedRecs)
+  const [localState, setLocalState] = useState<StoredState>(state)
 
   useEffect(() => {
-    const listener = () => setRecs([...snoozedRecs])
+    const listener = () => setLocalState({ ...state })
     listeners.add(listener)
+
+    // Periodically clean up expired snoozes
+    const checkExpired = () => {
+      const now = Date.now()
+      const hadExpired = state.recs.some(r => r.expiresAt <= now)
+      if (hadExpired) {
+        state.recs = state.recs.filter(r => r.expiresAt > now)
+        saveState()
+        notifyListeners()
+      }
+    }
+
+    const intervalId = setInterval(checkExpired, POLL_INTERVAL_SLOW_MS)
+
     return () => {
       listeners.delete(listener)
+      clearInterval(intervalId)
     }
   }, [])
 
-  const snoozeRecommendation = useCallback((recommendation: CardRecommendation) => {
+  const snoozeRecommendation = (recommendation: CardRecommendation, durationMs = DEFAULT_REC_SNOOZE_DURATION_MS) => {
     // Check if already snoozed
-    if (snoozedRecs.some(r => r.recommendation.id === recommendation.id)) {
+    if (state.recs.some(r => r.recommendation.id === recommendation.id)) {
       return null
     }
 
+    const now = Date.now()
     const newSnoozed: SnoozedRecommendation = {
-      id: `snoozed-rec-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      id: `snoozed-rec-${now}-${Math.random().toString(36).slice(2)}`,
       recommendation,
-      snoozedAt: new Date(),
+      snoozedAt: now,
+      expiresAt: now + durationMs,
     }
-    snoozedRecs = [...snoozedRecs, newSnoozed]
+    state.recs = [...state.recs, newSnoozed]
+    saveState()
     notifyListeners()
     emitSnoozed('recommendation')
     return newSnoozed
-  }, [])
+  }
 
-  const unsnooozeRecommendation = useCallback((id: string) => {
-    const rec = snoozedRecs.find((r) => r.id === id)
-    snoozedRecs = snoozedRecs.filter((r) => r.id !== id)
+  const unsnooozeRecommendation = (id: string) => {
+    const rec = state.recs.find((r) => r.id === id)
+    state.recs = state.recs.filter((r) => r.id !== id)
+    saveState()
     notifyListeners()
     emitUnsnoozed('recommendation')
     return rec
-  }, [])
+  }
 
-  const dismissSnoozedRecommendation = useCallback((id: string) => {
-    snoozedRecs = snoozedRecs.filter((r) => r.id !== id)
+  const dismissSnoozedRecommendation = (id: string) => {
+    state.recs = state.recs.filter((r) => r.id !== id)
+    saveState()
     notifyListeners()
-  }, [])
+  }
 
-  const isSnoozed = useCallback((recId: string) => {
-    return snoozedRecs.some(r => r.recommendation.id === recId)
-  }, [])
+  const isSnoozed = (recId: string) => {
+    const now = Date.now()
+    return state.recs.some(r => r.recommendation.id === recId && r.expiresAt > now)
+  }
 
-  const dismissRecommendation = useCallback((recId: string) => {
-    dismissedRecIds.add(recId)
-    notifyListeners()
-  }, [])
+  const dismissRecommendation = (recId: string) => {
+    if (!state.dismissed.includes(recId)) {
+      state.dismissed = [...state.dismissed, recId]
+      saveState()
+      notifyListeners()
+    }
+  }
 
-  const isDismissed = useCallback((recId: string) => {
-    return dismissedRecIds.has(recId)
-  }, [])
+  const isDismissed = (recId: string) => {
+    return state.dismissed.includes(recId)
+  }
 
   return {
-    snoozedRecommendations: recs,
+    snoozedRecommendations: localState.recs,
     snoozeRecommendation,
     unsnooozeRecommendation,
     dismissSnoozedRecommendation,
@@ -88,9 +152,10 @@ const MINUTES_PER_HOUR = 60
 const HOURS_PER_DAY = 24
 
 // Helper to format elapsed time since snooze
-export function formatElapsedTime(since: Date): string {
-  const now = new Date()
-  const diff = now.getTime() - since.getTime()
+export function formatElapsedTime(since: Date | number): string {
+  const sinceMs = typeof since === 'number' ? since : since.getTime()
+  const now = Date.now()
+  const diff = now - sinceMs
 
   const seconds = Math.floor(diff / 1000)
   const minutes = Math.floor(seconds / SECONDS_PER_MINUTE)

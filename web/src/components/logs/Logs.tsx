@@ -1,4 +1,4 @@
-import { useCallback, useRef, useEffect } from 'react'
+import { useRef, useEffect } from 'react'
 import { useClusters } from '../../hooks/useMCP'
 import { useCachedEvents } from '../../hooks/useCachedData'
 import { useGlobalFilters } from '../../hooks/useGlobalFilters'
@@ -6,11 +6,18 @@ import { useDrillDownActions } from '../../hooks/useDrillDown'
 import { useUniversalStats, createMergedStatValueGetter } from '../../hooks/useUniversalStats'
 import { StatBlockValue } from '../ui/StatsOverview'
 import { DashboardPage } from '../../lib/dashboards/DashboardPage'
+import { RotatingTip } from '../ui/RotatingTip'
 
 const LOGS_CARDS_KEY = 'kubestellar-logs-cards'
 
 // Default cards for the logs dashboard
+//
+// Fixes #6045: the Logs dashboard historically only surfaced Kubernetes
+// Events (via `useCachedEvents()`).  The new `pod_logs` card wires the
+// existing `/api/mcp/pods/logs` backend endpoint to the dashboard so users
+// can actually tail container logs — not just events — from this page.
 const DEFAULT_LOGS_CARDS = [
+  { type: 'pod_logs', title: 'Pod Logs', position: { w: 12, h: 4 } },
   { type: 'event_stream', title: 'Event Stream', position: { w: 12, h: 4 } },
   { type: 'namespace_events', title: 'Namespace Events', position: { w: 6, h: 3 } },
   { type: 'events_timeline', title: 'Events Timeline', position: { w: 6, h: 3 } },
@@ -28,10 +35,10 @@ export function Logs() {
   const { getStatValue: getUniversalStatValue } = useUniversalStats()
   const { selectedClusters: globalSelectedClusters, isAllClustersSelected } = useGlobalFilters()
 
-  const handleRefresh = useCallback(() => {
+  const handleRefresh = () => {
     refetchClusters()
     refetchEvents()
-  }, [refetchClusters, refetchEvents])
+  }
 
   // Filter clusters based on global selection
   const filteredClusters = clusters.filter(c =>
@@ -52,7 +59,8 @@ export function Logs() {
   const currentWarningCount = filteredWarningEvents.length
   const currentNormalCount = filteredEvents.filter(e => e.type === 'Normal').length
   const currentErrorCount = filteredEvents.filter(e =>
-    e.type === 'Warning' && (e.reason?.toLowerCase().includes('error') || e.reason?.toLowerCase().includes('failed'))
+    e.type === 'Error' ||
+    (e.type === 'Warning' && (e.reason?.toLowerCase().includes('error') || e.reason?.toLowerCase().includes('failed')))
   ).length
   const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000)
   const currentRecentCount = filteredEvents.filter(e => {
@@ -70,8 +78,7 @@ export function Logs() {
         warnings: currentWarningCount,
         normal: currentNormalCount,
         errors: currentErrorCount,
-        recent: currentRecentCount,
-      }
+        recent: currentRecentCount }
     }
   }, [currentTotalEvents, currentWarningCount, currentNormalCount, currentErrorCount, currentRecentCount])
 
@@ -82,7 +89,7 @@ export function Logs() {
   const recentCount = currentRecentCount >= 0 && currentTotalEvents > 0 ? currentRecentCount : cachedStats.current.recent
 
   // Stats value getter
-  const getDashboardStatValue = useCallback((blockId: string): StatBlockValue => {
+  const getDashboardStatValue = (blockId: string): StatBlockValue => {
     switch (blockId) {
       case 'clusters':
         return { value: reachableClusters.length, sublabel: 'clusters', onClick: () => drillToAllClusters(), isClickable: reachableClusters.length > 0 }
@@ -101,18 +108,16 @@ export function Logs() {
       default:
         return { value: 0 }
     }
-  }, [reachableClusters.length, totalEvents, warningCount, normalCount, recentCount, errorCount, drillToAllEvents, drillToAllClusters])
+  }
 
-  const getStatValue = useCallback(
-    (blockId: string) => createMergedStatValueGetter(getDashboardStatValue, getUniversalStatValue)(blockId),
-    [getDashboardStatValue, getUniversalStatValue]
-  )
+  const getStatValue = (blockId: string) => createMergedStatValueGetter(getDashboardStatValue, getUniversalStatValue)(blockId)
 
   return (
     <DashboardPage
       title="Logs & Events"
       subtitle="Monitor cluster events and application logs"
       icon="ScrollText"
+      rightExtra={<RotatingTip page="logs" />}
       storageKey={LOGS_CARDS_KEY}
       defaultCards={DEFAULT_LOGS_CARDS}
       statsType="events"
@@ -121,11 +126,10 @@ export function Logs() {
       isLoading={isLoading}
       isRefreshing={isRefreshing}
       lastUpdated={lastUpdated}
-      hasData={reachableClusters.length > 0}
+      hasData={reachableClusters.length > 0 || filteredEvents.length > 0}
       emptyState={{
         title: 'Logs & Events Dashboard',
-        description: 'Add cards to monitor Kubernetes events, application logs, and system messages across your clusters.',
-      }}
+        description: 'Add cards to monitor Kubernetes events, application logs, and system messages across your clusters.' }}
     />
   )
 }

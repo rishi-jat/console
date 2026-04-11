@@ -28,34 +28,30 @@ export function ComputeOverview() {
     availableClusters,
     showClusterFilter,
     setShowClusterFilter,
-    clusterFilterRef,
-  } = useChartFilters({
-    storageKey: 'compute-overview',
-  })
+    clusterFilterRef } = useChartFilters({
+    storageKey: 'compute-overview' })
 
-  // Filter clusters by global selection first
+  // Memoize filtered arrays to avoid new references on every render (#5774)
   const globalFilteredClusters = useMemo(() => {
     if (isAllClustersSelected) return clusters
     return clusters.filter(c => selectedClusters.includes(c.name))
-  }, [clusters, selectedClusters, isAllClustersSelected])
+  }, [clusters, isAllClustersSelected, selectedClusters])
 
-  // Apply local cluster filter
   const filteredClusters = useMemo(() => {
     if (localClusterFilter.length === 0) return globalFilteredClusters
     return globalFilteredClusters.filter(c => localClusterFilter.includes(c.name))
   }, [globalFilteredClusters, localClusterFilter])
 
-  // Filter GPU nodes by selection
   const filteredGPUNodes = useMemo(() => {
     let result = gpuNodes
     if (!isAllClustersSelected) {
-      result = result.filter(n => selectedClusters.some(c => n.cluster.startsWith(c)))
+      result = result.filter(n => selectedClusters.some(c => (n.cluster ?? '').startsWith(c)))
     }
     if (localClusterFilter.length > 0) {
-      result = result.filter(n => localClusterFilter.some(c => n.cluster.startsWith(c)))
+      result = result.filter(n => localClusterFilter.some(c => (n.cluster ?? '').startsWith(c)))
     }
     return result
-  }, [gpuNodes, selectedClusters, isAllClustersSelected, localClusterFilter])
+  }, [gpuNodes, isAllClustersSelected, selectedClusters, localClusterFilter])
 
   // Calculate compute stats
   const stats = useMemo(() => {
@@ -91,11 +87,10 @@ export function ComputeOverview() {
       availableGPUs: totalGPUs - allocatedGPUs,
       gpuUtilization,
       gpuTypes: Array.from(gpuTypes.entries()).sort((a, b) => b[1] - a[1]),
-      clustersWithGPU: new Set(filteredGPUNodes.map(n => n.cluster.split('/')[0])).size,
+      clustersWithGPU: new Set(filteredGPUNodes.map(n => (n.cluster ?? '').split('/')[0])).size,
       healthyClusters,
       degradedClusters,
-      offlineClusters,
-    }
+      offlineClusters }
   }, [filteredClusters, filteredGPUNodes])
 
   // Check if we have real data from reachable clusters
@@ -110,8 +105,7 @@ export function ComputeOverview() {
     hasAnyData: hasData,
     isFailed: clustersFailed,
     consecutiveFailures: clustersConsecutiveFailures,
-    isDemoData: isDemoMode || isDemoFallback,
-  })
+    isDemoData: isDemoMode || isDemoFallback })
 
   if (showSkeleton) {
     return (

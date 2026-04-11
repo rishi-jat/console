@@ -1,4 +1,4 @@
-import { ReactNode, Suspense, lazy, useState, useEffect, useRef, useCallback } from 'react'
+import { ReactNode, Suspense, lazy, useState, useEffect, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Link, useLocation } from 'react-router-dom'
 import { Box, Wifi, WifiOff, X, Settings, Rocket, RotateCcw, Check, Loader2, RefreshCw, Plug } from 'lucide-react'
@@ -20,14 +20,14 @@ import { useBackendHealth } from '../../hooks/useBackendHealth'
 import { useDeepLink } from '../../hooks/useDeepLink'
 import { cn } from '../../lib/cn'
 import { LOCAL_AGENT_HTTP_URL, FETCH_DEFAULT_TIMEOUT_MS } from '../../lib/constants'
-import { NAVBAR_HEIGHT_PX, BANNER_HEIGHT_PX } from '../../lib/constants/ui'
+import { NAVBAR_HEIGHT_PX, BANNER_HEIGHT_PX, SIDEBAR_CONTROLS_OFFSET_PX } from '../../lib/constants/ui'
 import { CLOSE_ANIMATION_MS, UI_FEEDBACK_TIMEOUT_MS, TOAST_DISMISS_MS } from '../../lib/constants/network'
 import { TourOverlay, TourPrompt } from '../onboarding/Tour'
 import { TourProvider } from '../../hooks/useTour'
 import { SetupInstructionsDialog } from '../setup/SetupInstructionsDialog'
 import { InClusterAgentDialog } from '../setup/InClusterAgentDialog'
 import { AgentSetupDialog } from '../agent/AgentSetupDialog'
-import { KeepAliveOutlet } from './KeepAliveOutlet'
+import { Outlet } from 'react-router-dom'
 import { PageErrorBoundary } from '../PageErrorBoundary'
 import { UpdateProgressBanner } from '../updates/UpdateProgressBanner'
 import { useUpdateProgress } from '../../hooks/useUpdateProgress'
@@ -51,8 +51,7 @@ const STAR_POSITIONS = Array.from({ length: 30 }, () => ({
   height: Math.random() * 2 + 1 + 'px',
   left: Math.random() * 100 + '%',
   top: Math.random() * 100 + '%',
-  animationDelay: Math.random() * 3 + 's',
-}))
+  animationDelay: Math.random() * 3 + 's' }))
 
 // Thin progress bar shown during route transitions so the user
 // gets immediate visual feedback that navigation is happening.
@@ -91,7 +90,7 @@ interface LayoutProps {
   children?: ReactNode
 }
 
-export function Layout({ children }: LayoutProps) {
+export function Layout({ children: _children }: LayoutProps) {
   const { t } = useTranslation()
   const { config } = useSidebarConfig()
   const { isMobile } = useMobile()
@@ -119,7 +118,7 @@ export function Layout({ children }: LayoutProps) {
   const [restartState, setRestartState] = useState<'idle' | 'restarting' | 'waiting' | 'copied'>('idle')
   const [restartError, setRestartError] = useState<string | null>(null)
 
-  const handleCopyFallback = useCallback(async () => {
+  const handleCopyFallback = async () => {
     try {
       await copyToClipboard('./startup-oauth.sh')
       setRestartState('copied')
@@ -127,16 +126,15 @@ export function Layout({ children }: LayoutProps) {
     } catch {
       setRestartState('idle')
     }
-  }, [])
+  }
 
-  const handleRestartBackend = useCallback(async () => {
+  const handleRestartBackend = async () => {
     setRestartState('restarting')
     try {
       const resp = await fetch(`${LOCAL_AGENT_HTTP_URL}/restart-backend`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        signal: AbortSignal.timeout(FETCH_DEFAULT_TIMEOUT_MS),
-      })
+        signal: AbortSignal.timeout(FETCH_DEFAULT_TIMEOUT_MS) })
       if (resp.ok) {
         const data = await resp.json()
         if (data.success) {
@@ -151,7 +149,7 @@ export function Layout({ children }: LayoutProps) {
       setRestartError('Could not reach agent — please restart manually')
       handleCopyFallback()
     }
-  }, [handleCopyFallback])
+  }
 
   // Clear stale cache failure metadata on fresh page load so previous-session
   // "Refresh failed" badges don't persist across restarts.
@@ -170,7 +168,7 @@ export function Layout({ children }: LayoutProps) {
   // Grace period: when user manually toggles demo off, wait 8s for agent to connect before
   // re-enabling demo. The pill shows "connecting" → "disconnected" during this window.
   const demoAutoEnabledRef = useRef(false)
-  const demoReEnableTimerRef = useRef<ReturnType<typeof setTimeout>>()
+  const demoReEnableTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined)
   const prevDemoModeRef = useRef(isDemoMode)
   const userToggledOffRef = useRef(false)
   const AGENT_CONNECT_GRACE_MS = 8000
@@ -360,7 +358,7 @@ export function Layout({ children }: LayoutProps) {
           <div
             style={{ top: demoBannerTop, left: sidebarWidthPx }}
             className={cn(
-              "fixed right-0 z-30 bg-background border-b border-yellow-500/20 transition-[left] duration-300",
+              "fixed right-0 z-30 bg-background border-b border-border/30 transition-[left] duration-300",
             )}>
             <div className="flex flex-wrap items-center justify-center gap-2 md:gap-3 py-1.5 px-3 md:px-4">
               {isAuthenticatedNoAgent
@@ -496,19 +494,15 @@ export function Layout({ children }: LayoutProps) {
         </PageErrorBoundary>
         <main
           id="main-content"
-          style={{ marginLeft: sidebarWidthPx, marginRight: 'var(--mission-sidebar-width, 0px)' }}
+          style={{
+            marginLeft: isMobile ? 0 : sidebarWidthPx + SIDEBAR_CONTROLS_OFFSET_PX,
+            marginRight: 'var(--mission-sidebar-width, 0px)' }}
           className="relative flex-1 p-4 pb-24 md:p-6 md:pb-28 transition-[margin] duration-300 overflow-y-auto scroll-enhanced min-w-0"
         >
           <NavigationProgress />
-          {children ? (
-            <PageErrorBoundary>
-              <Suspense fallback={<ContentLoadingSkeleton />}>
-                {children}
-              </Suspense>
-            </PageErrorBoundary>
-          ) : (
-            <KeepAliveOutlet />
-          )}
+          <Suspense fallback={<ContentLoadingSkeleton />}>
+            <Outlet />
+          </Suspense>
         </main>
       </div>
 

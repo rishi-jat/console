@@ -109,9 +109,10 @@ export function Navbar({ topOffset = 0 }: NavbarProps) {
         </a>
       </div>
 
-      {/* Search - hidden on small mobile; min-w-0 + overflow-hidden prevent
-           overlap when the right-side AI Mission button is visible (#4409) */}
-      <div className="hidden sm:block flex-1 min-w-0 max-w-md mx-4 overflow-hidden">
+      {/* Search - hidden on small mobile; min-w-0 prevents layout overflow
+           when the right-side AI Mission button is visible (#4409).
+           min-w-[120px] ensures the input stays usable at narrow widths (#4955). */}
+      <div className="hidden sm:flex flex-1 min-w-[120px] max-w-md mx-4">
         <Suspense fallback={null}><SearchDropdown /></Suspense>
       </div>
 
@@ -177,7 +178,7 @@ export function Navbar({ topOffset = 0 }: NavbarProps) {
             {theme === 'dark' ? (
               <Moon className="w-5 h-5 text-muted-foreground" />
             ) : theme === 'light' ? (
-              <Sun className="w-5 h-5 text-yellow-400" />
+              <Sun className="w-5 h-5 text-amber-600 dark:text-yellow-400" />
             ) : (
               <Monitor className="w-5 h-5 text-muted-foreground" />
             )}
@@ -200,7 +201,7 @@ export function Navbar({ topOffset = 0 }: NavbarProps) {
             <>
               {/* Backdrop */}
               <div
-                className="fixed inset-0 bg-black/60 backdrop-blur-2xl z-40"
+                className="fixed inset-0 bg-black/60 backdrop-blur-sm z-overlay"
                 onClick={() => setShowMobileMore(false)}
               />
               {/* Bottom sheet menu on mobile */}

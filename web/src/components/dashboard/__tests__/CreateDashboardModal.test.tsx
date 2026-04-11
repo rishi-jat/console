@@ -22,9 +22,9 @@ vi.mock('react-i18next', () => ({
         'dashboard.create.startingContent': 'Starting Content',
         'dashboard.create.startBlank': 'Start Blank',
         'dashboard.create.startBlankDesc': 'Empty dashboard with no cards',
-        'dashboard.create.startWithTemplate': 'Start with Template',
-        'dashboard.create.chooseFromTemplates': 'Choose from pre-built templates',
-        'dashboard.create.selectByCategory': 'Select a category',
+        'dashboard.create.startWithTemplate': 'Start with a Card Collection',
+        'dashboard.create.chooseFromTemplates': 'Choose from pre-built card sets',
+        'dashboard.create.selectByCategory': 'Select a collection by category:',
         'dashboard.create.cards': 'cards',
         'dashboard.create.creating': 'Creating...',
         'actions.cancel': 'Cancel',
@@ -79,10 +79,7 @@ vi.mock('../../ui/Button', () => ({
   ),
 }))
 
-const mockHealth = { status: 'healthy', message: '' }
-vi.mock('../../../hooks/useDashboardHealth', () => ({
-  useDashboardHealth: () => mockHealth,
-}))
+// Health alert was removed from CreateDashboardModal — no mock needed
 
 vi.mock('../../../lib/constants/network', async (importOriginal) => {
   const actual = await importOriginal() as Record<string, unknown>
@@ -132,8 +129,6 @@ const defaultProps = {
 describe('CreateDashboardModal', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    mockHealth.status = 'healthy'
-    mockHealth.message = ''
   })
 
   // ── Rendering ───────────────────────────────────────────────────────
@@ -163,30 +158,6 @@ describe('CreateDashboardModal', () => {
     expect(screen.getByText('Start Blank')).toBeInTheDocument()
   })
 
-  // ── Health alert ────────────────────────────────────────────────────
-
-  it('does not show health alert when status is healthy', () => {
-    render(<CreateDashboardModal {...defaultProps} />)
-    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
-  })
-
-  it('shows warning health alert when status is warning', () => {
-    mockHealth.status = 'warning'
-    mockHealth.message = 'High latency detected'
-    render(<CreateDashboardModal {...defaultProps} />)
-    expect(screen.getByRole('alert')).toBeInTheDocument()
-    expect(screen.getByText('High latency detected')).toBeInTheDocument()
-  })
-
-  it('shows critical health alert with correct styling', () => {
-    mockHealth.status = 'critical'
-    mockHealth.message = 'Backend unreachable'
-    render(<CreateDashboardModal {...defaultProps} />)
-    const alert = screen.getByRole('alert')
-    expect(alert).toBeInTheDocument()
-    expect(screen.getByText('Backend unreachable')).toBeInTheDocument()
-  })
-
   // ── Name generation ─────────────────────────────────────────────────
 
   it('generates a unique default name avoiding existing names', async () => {
@@ -213,8 +184,8 @@ describe('CreateDashboardModal', () => {
     const user = userEvent.setup()
     render(<CreateDashboardModal {...defaultProps} />)
     // Click "Start with Template"
-    await user.click(screen.getByText('Start with Template'))
-    expect(screen.getByText('Select a category')).toBeInTheDocument()
+    await user.click(screen.getByText('Start with a Card Collection'))
+    expect(screen.getByText('Select a collection by category:')).toBeInTheDocument()
     // Categories should be visible
     expect(screen.getByText('Cluster')).toBeInTheDocument()
     expect(screen.getByText('GPU')).toBeInTheDocument()
@@ -223,7 +194,7 @@ describe('CreateDashboardModal', () => {
   it('expands a category to show templates', async () => {
     const user = userEvent.setup()
     render(<CreateDashboardModal {...defaultProps} />)
-    await user.click(screen.getByText('Start with Template'))
+    await user.click(screen.getByText('Start with a Card Collection'))
     // Click cluster category
     await user.click(screen.getByText('Cluster'))
     expect(screen.getByText('Cluster Overview')).toBeInTheDocument()
@@ -232,7 +203,7 @@ describe('CreateDashboardModal', () => {
   it('selects a template and shows card count', async () => {
     const user = userEvent.setup()
     render(<CreateDashboardModal {...defaultProps} />)
-    await user.click(screen.getByText('Start with Template'))
+    await user.click(screen.getByText('Start with a Card Collection'))
     await user.click(screen.getByText('Cluster'))
     await user.click(screen.getByText('Cluster Overview'))
     // Should show selected template info
@@ -249,7 +220,7 @@ describe('CreateDashboardModal', () => {
     await user.type(nameInput, 'My Dashboard')
 
     // Select template
-    await user.click(screen.getByText('Start with Template'))
+    await user.click(screen.getByText('Start with a Card Collection'))
     await user.click(screen.getByText('GPU'))
     await user.click(screen.getByText('GPU Dashboard'))
 
@@ -298,6 +269,30 @@ describe('CreateDashboardModal', () => {
     })
   })
 
+  // ── Loading / disabled state ─────────────────────────────────────────
+
+  it('disables the create button and shows loading while creating', async () => {
+    const user = userEvent.setup()
+    let resolveCreate: () => void = () => {}
+    const onCreate = vi.fn().mockImplementation(() => new Promise<void>((r) => { resolveCreate = r }))
+    render(<CreateDashboardModal {...defaultProps} onCreate={onCreate} />)
+
+    const createBtn = screen.getByText('Create Dashboard', { selector: 'button' })
+    await user.click(createBtn)
+
+    // Button should be disabled and show loading during async creation
+    await waitFor(() => {
+      expect(createBtn).toBeDisabled()
+      expect(createBtn).toHaveAttribute('data-loading', 'true')
+    })
+
+    // Resolve the promise to finish creation
+    resolveCreate()
+    await waitFor(() => {
+      expect(onCreate).toHaveBeenCalledTimes(1)
+    })
+  })
+
   // ── Cancel ──────────────────────────────────────────────────────────
 
   it('calls onClose when Cancel is clicked', async () => {
@@ -313,11 +308,11 @@ describe('CreateDashboardModal', () => {
     const user = userEvent.setup()
     render(<CreateDashboardModal {...defaultProps} />)
     // Open templates
-    await user.click(screen.getByText('Start with Template'))
-    expect(screen.getByText('Select a category')).toBeInTheDocument()
+    await user.click(screen.getByText('Start with a Card Collection'))
+    expect(screen.getByText('Select a collection by category:')).toBeInTheDocument()
     // Click back to blank
     await user.click(screen.getByText('Start Blank'))
-    expect(screen.queryByText('Select a category')).not.toBeInTheDocument()
+    expect(screen.queryByText('Select a collection by category:')).not.toBeInTheDocument()
   })
 
   // ── Category collapse ───────────────────────────────────────────────
@@ -325,7 +320,7 @@ describe('CreateDashboardModal', () => {
   it('collapses category when clicked again', async () => {
     const user = userEvent.setup()
     render(<CreateDashboardModal {...defaultProps} />)
-    await user.click(screen.getByText('Start with Template'))
+    await user.click(screen.getByText('Start with a Card Collection'))
     // Expand
     await user.click(screen.getByText('Cluster'))
     expect(screen.getByText('Cluster Overview')).toBeInTheDocument()

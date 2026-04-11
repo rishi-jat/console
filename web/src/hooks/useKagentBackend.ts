@@ -59,7 +59,8 @@ export function useKagentBackend(): UseKagentBackendResult {
     return 'kc-agent'
   })
 
-  const pollRef = useRef<ReturnType<typeof setInterval>>()
+  const pollRef = useRef<ReturnType<typeof setInterval>>(undefined)
+  const refreshInFlightRef = useRef(false)
   const selectedKagentRef = useRef(selectedKagentAgent)
   const selectedKagentiRef = useRef(selectedKagentiAgent)
   useEffect(() => {
@@ -68,34 +69,47 @@ export function useKagentBackend(): UseKagentBackendResult {
   }, [selectedKagentAgent, selectedKagentiAgent])
 
   const refresh = useCallback(async () => {
-    // Poll kagent
-    const kStatus = await fetchKagentStatus()
-    setKagentStatus(kStatus)
-    if (kStatus.available) {
-      const agents = await fetchKagentAgents()
-      setKagentAgents(agents)
-      const savedName = localStorage.getItem(KAGENT_SELECTED_AGENT_KEY)
-      if (savedName && !selectedKagentRef.current) {
-        const found = agents.find(a => `${a.namespace}/${a.name}` === savedName)
-        if (found) setSelectedKagentAgent(found)
-      }
-    } else {
-      setKagentAgents([])
-    }
+    // Guard against overlapping fetches on slow networks
+    if (refreshInFlightRef.current) return
+    refreshInFlightRef.current = true
+    try {
+      // Poll kagent and kagenti concurrently — independent fetch chains
+      // should not block each other
+      const [kStatus, kiStatus] = await Promise.all([
+        fetchKagentStatus(),
+        fetchKagentiProviderStatus(),
+      ])
 
-    // Poll kagenti
-    const kiStatus = await fetchKagentiProviderStatus()
-    setKagentiStatus(kiStatus)
-    if (kiStatus.available) {
-      const agents = await fetchKagentiProviderAgents()
-      setKagentiAgents(agents)
-      const savedName = localStorage.getItem(KAGENTI_SELECTED_AGENT_KEY)
-      if (savedName && !selectedKagentiRef.current) {
-        const found = agents.find(a => `${a.namespace}/${a.name}` === savedName)
-        if (found) setSelectedKagentiAgent(found)
+      setKagentStatus(kStatus)
+      setKagentiStatus(kiStatus)
+
+      // Fetch agent lists concurrently for available backends
+      const [kagentAgentsList, kagentiAgentsList] = await Promise.all([
+        kStatus.available ? fetchKagentAgents() : Promise.resolve([] as KagentAgent[]),
+        kiStatus.available ? fetchKagentiProviderAgents() : Promise.resolve([] as KagentiProviderAgent[]),
+      ])
+
+      // Update kagent agents
+      setKagentAgents(kagentAgentsList)
+      if (kStatus.available) {
+        const savedName = localStorage.getItem(KAGENT_SELECTED_AGENT_KEY)
+        if (savedName && !selectedKagentRef.current) {
+          const found = kagentAgentsList.find(a => `${a.namespace}/${a.name}` === savedName)
+          if (found) setSelectedKagentAgent(found)
+        }
       }
-    } else {
-      setKagentiAgents([])
+
+      // Update kagenti agents
+      setKagentiAgents(kagentiAgentsList)
+      if (kiStatus.available) {
+        const savedName = localStorage.getItem(KAGENTI_SELECTED_AGENT_KEY)
+        if (savedName && !selectedKagentiRef.current) {
+          const found = kagentiAgentsList.find(a => `${a.namespace}/${a.name}` === savedName)
+          if (found) setSelectedKagentiAgent(found)
+        }
+      }
+    } finally {
+      refreshInFlightRef.current = false
     }
   }, [])
 
@@ -105,20 +119,20 @@ export function useKagentBackend(): UseKagentBackendResult {
     return () => { if (pollRef.current) clearInterval(pollRef.current) }
   }, [refresh])
 
-  const selectKagentAgent = useCallback((agent: KagentAgent) => {
+  const selectKagentAgent = (agent: KagentAgent) => {
     setSelectedKagentAgent(agent)
     localStorage.setItem(KAGENT_SELECTED_AGENT_KEY, `${agent.namespace}/${agent.name}`)
-  }, [])
+  }
 
-  const selectKagentiAgent = useCallback((agent: KagentiProviderAgent) => {
+  const selectKagentiAgent = (agent: KagentiProviderAgent) => {
     setSelectedKagentiAgent(agent)
     localStorage.setItem(KAGENTI_SELECTED_AGENT_KEY, `${agent.namespace}/${agent.name}`)
-  }, [])
+  }
 
-  const setPreferredBackend = useCallback((backend: AgentBackendType) => {
+  const setPreferredBackend = (backend: AgentBackendType) => {
     setPreferredBackendState(backend)
     localStorage.setItem(BACKEND_PREF_KEY, backend)
-  }, [])
+  }
 
   const kagentAvailable = kagentStatus?.available ?? false
   const kagentiAvailable = kagentiStatus?.available ?? false
@@ -142,6 +156,5 @@ export function useKagentBackend(): UseKagentBackendResult {
     preferredBackend,
     setPreferredBackend,
     activeBackend,
-    refresh,
-  }
+    refresh }
 }

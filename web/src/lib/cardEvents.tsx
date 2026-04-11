@@ -1,4 +1,4 @@
-import { createContext, useContext, useRef, useCallback, type ReactNode } from 'react'
+import { createContext, useContext, useRef, useCallback, useMemo, type ReactNode } from 'react'
 
 // ============================================================================
 // Card Event Types
@@ -103,8 +103,13 @@ export function CardEventProvider({ children }: { children: ReactNode }) {
     }
   }, [])
 
+  // #6149 — Stable context value — both publish and subscribe are now
+  // stable refs, so downstream useCardEvents() consumers no longer re-render
+  // on every CardEventProvider render.
+  const contextValue = useMemo(() => ({ publish, subscribe }), [publish, subscribe])
+
   return (
-    <CardEventContext.Provider value={{ publish, subscribe }}>
+    <CardEventContext.Provider value={contextValue}>
       {children}
     </CardEventContext.Provider>
   )
@@ -120,8 +125,7 @@ export function useCardEvents(): CardEventBus {
     // Return no-op bus when used outside provider (graceful degradation)
     return {
       publish: () => {},
-      subscribe: () => () => {},
-    }
+      subscribe: () => () => {} }
   }
   return ctx
 }

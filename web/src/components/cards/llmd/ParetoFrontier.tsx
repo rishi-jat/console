@@ -7,7 +7,7 @@
  * Right-side legend with hardware-colored dots, info pills, and Reset filter.
  * Connected smooth scatter lines with GPU count labels. Built with ECharts.
  */
-import { useState, useMemo, useCallback, useRef } from 'react'
+import { useState, useMemo, useRef } from 'react'
 import ReactECharts from 'echarts-for-react'
 import { Download, RotateCcw } from 'lucide-react'
 import { useReportCardDataState } from '../CardDataContext'
@@ -18,10 +18,24 @@ import {
   HARDWARE_COLORS,
   getHardwareShort,
   getModelShort,
-  type ParetoPoint,
-} from '../../../lib/llmd/benchmarkMockData'
+  type ParetoPoint } from '../../../lib/llmd/benchmarkMockData'
 import { useTranslation } from 'react-i18next'
 import { DynamicCardErrorBoundary } from '../DynamicCardErrorBoundary'
+import { downloadDataUrl } from '../../../lib/download'
+
+// ── Tooltip spacing constants (ECharts renders its own DOM, so Tailwind/CSS vars are unavailable) ──
+/** Spacing between tooltip header and grid body */
+const TOOLTIP_HEADER_MARGIN_PX = '8px'
+/** Horizontal padding for config badge */
+const TOOLTIP_BADGE_PAD_H_PX = '8px'
+/** Vertical padding for config badge */
+const TOOLTIP_BADGE_PAD_V_PX = '2px'
+/** Gap between grid rows */
+const TOOLTIP_GRID_GAP_ROW_PX = '4px'
+/** Gap between grid columns */
+const TOOLTIP_GRID_GAP_COL_PX = '16px'
+/** Badge border-radius */
+const TOOLTIP_BADGE_RADIUS_PX = '4px'
 
 // Minimal parameter type for ECharts label/tooltip formatter callbacks
 interface EChartsFormatterParam {
@@ -70,9 +84,7 @@ const CHART_PRESETS: Record<string, ChartPreset> = {
       label: 'Token Throughput per GPU',
       unit: 'tok/s/gpu',
       getValue: (p) => p.throughputPerGpu,
-      formatter: (v) => v >= 1000 ? `${(v / 1000).toFixed(0)}k` : String(Math.round(v)),
-    },
-  },
+      formatter: (v) => v >= 1000 ? `${(v / 1000).toFixed(0)}k` : String(Math.round(v)) } },
   throughputVsInteractivity: {
     label: 'Throughput vs Interactivity',
     title: 'Token Throughput per GPU vs. Interactivity',
@@ -81,9 +93,7 @@ const CHART_PRESETS: Record<string, ChartPreset> = {
       label: 'Token Throughput per GPU',
       unit: 'tok/s/gpu',
       getValue: (p) => p.throughputPerGpu,
-      formatter: (v) => v >= 1000 ? `${(v / 1000).toFixed(0)}k` : String(Math.round(v)),
-    },
-  },
+      formatter: (v) => v >= 1000 ? `${(v / 1000).toFixed(0)}k` : String(Math.round(v)) } },
   throughputPerMw: {
     label: 'Throughput/MW vs Interactivity',
     title: 'Token Throughput per All in Utility MW vs. Interactivity',
@@ -92,8 +102,7 @@ const CHART_PRESETS: Record<string, ChartPreset> = {
       label: 'Token Throughput per All in Utility MW',
       unit: 'tok/s/MW',
       getValue: (p) => p.powerPerGpuKw > 0 ? p.throughputPerGpu / (p.powerPerGpuKw * 0.001) : 0,
-      formatter: (v) => v >= 1_000_000 ? `${(v / 1_000_000).toFixed(1)}M` : v >= 1000 ? `${(v / 1000).toFixed(0)}k` : String(Math.round(v)),
-    },
+      formatter: (v) => v >= 1_000_000 ? `${(v / 1_000_000).toFixed(1)}M` : v >= 1000 ? `${(v / 1000).toFixed(0)}k` : String(Math.round(v)) },
     infoPills: (points) => {
       const hwPower = new Map<string, number>()
       for (const p of points) {
@@ -102,10 +111,8 @@ const CHART_PRESETS: Record<string, ChartPreset> = {
       }
       return {
         label: 'All in Power/GPU:',
-        items: [...hwPower.entries()].map(([hw, kw]) => ({ hw, value: `${kw.toFixed(2)}kW` })),
-      }
-    },
-  },
+        items: [...hwPower.entries()].map(([hw, kw]) => ({ hw, value: `${kw.toFixed(2)}kW` })) }
+    } },
   costPerMTok: {
     label: 'Cost/MTok vs Interactivity',
     title: 'Cost per Million Tokens (Owning) vs. Interactivity',
@@ -114,8 +121,7 @@ const CHART_PRESETS: Record<string, ChartPreset> = {
       label: 'Cost per Million Tokens',
       unit: '$',
       getValue: (p) => p.throughputPerGpu > 0 ? (p.tcoPerGpuHr / (p.throughputPerGpu * 3600)) * 1_000_000 : 0,
-      formatter: (v) => `$${v.toFixed(2)}`,
-    },
+      formatter: (v) => `$${v.toFixed(2)}` },
     infoPills: (points) => {
       const hwCost = new Map<string, number>()
       for (const p of points) {
@@ -124,10 +130,8 @@ const CHART_PRESETS: Record<string, ChartPreset> = {
       }
       return {
         label: 'TCO $/GPU/hr:',
-        items: [...hwCost.entries()].map(([hw, cost]) => ({ hw, value: cost.toFixed(2) })),
-      }
-    },
-  },
+        items: [...hwCost.entries()].map(([hw, cost]) => ({ hw, value: cost.toFixed(2) })) }
+    } },
   costVsLatency: {
     label: 'Cost/MTok vs E2E Latency',
     title: 'Cost per Million Tokens vs. End-to-end Latency',
@@ -136,8 +140,7 @@ const CHART_PRESETS: Record<string, ChartPreset> = {
       label: 'Cost per Million Tokens',
       unit: '$',
       getValue: (p) => p.throughputPerGpu > 0 ? (p.tcoPerGpuHr / (p.throughputPerGpu * 3600)) * 1_000_000 : 0,
-      formatter: (v) => `$${v.toFixed(2)}`,
-    },
+      formatter: (v) => `$${v.toFixed(2)}` },
     infoPills: (points) => {
       const hwCost = new Map<string, number>()
       for (const p of points) {
@@ -146,10 +149,8 @@ const CHART_PRESETS: Record<string, ChartPreset> = {
       }
       return {
         label: 'TCO $/GPU/hr:',
-        items: [...hwCost.entries()].map(([hw, cost]) => ({ hw, value: cost.toFixed(2) })),
-      }
-    },
-  },
+        items: [...hwCost.entries()].map(([hw, cost]) => ({ hw, value: cost.toFixed(2) })) }
+    } },
   throughputPerDollar: {
     label: 'Throughput/$ vs Interactivity',
     title: 'Throughput per Dollar vs. Interactivity',
@@ -158,8 +159,7 @@ const CHART_PRESETS: Record<string, ChartPreset> = {
       label: 'Throughput per Dollar',
       unit: 'tok/s/$',
       getValue: (p) => p.tcoPerGpuHr > 0 ? p.throughputPerGpu / p.tcoPerGpuHr : 0,
-      formatter: (v) => v >= 1000 ? `${(v / 1000).toFixed(1)}k` : String(Math.round(v)),
-    },
+      formatter: (v) => v >= 1000 ? `${(v / 1000).toFixed(1)}k` : String(Math.round(v)) },
     infoPills: (points) => {
       const hwCost = new Map<string, number>()
       for (const p of points) {
@@ -168,55 +168,44 @@ const CHART_PRESETS: Record<string, ChartPreset> = {
       }
       return {
         label: 'TCO $/GPU/hr:',
-        items: [...hwCost.entries()].map(([hw, cost]) => ({ hw, value: cost.toFixed(2) })),
-      }
-    },
-  },
+        items: [...hwCost.entries()].map(([hw, cost]) => ({ hw, value: cost.toFixed(2) })) }
+    } },
   p99VsThroughput: {
     label: 'p99 Latency vs Throughput',
     title: 'p99 Latency vs. Token Throughput per GPU',
     xAxis: {
       label: 'Token Throughput per GPU',
       unit: 'tok/s/gpu',
-      getValue: (p) => p.throughputPerGpu,
-    },
+      getValue: (p) => p.throughputPerGpu },
     yAxis: {
       label: 'p99 Latency',
       unit: 'ms',
       getValue: (p) => p.p99LatencyMs,
-      formatter: (v) => v >= 1000 ? `${(v / 1000).toFixed(1)}s` : `${Math.round(v)}`,
-    },
-  },
+      formatter: (v) => v >= 1000 ? `${(v / 1000).toFixed(1)}s` : `${Math.round(v)}` } },
   tpotVsThroughput: {
     label: 'TPOT vs Throughput',
     title: 'Time per Output Token vs. Token Throughput per GPU',
     xAxis: {
       label: 'Token Throughput per GPU',
       unit: 'tok/s/gpu',
-      getValue: (p) => p.throughputPerGpu,
-    },
+      getValue: (p) => p.throughputPerGpu },
     yAxis: {
       label: 'Time per Output Token (p50)',
       unit: 'ms/tok',
       getValue: (p) => p.tpotP50Ms,
-      formatter: (v) => v.toFixed(1),
-    },
-  },
+      formatter: (v) => v.toFixed(1) } },
   gpuScaling: {
     label: 'GPU Scaling Efficiency',
     title: 'GPU Scaling: Throughput per GPU vs. GPU Count',
     xAxis: {
       label: 'GPU Count',
       unit: 'GPUs',
-      getValue: (p) => p.gpuCount,
-    },
+      getValue: (p) => p.gpuCount },
     yAxis: {
       label: 'Token Throughput per GPU',
       unit: 'tok/s/gpu',
       getValue: (p) => p.throughputPerGpu,
-      formatter: (v) => v >= 1000 ? `${(v / 1000).toFixed(0)}k` : String(Math.round(v)),
-    },
-  },
+      formatter: (v) => v >= 1000 ? `${(v / 1000).toFixed(0)}k` : String(Math.round(v)) } },
   throughputPerMwVsLatency: {
     label: 'Throughput/MW vs E2E Latency',
     title: 'Token Throughput per MW vs. End-to-end Latency',
@@ -225,8 +214,7 @@ const CHART_PRESETS: Record<string, ChartPreset> = {
       label: 'Token Throughput per All in Utility MW',
       unit: 'tok/s/MW',
       getValue: (p) => p.powerPerGpuKw > 0 ? p.throughputPerGpu / (p.powerPerGpuKw * 0.001) : 0,
-      formatter: (v) => v >= 1_000_000 ? `${(v / 1_000_000).toFixed(1)}M` : v >= 1000 ? `${(v / 1000).toFixed(0)}k` : String(Math.round(v)),
-    },
+      formatter: (v) => v >= 1_000_000 ? `${(v / 1_000_000).toFixed(1)}M` : v >= 1000 ? `${(v / 1000).toFixed(0)}k` : String(Math.round(v)) },
     infoPills: (points) => {
       const hwPower = new Map<string, number>()
       for (const p of points) {
@@ -235,11 +223,8 @@ const CHART_PRESETS: Record<string, ChartPreset> = {
       }
       return {
         label: 'All in Power/GPU:',
-        items: [...hwPower.entries()].map(([hw, kw]) => ({ hw, value: `${kw.toFixed(2)}kW` })),
-      }
-    },
-  },
-}
+        items: [...hwPower.entries()].map(([hw, kw]) => ({ hw, value: `${kw.toFixed(2)}kW` })) }
+    } } }
 
 // ---------------------------------------------------------------------------
 // Main component
@@ -257,7 +242,7 @@ function ParetoFrontierInternal({ config }: ParetoFrontierProps) {
   const { data: reports, isDemoFallback, isFailed, consecutiveFailures, isLoading, isRefreshing, lastRefresh } = useCachedBenchmarkReports()
   // Use hook data directly — it already returns cached live data or demo fallback.
   // Calling generateBenchmarkReports() here would bypass the warm cache (#3397).
-  const effectiveReports = useMemo(() => reports ?? [], [reports])
+  const effectiveReports = reports ?? []
   // Freshness tracking: lastRefresh → lastUpdated Date reported to CardWrapper via useReportCardDataState
   const lastUpdated = lastRefresh ? new Date(lastRefresh) : null
   useReportCardDataState({
@@ -267,27 +252,26 @@ function ParetoFrontierInternal({ config }: ParetoFrontierProps) {
     isLoading,
     isRefreshing,
     hasData: effectiveReports.length > 0,
-    lastUpdated,
-  })
+    lastUpdated })
 
   // ---- All Pareto points ----
-  const allPoints = useMemo(() => extractParetoPoints(effectiveReports), [effectiveReports])
+  const allPoints = extractParetoPoints(effectiveReports)
 
   // ---- Extract unique filter values ----
-  const filterOptions = useMemo(() => {
+  const filterOptions = (() => {
     const models = [...new Set(allPoints.map(p => getModelShort(p.model)))]
     const seqLens = [...new Set(allPoints.map(p => p.seqLen))]
     const frameworks = [...new Set(allPoints.map(p => p.framework).filter(Boolean))]
     return { models, seqLens, frameworks }
-  }, [allPoints])
+  })()
 
   // ---- Filter state ----
-  const initialChart = useMemo(() => {
+  const initialChart = (() => {
     const ct = config?.chartType
     if (!ct) return 'throughputVsLatency'
     const found = Object.keys(CHART_PRESETS).find(k => ct.includes(k))
     return found ?? 'throughputVsLatency'
-  }, [config?.chartType])
+  })()
 
   const [modelFilter, setModelFilter] = useState('all')
   const [seqLenFilter, setSeqLenFilter] = useState('all')
@@ -303,27 +287,27 @@ function ParetoFrontierInternal({ config }: ParetoFrontierProps) {
   const [highContrast, setHighContrast] = useState(true)
 
   // ---- Filtered data ----
-  const filtered = useMemo(() => {
+  const filtered = (() => {
     let pts = allPoints
     if (modelFilter !== 'all') pts = pts.filter(p => getModelShort(p.model) === modelFilter)
     if (seqLenFilter !== 'all') pts = pts.filter(p => p.seqLen === seqLenFilter)
     if (frameworkFilter !== 'all') pts = pts.filter(p => p.framework === frameworkFilter)
     return pts
-  }, [allPoints, modelFilter, seqLenFilter, frameworkFilter])
+  })()
 
-  const frontier = useMemo(() => computeParetoFrontier(filtered), [filtered])
-  const frontierUids = useMemo(() => new Set(frontier.map(p => p.uid)), [frontier])
+  const frontier = computeParetoFrontier(filtered)
+  const frontierUids = new Set(frontier.map(p => p.uid))
 
-  const displayPoints = useMemo(() => {
+  const displayPoints = (() => {
     if (!hideNonOptimal) return filtered
     return filtered.filter(p => frontierUids.has(p.uid))
-  }, [filtered, hideNonOptimal, frontierUids])
+  })()
 
   // ---- Info pills for current chart preset ----
-  const infoPills = useMemo(() => {
+  const infoPills = (() => {
     if (!preset.infoPills) return null
     return preset.infoPills(displayPoints)
-  }, [preset, displayPoints])
+  })()
 
   // ---- Series grouped by hardware ----
   const seriesMap = useMemo(() => {
@@ -340,44 +324,51 @@ function ParetoFrontierInternal({ config }: ParetoFrontierProps) {
   }, [displayPoints, preset])
 
   // ---- Callbacks ----
-  const toggleHw = useCallback((hw: string) => {
+  const toggleHw = (hw: string) => {
     setHiddenHw(prev => {
       const next = new Set(prev)
       if (next.has(hw)) next.delete(hw)
       else next.add(hw)
       return next
     })
-  }, [])
+  }
 
-  const resetFilters = useCallback(() => {
+  const resetFilters = () => {
     setModelFilter('all')
     setSeqLenFilter('all')
     setFrameworkFilter('all')
     setHiddenHw(new Set())
-  }, [])
+  }
 
-  const handleDownload = useCallback(() => {
+  const handleDownload = () => {
     const inst = chartRef.current?.getEchartsInstance()
     if (!inst) return
-    const url = inst.getDataURL({ type: 'png', pixelRatio: 2, backgroundColor: '#fff' })
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `pareto-${chartKey}.png`
-    a.click()
-  }, [chartKey])
+    // #6226: ECharts getDataURL can throw on a detached chart, and the
+    // anchor.click() can be blocked by the browser. Both paths flow
+    // through downloadDataUrl which captures any exception.
+    try {
+      const url = inst.getDataURL({ type: 'png', pixelRatio: 2, backgroundColor: '#fff' })
+      downloadDataUrl(`pareto-${chartKey}.png`, url)
+    } catch {
+      // Failure is non-fatal — chart export is a nice-to-have, not
+      // critical to the card. The card has no useToast plumbing in
+      // this scope, so we silently swallow rather than surfacing a
+      // toast that would require extra wiring.
+    }
+  }
 
-  const handleResetZoom = useCallback(() => {
+  const handleResetZoom = () => {
     chartRef.current?.getEchartsInstance()?.dispatchAction({ type: 'dataZoom', start: 0, end: 100 })
-  }, [])
+  }
 
   // ---- Chart subtitle ----
-  const subtitle = useMemo(() => {
+  const subtitle = (() => {
     const parts: string[] = []
     if (modelFilter !== 'all') parts.push(modelFilter)
     if (frameworkFilter !== 'all') parts.push(frameworkFilter)
     if (seqLenFilter !== 'all') parts.push(seqLenFilter)
     return parts.length > 0 ? parts.join(' \u2022 ') : t('paretoFrontier.allConfigurations')
-  }, [modelFilter, seqLenFilter, frameworkFilter])
+  })()
 
   // ---- ECharts option ----
   const option = useMemo(() => {
@@ -396,8 +387,7 @@ function ParetoFrontierInternal({ config }: ParetoFrontierProps) {
           itemStyle: {
             color,
             borderColor: highContrast ? '#000' : 'rgba(0,0,0,0.15)',
-            borderWidth: highContrast ? 1.5 : 0.5,
-          },
+            borderWidth: highContrast ? 1.5 : 0.5 },
           label: {
             show: !hideLabels,
             formatter: (p: EChartsFormatterParam) => {
@@ -407,14 +397,11 @@ function ParetoFrontierInternal({ config }: ParetoFrontierProps) {
             fontSize: 9,
             color: '#94a3b8',
             position: 'top',
-            distance: 4,
-          },
+            distance: 4 },
           emphasis: {
             itemStyle: { borderColor: '#000', borderWidth: 2, shadowBlur: 6, shadowColor: color },
-            scale: 1.5,
-          },
-          z: 2,
-        }
+            scale: 1.5 },
+          z: 2 }
       })
 
     // Pareto frontier dashed line
@@ -429,8 +416,7 @@ function ParetoFrontierInternal({ config }: ParetoFrontierProps) {
         itemStyle: { color: '#ef4444' },
         symbol: 'none',
         z: 10,
-        silent: true,
-      })
+        silent: true })
     }
 
     return {
@@ -451,10 +437,10 @@ function ParetoFrontierInternal({ config }: ParetoFrontierProps) {
           const model = getModelShort(pt.model)
           const c = HARDWARE_COLORS[hw] ?? '#6b7280'
           return (
-            `<div style="font-weight:600;margin-bottom:8px;color:#f1f5f9">${model} ` +
+            `<div style="font-weight:600;margin-bottom:${TOOLTIP_HEADER_MARGIN_PX};color:#f1f5f9">${model} ` +
             `<span style="color:#94a3b8">${hw}</span> ` +
-            `<span style="background:${c}30;color:${c};padding:2px 8px;border-radius:4px;font-size:10px">${pt.config}</span></div>` +
-            `<div style="display:grid;grid-template-columns:auto auto;gap:4px 16px;font-size:11px">` +
+            `<span style="background:${c}30;color:${c};padding:${TOOLTIP_BADGE_PAD_V_PX} ${TOOLTIP_BADGE_PAD_H_PX};border-radius:${TOOLTIP_BADGE_RADIUS_PX};font-size:10px">${pt.config}</span></div>` +
+            `<div style="display:grid;grid-template-columns:auto auto;gap:${TOOLTIP_GRID_GAP_ROW_PX} ${TOOLTIP_GRID_GAP_COL_PX};font-size:11px">` +
             `<span style="color:#94a3b8">Throughput/GPU:</span><span style="font-family:monospace;color:#e2e8f0">${pt.throughputPerGpu.toFixed(0)} tok/s</span>` +
             `<span style="color:#94a3b8">TTFT p50:</span><span style="font-family:monospace;color:#e2e8f0">${pt.ttftP50Ms.toFixed(1)} ms</span>` +
             `<span style="color:#94a3b8">TPOT p50:</span><span style="font-family:monospace;color:#e2e8f0">${pt.tpotP50Ms.toFixed(2)} ms/tok</span>` +
@@ -465,8 +451,7 @@ function ParetoFrontierInternal({ config }: ParetoFrontierProps) {
             `<span style="color:#94a3b8">TCO/GPU/hr:</span><span style="font-family:monospace;color:#e2e8f0">$${pt.tcoPerGpuHr.toFixed(2)}</span>` +
             `</div>`
           )
-        },
-      },
+        } },
       legend: { show: false },
       xAxis: {
         type: 'value',
@@ -476,8 +461,7 @@ function ParetoFrontierInternal({ config }: ParetoFrontierProps) {
         nameTextStyle: { color: '#94a3b8', fontSize: 11, fontWeight: 500 },
         axisLine: { lineStyle: { color: '#334155' } },
         splitLine: { lineStyle: { color: '#1e293b', type: 'dashed' } },
-        axisLabel: { color: '#64748b', fontSize: 10 },
-      },
+        axisLabel: { color: '#64748b', fontSize: 10 } },
       yAxis: {
         type: 'value',
         name: `${preset.yAxis.label} (${preset.yAxis.unit})`,
@@ -489,25 +473,18 @@ function ParetoFrontierInternal({ config }: ParetoFrontierProps) {
         axisLabel: {
           color: '#64748b',
           fontSize: 10,
-          formatter: preset.yAxis.formatter ?? ((v: number) => v >= 1000 ? `${(v / 1000).toFixed(0)}k` : String(v)),
-        },
-      },
+          formatter: preset.yAxis.formatter ?? ((v: number) => v >= 1000 ? `${(v / 1000).toFixed(0)}k` : String(v)) } },
       dataZoom: [
         { type: 'inside', xAxisIndex: 0, filterMode: 'weakFilter' },
         { type: 'inside', yAxisIndex: 0, filterMode: 'weakFilter' },
       ],
-      series: allSeries,
-    }
+      series: allSeries }
   }, [seriesMap, frontier, hideNonOptimal, hideLabels, highContrast, hiddenHw, preset])
 
   // ---- Legend items (hardware only) ----
-  const legendItems = useMemo(
-    () => [...seriesMap.keys()].map(hw => ({
+  const legendItems = [...seriesMap.keys()].map(hw => ({
       hw,
-      color: HARDWARE_COLORS[hw] ?? '#6b7280',
-    })),
-    [seriesMap],
-  )
+      color: HARDWARE_COLORS[hw] ?? '#6b7280' }))
 
   return (
     <div className="h-full flex flex-col pt-3 px-4 pb-2">
@@ -641,8 +618,7 @@ function FilterDropdown({
   onChange,
   options,
   optionLabels,
-  noAllOption,
-}: {
+  noAllOption }: {
   label: string
   value: string
   onChange: (v: string) => void

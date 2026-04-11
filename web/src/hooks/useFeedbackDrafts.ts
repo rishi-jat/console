@@ -7,7 +7,7 @@
  * human-readable title extracted from the first line of the description.
  */
 
-import { useState, useCallback, useEffect } from 'react'
+import { useState, useEffect } from 'react'
 import type { RequestType, TargetRepo } from './useFeatureRequests'
 
 /** localStorage key for the drafts array */
@@ -35,6 +35,13 @@ export interface FeedbackDraft {
   savedAt: string
   /** ISO timestamp of when the draft was last updated */
   updatedAt: string
+  /**
+   * Attached screenshots as base64 data URIs so they survive a full
+   * reload. We can't put `File`/`Blob` objects in localStorage, but the
+   * paste/drop/file-picker flow already yields data URIs via FileReader,
+   * so we persist those directly. (#6102)
+   */
+  screenshots?: string[]
 }
 
 /** Read drafts from localStorage, returning an empty array on failure */
@@ -83,8 +90,13 @@ export function useFeedbackDrafts() {
   }, [])
 
   /** Save a new draft or update an existing one. Returns the draft id. */
-  const saveDraft = useCallback((
-    draft: { requestType: RequestType; targetRepo: TargetRepo; description: string },
+  const saveDraft = (
+    draft: {
+      requestType: RequestType
+      targetRepo: TargetRepo
+      description: string
+      screenshots?: string[]
+    },
     existingId?: string,
   ): string | null => {
     if (draft.description.trim().length < MIN_DRAFT_LENGTH) return null
@@ -111,8 +123,7 @@ export function useFeedbackDrafts() {
           id: `draft-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`,
           ...draft,
           savedAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
-        }
+          updatedAt: new Date().toISOString() }
         updated.push(newDraft)
       }
 
@@ -125,22 +136,22 @@ export function useFeedbackDrafts() {
     // For new drafts, the id was generated inside setState — read it back
     const latest = loadDrafts()
     return latest.length > 0 ? latest[latest.length - 1].id : null
-  }, [])
+  }
 
   /** Delete a draft by id */
-  const deleteDraft = useCallback((id: string) => {
+  const deleteDraft = (id: string) => {
     setDrafts(prev => {
       const updated = prev.filter(d => d.id !== id)
       saveDrafts(updated)
       return updated
     })
-  }, [])
+  }
 
   /** Delete all drafts */
-  const clearAllDrafts = useCallback(() => {
+  const clearAllDrafts = () => {
     saveDrafts([])
     setDrafts([])
-  }, [])
+  }
 
   return {
     drafts,
@@ -149,6 +160,5 @@ export function useFeedbackDrafts() {
     deleteDraft,
     clearAllDrafts,
     MAX_DRAFTS,
-    MIN_DRAFT_LENGTH,
-  }
+    MIN_DRAFT_LENGTH }
 }

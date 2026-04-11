@@ -1,5 +1,5 @@
-import { memo, useState, useEffect, useRef, useCallback } from 'react'
-import { Pencil, Globe, User, ShieldAlert, ChevronRight, Star, WifiOff, RefreshCw, ExternalLink, AlertCircle, Cpu, Box, Server, KeyRound, Copy, Check, GripVertical, Play, Square, RotateCcw } from 'lucide-react'
+import { memo, useState, useEffect, useRef } from 'react'
+import { Pencil, Globe, User, ShieldAlert, ChevronRight, Star, WifiOff, RefreshCw, ExternalLink, AlertCircle, Cpu, Box, Server, KeyRound, Copy, Check, GripVertical, Play, Square, RotateCcw, Trash2 } from 'lucide-react'
 import {
   DndContext,
   closestCenter,
@@ -7,16 +7,14 @@ import {
   PointerSensor,
   useSensor,
   useSensors,
-  type DragEndEvent,
-} from '@dnd-kit/core'
+  type DragEndEvent } from '@dnd-kit/core'
 import {
   SortableContext,
   sortableKeyboardCoordinates,
   useSortable,
   verticalListSortingStrategy,
   rectSortingStrategy,
-  arrayMove,
-} from '@dnd-kit/sortable'
+  arrayMove } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
 import { FlashingValue } from '../../ui/FlashingValue'
 import { ClusterInfo } from '../../../hooks/useMCP'
@@ -38,7 +36,7 @@ function useMinSpin(refreshing: boolean, minDurationMs = MIN_SPIN_DURATION_MS): 
   const [spinning, setSpinning] = useState(false)
   const spinningRef = useRef(false)
   const spinStartRef = useRef(0)
-  const timerRef = useRef<ReturnType<typeof setTimeout>>()
+  const timerRef = useRef<ReturnType<typeof setTimeout>>(undefined)
 
   useEffect(() => {
     if (refreshing) {
@@ -75,8 +73,7 @@ const AUTH_BADGE_MAP: Record<string, { label: string; color: string }> = {
   exec: { label: 'IAM', color: 'bg-black/5 dark:bg-white/5 text-muted-foreground' },
   token: { label: 'token', color: 'bg-black/5 dark:bg-white/5 text-muted-foreground' },
   certificate: { label: 'cert', color: 'bg-black/5 dark:bg-white/5 text-muted-foreground' },
-  'auth-provider': { label: 'IAM', color: 'bg-black/5 dark:bg-white/5 text-muted-foreground' },
-}
+  'auth-provider': { label: 'IAM', color: 'bg-black/5 dark:bg-white/5 text-muted-foreground' } }
 
 // Session refresh commands per exec-plugin CLI name
 const IAM_REFRESH_COMMANDS: Record<string, string> = {
@@ -86,8 +83,7 @@ const IAM_REFRESH_COMMANDS: Record<string, string> = {
   gke: 'gcloud auth login',
   az: 'az login',
   kubelogin: 'az login',
-  oc: 'oc login <api-server-url>',
-}
+  oc: 'oc login <api-server-url>' }
 
 // Get a session refresh hint for IAM auth failures based on cluster user/name
 function getIAMRefreshHint(cluster: ClusterInfo): string | null {
@@ -147,8 +143,7 @@ function providerToTool(provider: string): string | null {
 const LocalClusterControls = memo(function LocalClusterControls({
   clusterName,
   provider,
-  unreachable,
-}: {
+  unreachable }: {
   clusterName: string
   provider: string
   unreachable: boolean
@@ -238,6 +233,8 @@ interface ClusterGridProps {
   onSelectCluster: (clusterName: string) => void
   onRenameCluster: (clusterName: string) => void
   onRefreshCluster?: (clusterName: string) => void
+  /** Invoked when the user clicks "Remove cluster" on an offline cluster card (#5901) */
+  onRemoveCluster?: (clusterName: string) => void
   onReorder?: (clusterNames: string[]) => void
   layoutMode?: ClusterLayoutMode
 }
@@ -252,9 +249,37 @@ interface ClusterCardProps {
   onSelectCluster: () => void
   onRenameCluster: () => void
   onRefreshCluster?: () => void
+  /** Invoked when the user clicks "Remove cluster" — only rendered when `unreachable` (#5901) */
+  onRemoveCluster?: () => void
   dragHandle?: React.ReactNode
   layoutMode: ClusterLayoutMode
 }
+
+/**
+ * Inline "Remove cluster" button shown only on offline/unreachable cluster cards (#5901).
+ * Delegates confirmation + API call to the parent via `onRemoveCluster`.
+ */
+const RemoveClusterButton = memo(function RemoveClusterButton({
+  onRemove,
+  size = 'sm' }: {
+  onRemove: () => void
+  size?: 'sm' | 'xs'
+}) {
+  const { t } = useTranslation()
+  const iconClass = size === 'xs' ? 'w-3 h-3' : 'w-3.5 h-3.5'
+  const btnClass = size === 'xs' ? 'p-1' : 'p-1.5'
+  return (
+    <button
+      onClick={(e) => { e.stopPropagation(); onRemove() }}
+      className={`${btnClass} rounded text-muted-foreground hover:text-red-400 hover:bg-red-500/20 transition-colors`}
+      title={t('cluster.removeCluster')}
+      aria-label={t('cluster.removeCluster')}
+      data-testid="remove-cluster-button"
+    >
+      <Trash2 className={iconClass} aria-hidden="true" />
+    </button>
+  )
+})
 
 // Keyboard handler for clickable card divs: activates on Enter or Space
 function handleCardKeyDown(callback: () => void) {
@@ -276,8 +301,8 @@ const FullClusterCard = memo(function FullClusterCard({
   onSelectCluster,
   onRenameCluster,
   onRefreshCluster,
-  dragHandle,
-}: Omit<ClusterCardProps, 'layoutMode'>) {
+  onRemoveCluster,
+  dragHandle }: Omit<ClusterCardProps, 'layoutMode'>) {
   const { t } = useTranslation()
   const loading = isClusterLoading(cluster)
   const unreachable = isClusterUnreachable(cluster)
@@ -305,8 +330,7 @@ const FullClusterCard = memo(function FullClusterCard({
       className="relative p-[1px] rounded-lg cursor-pointer transition-all hover:scale-[1.02] overflow-hidden h-full"
       style={{
         /* Card view: prominent gradient — provider at 50%, theme at 38% */
-        background: `linear-gradient(135deg, color-mix(in srgb, ${providerColor} 50%, transparent) 0%, color-mix(in srgb, ${themeColor} 38%, transparent) 100%)`,
-      }}
+        background: `linear-gradient(135deg, color-mix(in srgb, ${providerColor} 50%, transparent) 0%, color-mix(in srgb, ${themeColor} 38%, transparent) 100%)` }}
     >
       <div className="relative glass p-5 rounded-lg h-full overflow-hidden">
         {/* Background provider icon */}
@@ -315,8 +339,7 @@ const FullClusterCard = memo(function FullClusterCard({
           style={{
             opacity: 0.25,
             maskImage: 'linear-gradient(45deg, rgba(0,0,0,1) 0%, rgba(0,0,0,0.4) 80%)',
-            WebkitMaskImage: 'linear-gradient(45deg, rgba(0,0,0,1) 0%, rgba(0,0,0,0.4) 80%)',
-          }}
+            WebkitMaskImage: 'linear-gradient(45deg, rgba(0,0,0,1) 0%, rgba(0,0,0,0.4) 80%)' }}
         >
           <CloudProviderIcon provider={provider} size={100} />
         </div>
@@ -332,7 +355,18 @@ const FullClusterCard = memo(function FullClusterCard({
                   <KeyRound className="w-4 h-4 text-red-400" />
                 </div>
               ) : unreachable ? (
-                <div className="w-8 h-8 rounded-full bg-yellow-500/20 flex items-center justify-center" title="Offline - check network connection">
+                <div
+                  className="w-8 h-8 rounded-full bg-yellow-500/20 flex items-center justify-center"
+                  title={
+                    // Surface the reason for unreachability directly in
+                    // the status icon tooltip (#5925).
+                    cluster.errorMessage
+                      ? `Offline (${cluster.errorType || 'error'}): ${cluster.errorMessage}`
+                      : cluster.errorType
+                        ? `Offline: ${cluster.errorType}`
+                        : 'Offline - check network connection'
+                  }
+                >
                   <WifiOff className="w-4 h-4 text-yellow-400" />
                 </div>
               ) : !isClusterHealthy(cluster) ? (
@@ -398,6 +432,10 @@ const FullClusterCard = memo(function FullClusterCard({
                   >
                     <Pencil className="w-3 h-3" aria-hidden="true" />
                   </button>
+                )}
+                {/* Remove cluster button — only for unreachable clusters (#5901) */}
+                {isConnected && unreachable && onRemoveCluster && (cluster.source === 'kubeconfig' || !cluster.source) && (
+                  <RemoveClusterButton onRemove={onRemoveCluster} size="xs" />
                 )}
               </div>
               <div className="flex flex-col gap-1 mt-1">
@@ -517,10 +555,11 @@ const ListClusterCard = memo(function ListClusterCard({
   gpuInfo,
   permissionsLoading,
   isClusterAdmin,
+  isConnected,
   onSelectCluster,
   onRefreshCluster,
-  dragHandle,
-}: Omit<ClusterCardProps, 'layoutMode' | 'isConnected' | 'onRenameCluster'>) {
+  onRemoveCluster,
+  dragHandle }: Omit<ClusterCardProps, 'layoutMode' | 'onRenameCluster'>) {
   const { t } = useTranslation()
   const loading = isClusterLoading(cluster)
   const unreachable = isClusterUnreachable(cluster)
@@ -544,8 +583,7 @@ const ListClusterCard = memo(function ListClusterCard({
       className="relative p-[1px] rounded-lg cursor-pointer transition-all hover:scale-[1.01] overflow-hidden"
       style={{
         /* List view: subtle gradient — provider at 38%, theme at 25% */
-        background: `linear-gradient(90deg, color-mix(in srgb, ${providerColor} 38%, transparent) 0%, color-mix(in srgb, ${themeColor} 25%, transparent) 100%)`,
-      }}
+        background: `linear-gradient(90deg, color-mix(in srgb, ${providerColor} 38%, transparent) 0%, color-mix(in srgb, ${themeColor} 25%, transparent) 100%)` }}
     >
       <div className="relative glass px-4 py-3 rounded-lg h-full overflow-hidden">
         {/* Vendor watermark on right side - large with gradient fade */}
@@ -554,8 +592,7 @@ const ListClusterCard = memo(function ListClusterCard({
           style={{
             opacity: 0.15,
             maskImage: 'linear-gradient(to left, rgba(0,0,0,0) 0%, rgba(0,0,0,1) 40%)',
-            WebkitMaskImage: 'linear-gradient(to left, rgba(0,0,0,0) 0%, rgba(0,0,0,1) 40%)',
-          }}
+            WebkitMaskImage: 'linear-gradient(to left, rgba(0,0,0,0) 0%, rgba(0,0,0,1) 40%)' }}
         >
           <CloudProviderIcon provider={provider} size={64} />
         </div>
@@ -691,6 +728,10 @@ const ListClusterCard = memo(function ListClusterCard({
                 <RefreshCw className={`w-3.5 h-3.5 ${spinning ? 'animate-spin' : ''}`} aria-hidden="true" />
               </button>
             )}
+            {/* Remove cluster button — only for unreachable clusters (#5901) */}
+            {isConnected && unreachable && onRemoveCluster && (cluster.source === 'kubeconfig' || !cluster.source) && (
+              <RemoveClusterButton onRemove={onRemoveCluster} />
+            )}
             {!permissionsLoading && !isClusterAdmin && !unreachable && (
               <span title="Limited permissions">
                 <ShieldAlert className="w-3.5 h-3.5 text-yellow-400" />
@@ -708,9 +749,10 @@ const ListClusterCard = memo(function ListClusterCard({
 const CompactClusterCard = memo(function CompactClusterCard({
   cluster,
   gpuInfo,
+  isConnected,
   onSelectCluster,
-  dragHandle,
-}: Omit<ClusterCardProps, 'layoutMode' | 'isConnected' | 'permissionsLoading' | 'isClusterAdmin' | 'onRenameCluster' | 'onRefreshCluster'>) {
+  onRemoveCluster,
+  dragHandle }: Omit<ClusterCardProps, 'layoutMode' | 'permissionsLoading' | 'isClusterAdmin' | 'onRenameCluster' | 'onRefreshCluster'>) {
   const { t } = useTranslation()
   const unreachable = isClusterUnreachable(cluster)
   const hasCachedData = cluster.nodeCount !== undefined && cluster.nodeCount > 0
@@ -731,8 +773,7 @@ const CompactClusterCard = memo(function CompactClusterCard({
       className="relative p-[1px] rounded-lg cursor-pointer transition-all hover:scale-[1.02] overflow-hidden"
       style={{
         /* Grid view: subtle gradient — provider at 38%, theme at 25% */
-        background: `linear-gradient(135deg, color-mix(in srgb, ${providerColor} 38%, transparent) 0%, color-mix(in srgb, ${themeColor} 25%, transparent) 100%)`,
-      }}
+        background: `linear-gradient(135deg, color-mix(in srgb, ${providerColor} 38%, transparent) 0%, color-mix(in srgb, ${themeColor} 25%, transparent) 100%)` }}
     >
       <div className="relative glass p-3 rounded-lg h-full overflow-hidden">
         {/* Header */}
@@ -766,6 +807,10 @@ const CompactClusterCard = memo(function CompactClusterCard({
           )}
           {cluster.isCurrent && (
             <Star className="w-3 h-3 text-primary fill-current flex-shrink-0" />
+          )}
+          {/* Remove cluster button — only for unreachable clusters (#5901) */}
+          {isConnected && unreachable && onRemoveCluster && (cluster.source === 'kubeconfig' || !cluster.source) && (
+            <RemoveClusterButton onRemove={onRemoveCluster} size="xs" />
           )}
         </div>
 
@@ -809,16 +854,14 @@ function SortableClusterItem({ id, children, onReorder }: { id: string; children
     setNodeRef,
     transform,
     transition,
-    isDragging,
-  } = useSortable({ id })
+    isDragging } = useSortable({ id })
 
   const style = {
     transform: CSS.Transform.toString(transform),
     transition,
     opacity: isDragging ? 0.5 : 1,
     position: 'relative' as const,
-    zIndex: isDragging ? 10 : undefined,
-  }
+    zIndex: isDragging ? 10 : undefined }
 
   const dragHandle = onReorder ? (
     <button
@@ -847,9 +890,9 @@ export const ClusterGrid = memo(function ClusterGrid({
   onSelectCluster,
   onRenameCluster,
   onRefreshCluster,
+  onRemoveCluster,
   onReorder,
-  layoutMode = 'grid',
-}: ClusterGridProps) {
+  layoutMode = 'grid' }: ClusterGridProps) {
   const { t } = useTranslation()
 
   const sensors = useSensors(
@@ -857,7 +900,7 @@ export const ClusterGrid = memo(function ClusterGrid({
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
   )
 
-  const handleDragEnd = useCallback((event: DragEndEvent) => {
+  const handleDragEnd = (event: DragEndEvent) => {
     const { active, over } = event
     if (!over || active.id === over.id || !onReorder) return
     const oldIndex = clusters.findIndex(c => c.name === active.id)
@@ -865,7 +908,7 @@ export const ClusterGrid = memo(function ClusterGrid({
     if (oldIndex === -1 || newIndex === -1) return
     const reordered = arrayMove(clusters, oldIndex, newIndex)
     onReorder(reordered.map(c => c.name))
-  }, [clusters, onReorder])
+  }
 
   if (clusters.length === 0) {
     return (
@@ -880,8 +923,7 @@ export const ClusterGrid = memo(function ClusterGrid({
     grid: 'grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4',
     list: 'flex flex-col gap-3',
     compact: 'grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 gap-3',
-    wide: 'grid grid-cols-1 lg:grid-cols-2 gap-4',
-  }
+    wide: 'grid grid-cols-1 lg:grid-cols-2 gap-4' }
 
   const sortingStrategy = layoutMode === 'list' ? verticalListSortingStrategy : rectSortingStrategy
   const clusterIds = clusters.map(c => c.name)
@@ -898,15 +940,18 @@ export const ClusterGrid = memo(function ClusterGrid({
             return (
               <SortableClusterItem key={cluster.name} id={cluster.name} onReorder={onReorder}>
                 {(dragHandle) => {
+                  const removeHandler = onRemoveCluster ? () => onRemoveCluster(cluster.name) : undefined
                   if (layoutMode === 'list') {
                     return (
                       <ListClusterCard
                         cluster={cluster}
                         gpuInfo={gpuInfo}
+                        isConnected={isConnected}
                         permissionsLoading={permissionsLoading}
                         isClusterAdmin={clusterIsAdmin}
                         onSelectCluster={() => onSelectCluster(cluster.name)}
                         onRefreshCluster={onRefreshCluster ? () => onRefreshCluster(cluster.name) : undefined}
+                        onRemoveCluster={removeHandler}
                         dragHandle={dragHandle}
                       />
                     )
@@ -917,7 +962,9 @@ export const ClusterGrid = memo(function ClusterGrid({
                       <CompactClusterCard
                         cluster={cluster}
                         gpuInfo={gpuInfo}
+                        isConnected={isConnected}
                         onSelectCluster={() => onSelectCluster(cluster.name)}
+                        onRemoveCluster={removeHandler}
                         dragHandle={dragHandle}
                       />
                     )
@@ -934,6 +981,7 @@ export const ClusterGrid = memo(function ClusterGrid({
                       onSelectCluster={() => onSelectCluster(cluster.name)}
                       onRenameCluster={() => onRenameCluster(cluster.name)}
                       onRefreshCluster={onRefreshCluster ? () => onRefreshCluster(cluster.name) : undefined}
+                      onRemoveCluster={removeHandler}
                       dragHandle={dragHandle}
                     />
                   )

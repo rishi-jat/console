@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo } from 'react'
+import { useState } from 'react'
 import { useDroppable } from '@dnd-kit/core'
 import {
   Server,
@@ -16,8 +16,7 @@ import {
   Search,
   Tag,
   Filter,
-  Database,
-} from 'lucide-react'
+  Database } from 'lucide-react'
 import { cn } from '../../lib/cn'
 import { ClusterBadge } from '../ui/ClusterBadge'
 import {
@@ -25,13 +24,13 @@ import {
   type ClusterGroup,
   type ClusterGroupKind,
   type ClusterFilter,
-  type ClusterGroupQuery,
-} from '../../hooks/useClusterGroups'
+  type ClusterGroupQuery } from '../../hooks/useClusterGroups'
 import { useClusters } from '../../hooks/useMCP'
 import { useCardLoadingState } from './CardDataContext'
 import { useDemoMode } from '../../hooks/useDemoMode'
 import { useTranslation } from 'react-i18next'
 import { StatusBadge } from '../ui/StatusBadge'
+import { ConfirmDialog } from '../../lib/modals'
 
 interface ClusterGroupsProps {
   config?: Record<string, unknown>
@@ -119,17 +118,18 @@ export function ClusterGroups(_props: ClusterGroupsProps) {
   const { isDemoMode: demoMode } = useDemoMode()
 
   // Build the built-in "all-healthy-clusters" group from current cluster state for live mode
-  const builtInGroup = useMemo<ClusterGroup>(() => ({
+  const builtInGroup: ClusterGroup = {
     name: 'all-healthy-clusters',
     kind: 'dynamic',
     clusters: clusters.filter(c => c.healthy).map(c => c.name),
     color: 'green',
     builtIn: true,
-    query: { filters: [{ field: 'healthy', operator: 'eq', value: 'true' }] },
-  }), [clusters])
+    query: { filters: [{ field: 'healthy', operator: 'eq', value: 'true' }] } }
 
   const groups = demoMode ? DEMO_GROUPS : [builtInGroup, ...liveGroups]
   const [isCreating, setIsCreating] = useState(false)
+  // Track which group is pending delete confirmation (#5197)
+  const [deleteConfirmName, setDeleteConfirmName] = useState<string | null>(null)
 
   // Report loading state to CardWrapper for skeleton/refresh behavior
   const hasData = clusters.length > 0 || groups.length > 0
@@ -137,19 +137,18 @@ export function ClusterGroups(_props: ClusterGroupsProps) {
     isLoading: isLoading && !hasData,
     isRefreshing,
     hasAnyData: hasData,
-    isDemoData: demoMode,
-  })
+    isDemoData: demoMode })
   const [editingGroup, setEditingGroup] = useState<string | null>(null)
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set())
 
-  const toggleExpanded = useCallback((name: string) => {
+  const toggleExpanded = (name: string) => {
     setExpandedGroups(prev => {
       const next = new Set(prev)
       if (next.has(name)) next.delete(name)
       else next.add(name)
       return next
     })
-  }, [])
+  }
 
   const availableClusterNames = clusters.map(c => c.name)
 
@@ -228,7 +227,7 @@ export function ClusterGroups(_props: ClusterGroupsProps) {
                 clusterHealthMap={new Map(clusters.map(c => [c.name, c.healthy]))}
                 onToggle={() => toggleExpanded(group.name)}
                 onEdit={() => setEditingGroup(group.name)}
-                onDelete={() => deleteGroup(group.name)}
+                onDelete={() => setDeleteConfirmName(group.name)}
               />
             )
           ))}
@@ -241,6 +240,24 @@ export function ClusterGroups(_props: ClusterGroupsProps) {
           {t('cards:clusterGroups.dragWorkloadHint')}
         </p>
       </div>
+
+      {/* Delete confirmation dialog (#5197) */}
+      <ConfirmDialog
+        isOpen={deleteConfirmName !== null}
+        onClose={() => setDeleteConfirmName(null)}
+        onConfirm={() => {
+          if (deleteConfirmName) {
+            deleteGroup(deleteConfirmName)
+            setDeleteConfirmName(null)
+          }
+        }}
+        title={t('cards:clusterGroups.deleteGroup')}
+        message={t('cards:clusterGroups.deleteConfirmMessage', {
+          defaultValue: 'Are you sure you want to delete this cluster group? This action cannot be undone.',
+        })}
+        confirmLabel={t('common:actions.delete', { defaultValue: 'Delete' })}
+        variant="danger"
+      />
     </div>
   )
 }
@@ -265,9 +282,7 @@ function DroppableGroup({ group, isExpanded, clusterHealthMap, onToggle, onEdit,
     data: {
       type: 'cluster-group',
       groupName: group.name,
-      clusters: group.clusters,
-    },
-  })
+      clusters: group.clusters } })
 
   const color = getGroupColor(group.color)
   const healthyCount = group.clusters.filter(c => clusterHealthMap.get(c) !== false).length
@@ -342,7 +357,7 @@ function DroppableGroup({ group, isExpanded, clusterHealthMap, onToggle, onEdit,
         <div className="flex items-center gap-1">
           <button
             onClick={onEdit}
-            className="p-1 rounded hover:bg-white/10 text-muted-foreground hover:text-foreground transition-colors"
+            className="p-1 rounded hover:bg-gray-900/10 dark:hover:bg-white/10 text-muted-foreground hover:text-foreground transition-colors"
             title={t('cards:clusterGroups.editGroup')}
           >
             <Edit2 className="w-3 h-3" />
@@ -450,8 +465,7 @@ function CreateGroupForm({ availableClusters, clusterHealthMap, onSave, onCancel
 
   const buildQuery = (): ClusterGroupQuery => ({
     labelSelector: labelSelector.trim() || undefined,
-    filters: filters.length > 0 ? filters : undefined,
-  })
+    filters: filters.length > 0 ? filters : undefined })
 
   const handlePreview = async () => {
     setIsPreviewing(true)
@@ -523,8 +537,7 @@ function CreateGroupForm({ availableClusters, clusterHealthMap, onSave, onCancel
         name: name.trim(),
         kind: 'static',
         clusters: Array.from(selectedClusters),
-        color: selectedColor,
-      })
+        color: selectedColor })
     } else {
       onSave({
         name: name.trim(),
@@ -532,8 +545,7 @@ function CreateGroupForm({ availableClusters, clusterHealthMap, onSave, onCancel
         clusters: previewClusters ?? [],
         color: selectedColor,
         query: buildQuery(),
-        lastEvaluated: previewClusters ? new Date().toISOString() : undefined,
-      })
+        lastEvaluated: previewClusters ? new Date().toISOString() : undefined })
     }
   }
 
@@ -541,7 +553,7 @@ function CreateGroupForm({ availableClusters, clusterHealthMap, onSave, onCancel
     <div className="rounded-lg border border-blue-500/40 bg-blue-500/5 p-3 space-y-3">
       <div className="flex items-center justify-between">
         <span className="text-xs font-medium text-blue-400">{t('cards:clusterGroups.newClusterGroup')}</span>
-        <button onClick={onCancel} className="p-2 hover:bg-white/10 rounded min-h-11 min-w-11 flex items-center justify-center">
+        <button onClick={onCancel} aria-label={t('common:common.cancel')} className="p-2 hover:bg-gray-900/10 dark:hover:bg-white/10 rounded min-h-11 min-w-11 flex items-center justify-center">
           <X className="w-3.5 h-3.5 text-muted-foreground" />
         </button>
       </div>
@@ -716,8 +728,7 @@ function StaticClusterPicker({
   clusterHealthMap,
   selectedClusters,
   onToggle,
-  accentColor,
-}: {
+  accentColor }: {
   availableClusters: string[]
   clusterHealthMap: Map<string, boolean | undefined>
   selectedClusters: Set<string>
@@ -784,8 +795,7 @@ function QueryBuilder({
   filters,
   onAddFilter,
   onRemoveFilter,
-  onUpdateFilter,
-}: {
+  onUpdateFilter }: {
   labelSelector: string
   onLabelSelectorChange: (v: string) => void
   filters: ClusterFilter[]
@@ -908,6 +918,7 @@ function QueryBuilder({
                 {/* Remove */}
                 <button
                   onClick={() => onRemoveFilter(i)}
+                  aria-label={t('cards:clusterGroups.removeFilter', 'Remove filter')}
                   className="p-0.5 rounded hover:bg-red-500/20 text-muted-foreground hover:text-red-400"
                 >
                   <X className="w-3 h-3" />
@@ -933,8 +944,7 @@ function AIAssistant({
   onPromptChange,
   onGenerate,
   loading,
-  error,
-}: {
+  error }: {
   prompt: string
   onPromptChange: (v: string) => void
   onGenerate: () => void
@@ -1009,8 +1019,7 @@ function EditGroupForm({ group, availableClusters, clusterHealthMap, onSave, onC
 
   const buildQuery = (): ClusterGroupQuery => ({
     labelSelector: labelSelector.trim() || undefined,
-    filters: filters.length > 0 ? filters : undefined,
-  })
+    filters: filters.length > 0 ? filters : undefined })
 
   const handlePreview = async () => {
     setIsPreviewing(true)
@@ -1032,16 +1041,14 @@ function EditGroupForm({ group, availableClusters, clusterHealthMap, onSave, onC
         kind: 'static',
         clusters: Array.from(selectedClusters),
         color: selectedColor,
-        query: undefined,
-      })
+        query: undefined })
     } else {
       onSave({
         kind: 'dynamic',
         clusters: previewClusters ?? group.clusters,
         color: selectedColor,
         query: buildQuery(),
-        lastEvaluated: previewClusters ? new Date().toISOString() : group.lastEvaluated,
-      })
+        lastEvaluated: previewClusters ? new Date().toISOString() : group.lastEvaluated })
     }
   }
 
@@ -1049,7 +1056,7 @@ function EditGroupForm({ group, availableClusters, clusterHealthMap, onSave, onC
     <div className="rounded-lg border border-yellow-500/40 bg-yellow-500/5 p-3 space-y-3">
       <div className="flex items-center justify-between">
         <span className="text-xs font-medium text-yellow-400">{t('common:common.edit')}: {group.name}</span>
-        <button onClick={onCancel} className="p-2 hover:bg-white/10 rounded min-h-11 min-w-11 flex items-center justify-center">
+        <button onClick={onCancel} aria-label={t('common:common.cancel')} className="p-2 hover:bg-gray-900/10 dark:hover:bg-white/10 rounded min-h-11 min-w-11 flex items-center justify-center">
           <X className="w-3.5 h-3.5 text-muted-foreground" />
         </button>
       </div>
@@ -1154,7 +1161,7 @@ function EditGroupForm({ group, availableClusters, clusterHealthMap, onSave, onC
         </button>
         <button
           onClick={handleSave}
-          className="flex-1 py-1.5 text-xs font-medium rounded-md bg-yellow-500 text-black hover:bg-yellow-400 transition-colors"
+          className="flex-1 py-1.5 text-xs font-medium rounded-md bg-yellow-500 text-black dark:text-gray-900 hover:bg-yellow-400 transition-colors"
         >
           {t('common:common.save')}
         </button>

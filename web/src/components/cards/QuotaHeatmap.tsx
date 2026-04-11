@@ -1,18 +1,20 @@
-import { useMemo, useState } from 'react'
+import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useCachedPods } from '../../hooks/useCachedData'
 import { useCardLoadingState } from './CardDataContext'
+import { RefreshIndicator } from '../ui/RefreshIndicator'
 
 interface NamespaceUsage {
   namespace: string
   cluster: string
   podCount: number
-  // CPU and memory are estimated from pod count
+  /** Hard pod quota from ResourceQuota (undefined = no quota configured) */
+  podQuota?: number
 }
 
 export function QuotaHeatmap() {
   const { t } = useTranslation('cards')
-  const { pods, isLoading, isRefreshing, isDemoFallback, isFailed, consecutiveFailures } = useCachedPods(undefined, undefined, { limit: 500 })
+  const { pods, isLoading, isRefreshing, isDemoFallback, isFailed, consecutiveFailures, lastRefresh: podsLastRefresh } = useCachedPods(undefined, undefined, { limit: 500 })
   const [selectedNs, setSelectedNs] = useState<string | null>(null)
 
   const hasData = pods.length > 0
@@ -22,10 +24,9 @@ export function QuotaHeatmap() {
     hasAnyData: hasData,
     isDemoData: isDemoFallback,
     isFailed,
-    consecutiveFailures,
-  })
+    consecutiveFailures })
 
-  const namespaceData = useMemo(() => {
+  const namespaceData = (() => {
     const map = new Map<string, NamespaceUsage>()
     for (const pod of pods) {
       const key = `${pod.cluster || 'unknown'}/${pod.namespace || 'default'}`
@@ -33,15 +34,14 @@ export function QuotaHeatmap() {
         map.set(key, {
           namespace: pod.namespace || 'default',
           cluster: pod.cluster || 'unknown',
-          podCount: 0,
-        })
+          podCount: 0 })
       }
       map.get(key)!.podCount++
     }
     return Array.from(map.values()).sort((a, b) => b.podCount - a.podCount)
-  }, [pods])
+  })()
 
-  const maxPods = useMemo(() => Math.max(1, ...namespaceData.map(d => d.podCount)), [namespaceData])
+  const maxPods = Math.max(1, ...namespaceData.map(d => d.podCount))
 
   if (showSkeleton) {
     return (
@@ -63,17 +63,32 @@ export function QuotaHeatmap() {
     )
   }
 
+  /** Density thresholds for heat coloring (relative to highest namespace) */
+  const HIGH_DENSITY_THRESHOLD = 0.8
+  const MEDIUM_DENSITY_THRESHOLD = 0.5
+  const LOW_DENSITY_THRESHOLD = 0.2
+
   const getHeatColor = (ratio: number) => {
-    if (ratio > 0.8) return 'bg-red-500/60 text-red-100'
-    if (ratio > 0.5) return 'bg-yellow-500/40 text-yellow-100'
-    if (ratio > 0.2) return 'bg-green-500/30 text-green-100'
-    return 'bg-green-500/10 text-green-300'
+    if (ratio > HIGH_DENSITY_THRESHOLD) return 'bg-blue-500/60 text-blue-100'
+    if (ratio > MEDIUM_DENSITY_THRESHOLD) return 'bg-blue-500/40 text-blue-200'
+    if (ratio > LOW_DENSITY_THRESHOLD) return 'bg-blue-500/20 text-blue-300'
+    return 'bg-blue-500/10 text-blue-300'
   }
 
   return (
     <div className="space-y-2 p-1">
-      <div className="text-xs text-muted-foreground">
-        {t('quotaHeatmap.summary', { namespaces: namespaceData.length, clusters: new Set(namespaceData.map(d => d.cluster)).size })}
+      <div className="flex items-center justify-between gap-2">
+        <div className="text-xs text-muted-foreground">
+          {t('quotaHeatmap.summary', { namespaces: namespaceData.length, clusters: new Set(namespaceData.map(d => d.cluster)).size })}
+        </div>
+        {/* #6217 part 2: freshness indicator. */}
+        <RefreshIndicator
+          isRefreshing={isRefreshing}
+          lastUpdated={typeof podsLastRefresh === 'number' ? new Date(podsLastRefresh) : null}
+          size="sm"
+          showLabel={true}
+          staleThresholdMinutes={5}
+        />
       </div>
       <div className="grid grid-cols-4 sm:grid-cols-6 gap-1 max-h-[350px] overflow-y-auto">
         {namespaceData.slice(0, 60).map(ns => {
@@ -86,7 +101,7 @@ export function QuotaHeatmap() {
               className={`p-1.5 rounded text-xs transition-all ${getHeatColor(ratio)} ${
                 isSelected ? 'ring-2 ring-primary scale-105' : 'hover:scale-105'
               }`}
-              title={`${ns.namespace} (${ns.cluster}): ${ns.podCount} pods`}
+              title={`${ns.namespace} (${ns.cluster}): ${ns.podCount} pods — relative density ${Math.round((ns.podCount / maxPods) * 100)}%`}
             >
               <div className="truncate font-medium">{ns.namespace}</div>
               <div className="text-2xs opacity-75">{t('quotaHeatmap.podsCount', { count: ns.podCount })}</div>

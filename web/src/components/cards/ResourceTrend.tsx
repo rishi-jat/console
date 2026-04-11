@@ -1,15 +1,6 @@
 import { useState, useMemo, useEffect, useRef } from 'react'
 import { TrendingUp, Cpu, MemoryStick, Box, Server, Clock } from 'lucide-react'
-import {
-  LineChart,
-  Line,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  ResponsiveContainer,
-  Legend,
-} from 'recharts'
+import ReactECharts from 'echarts-for-react'
 import { useClusters } from '../../hooks/useMCP'
 import { useGlobalFilters } from '../../hooks/useGlobalFilters'
 import { useCardLoadingState } from './CardDataContext'
@@ -20,9 +11,7 @@ import {
   CHART_GRID_STROKE,
   CHART_AXIS_STROKE,
   CHART_TOOLTIP_CONTENT_STYLE,
-  CHART_TICK_COLOR,
-  CHART_LEGEND_WRAPPER_STYLE,
-} from '../../lib/constants'
+  CHART_TICK_COLOR } from '../../lib/constants'
 import { useDemoMode } from '../../hooks/useDemoMode'
 
 interface ResourcePoint {
@@ -60,8 +49,7 @@ export function ResourceTrend() {
     isLoading: isLoading && !hasData,
     isRefreshing,
     hasAnyData: hasData,
-    isDemoData: isDemoMode,
-  })
+    isDemoData: isDemoMode })
 
   // Close dropdown when clicking outside
   useEffect(() => {
@@ -84,7 +72,6 @@ export function ResourceTrend() {
       const saved = localStorage.getItem(STORAGE_KEY)
       if (saved) {
         const parsed = JSON.parse(saved) as { data: ResourcePoint[]; timestamp: number }
-        // Check if data is not too old
         if (Date.now() - parsed.timestamp < MAX_AGE_MS) {
           return parsed.data
         }
@@ -104,8 +91,7 @@ export function ResourceTrend() {
       try {
         localStorage.setItem(STORAGE_KEY, JSON.stringify({
           data: history,
-          timestamp: Date.now(),
-        }))
+          timestamp: Date.now() }))
       } catch {
         // Ignore storage errors (quota exceeded, etc.)
       }
@@ -113,18 +99,16 @@ export function ResourceTrend() {
   }, [history])
 
   // Get reachable clusters
-  const reachableClusters = useMemo(() => {
-    return clusters.filter(c => c.reachable !== false)
-  }, [clusters])
+  const reachableClusters = clusters.filter(c => c.reachable !== false)
 
   // Get available clusters for local filter (respects global filter)
-  const availableClustersForFilter = useMemo(() => {
+  const availableClustersForFilter = (() => {
     if (isAllClustersSelected) return reachableClusters
     return reachableClusters.filter(c => selectedClusters.includes(c.name))
-  }, [reachableClusters, selectedClusters, isAllClustersSelected])
+  })()
 
   // Filter by selected clusters AND local filter AND exclude offline/unreachable clusters
-  const filteredClusters = useMemo(() => {
+  const filteredClusters = (() => {
     let filtered = reachableClusters
     if (!isAllClustersSelected) {
       filtered = filtered.filter(c => selectedClusters.includes(c.name))
@@ -133,7 +117,7 @@ export function ResourceTrend() {
       filtered = filtered.filter(c => localClusterFilter.includes(c.name))
     }
     return filtered
-  }, [reachableClusters, selectedClusters, isAllClustersSelected, localClusterFilter])
+  })()
 
   const toggleClusterFilter = (clusterName: string) => {
     setLocalClusterFilter(prev => {
@@ -150,13 +134,11 @@ export function ResourceTrend() {
       cpuCores: filteredClusters.reduce((sum, c) => sum + (c.cpuCores || 0), 0),
       memoryGB: filteredClusters.reduce((sum, c) => sum + (c.memoryGB || 0), 0),
       pods: filteredClusters.reduce((sum, c) => sum + (c.podCount || 0), 0),
-      nodes: filteredClusters.reduce((sum, c) => sum + (c.nodeCount || 0), 0),
-    }
+      nodes: filteredClusters.reduce((sum, c) => sum + (c.nodeCount || 0), 0) }
   }, [filteredClusters])
 
   // Check if we have any reachable clusters with real data
   const hasReachableClusters = filteredClusters.some(c => c.reachable !== false && c.nodeCount !== undefined && c.nodeCount > 0)
-
 
   // Add data point to history on each update
   useEffect(() => {
@@ -166,8 +148,7 @@ export function ResourceTrend() {
     const now = new Date()
     const newPoint: ResourcePoint = {
       time: now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-      ...currentTotals,
-    }
+      ...currentTotals }
 
     // Only add if data changed
     const lastPoint = historyRef.current[historyRef.current.length - 1]
@@ -193,8 +174,7 @@ export function ResourceTrend() {
         cpuCores: currentTotals.cpuCores,
         memoryGB: currentTotals.memoryGB,
         pods: currentTotals.pods,
-        nodes: currentTotals.nodes,
-      }
+        nodes: currentTotals.nodes }
       historyRef.current = [initialPoint]
       setHistory([initialPoint])
     }
@@ -231,12 +211,56 @@ export function ResourceTrend() {
 
   const lines = getLines()
 
+  const chartOption = useMemo(() => ({
+    backgroundColor: 'transparent',
+    grid: { left: 40, right: 5, top: 5, bottom: 40 },
+    xAxis: {
+      type: 'category' as const,
+      data: history.map(d => d.time),
+      axisLabel: { color: CHART_TICK_COLOR, fontSize: 10 },
+      axisLine: { lineStyle: { color: CHART_AXIS_STROKE } },
+      axisTick: { show: false },
+    },
+    yAxis: {
+      type: 'value' as const,
+      minInterval: 1,
+      axisLabel: { color: CHART_TICK_COLOR, fontSize: 10 },
+      axisLine: { show: false },
+      axisTick: { show: false },
+      splitLine: { lineStyle: { color: CHART_GRID_STROKE, type: 'dashed' as const } },
+    },
+    tooltip: {
+      trigger: 'axis' as const,
+      backgroundColor: (CHART_TOOLTIP_CONTENT_STYLE as Record<string, unknown>).backgroundColor as string,
+      borderColor: (CHART_TOOLTIP_CONTENT_STYLE as Record<string, unknown>).borderColor as string,
+      textStyle: { color: CHART_TICK_COLOR, fontSize: 12 },
+    },
+    legend: {
+      data: lines.map(l => l.name),
+      bottom: 0,
+      textStyle: { color: '#888', fontSize: 10 },
+      icon: 'roundRect',
+    },
+    series: lines.map((line, idx) => ({
+      name: line.name,
+      type: 'line',
+      data: history.map(d => d[line.dataKey as keyof ResourcePoint]),
+      smooth: 0.4,
+      showSymbol: false,
+      lineStyle: {
+        color: line.color,
+        width: 2,
+        ...(idx === 1 ? { type: 'dashed' as const } : {}),
+      },
+      itemStyle: { color: line.color },
+    })),
+  }), [history, lines])
+
   return (
     <div className="h-full flex flex-col">
-      {/* Controls - single row: Time Range → Cluster Filter → Refresh */}
+      {/* Controls */}
       <div className="flex items-center justify-between mb-3">
         <div className="flex items-center gap-2">
-          {/* Cluster count indicator */}
           {localClusterFilter.length > 0 && (
             <span className="flex items-center gap-1 text-xs text-muted-foreground bg-secondary/50 px-1.5 py-0.5 rounded">
               <Server className="w-3 h-3" />
@@ -245,7 +269,6 @@ export function ResourceTrend() {
           )}
         </div>
         <div className="flex items-center gap-2">
-          {/* Time Range Filter */}
           <div className="flex items-center gap-1">
             <Clock className="w-3 h-3 text-muted-foreground" />
             <select
@@ -259,8 +282,6 @@ export function ResourceTrend() {
               ))}
             </select>
           </div>
-
-          {/* Cluster Filter */}
           <CardClusterFilter
             availableClusters={availableClustersForFilter}
             selectedClusters={localClusterFilter}
@@ -271,7 +292,6 @@ export function ResourceTrend() {
             containerRef={clusterFilterRef}
             minClusters={1}
           />
-
         </div>
       </div>
 
@@ -336,43 +356,12 @@ export function ResourceTrend() {
           </div>
         ) : (
           <div style={{ width: '100%', minHeight: CHART_HEIGHT_STANDARD, height: CHART_HEIGHT_STANDARD }} role="img" aria-label={`Resource trend chart showing ${lines.map(l => l.name).join(', ')} over time`}>
-          <ResponsiveContainer width="100%" height={CHART_HEIGHT_STANDARD}>
-            <LineChart data={history} margin={{ top: 5, right: 5, left: 0, bottom: 5 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke={CHART_GRID_STROKE} />
-              <XAxis
-                dataKey="time"
-                tick={{ fill: CHART_TICK_COLOR, fontSize: 10 }}
-                axisLine={{ stroke: CHART_AXIS_STROKE }}
-                tickLine={false}
-              />
-              <YAxis
-                tick={{ fill: CHART_TICK_COLOR, fontSize: 10 }}
-                axisLine={false}
-                tickLine={false}
-                allowDecimals={false}
-              />
-              <Tooltip
-                contentStyle={CHART_TOOLTIP_CONTENT_STYLE}
-                labelStyle={{ color: CHART_TICK_COLOR }}
-              />
-              <Legend
-                wrapperStyle={CHART_LEGEND_WRAPPER_STYLE}
-                iconType="line"
-              />
-              {lines.map((line, idx) => (
-                <Line
-                  key={line.dataKey}
-                  type="natural"
-                  dataKey={line.dataKey}
-                  stroke={line.color}
-                  strokeWidth={2}
-                  strokeDasharray={idx === 1 ? "5 5" : undefined}
-                  dot={false}
-                  name={line.name}
-                />
-              ))}
-            </LineChart>
-          </ResponsiveContainer>
+            <ReactECharts
+              option={chartOption}
+              style={{ height: CHART_HEIGHT_STANDARD, width: '100%' }}
+              notMerge={true}
+              opts={{ renderer: 'svg' }}
+            />
           </div>
         )}
       </div>

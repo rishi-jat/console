@@ -206,6 +206,17 @@ export const handlers = [
   http.all('https://fonts.gstatic.com/*', () => passthrough()),
   http.all('https://fonts.googleapis.com/*', () => passthrough()),
   http.all('https://img.youtube.com/*', () => passthrough()),
+  // GitHub avatar URLs — return transparent 1x1 PNG to avoid CSP violation
+  // (connect-src doesn't include github.com on Netlify)
+  http.get('https://github.com/*.png', () => {
+    const TRANSPARENT_1X1_PNG = new Uint8Array([
+      137,80,78,71,13,10,26,10,0,0,0,13,73,72,68,82,0,0,0,1,0,0,0,1,8,6,0,0,0,
+      31,21,196,137,0,0,0,10,73,68,65,84,120,156,98,0,0,0,6,0,5,130,217,36,0,0,
+      0,0,73,69,78,68,174,66,96,130,
+    ])
+    return new HttpResponse(TRANSPARENT_1X1_PNG, { headers: { 'Content-Type': 'image/png' } })
+  }),
+  http.get('https://avatars.githubusercontent.com/*', () => passthrough()),
 
   // ── Auth refresh (OAuth token exchange) ────────────────────────────
   // Mock the /auth/refresh endpoint used by AuthCallback and silent token refresh
@@ -356,6 +367,22 @@ export const handlers = [
         { name: 'redis-xyz789', namespace: 'cache', status: 'Running', cluster: 'kind-local' },
         { name: 'api-server-456', namespace: 'backend', status: 'Running', cluster: 'kind-local' },
       ],
+    })
+  }),
+
+  // Pod logs (tail container output) — see issue #6045
+  http.get('/api/mcp/pods/logs', async ({ request }) => {
+    await delay(100)
+    const url = new URL(request.url)
+    const pod = url.searchParams.get('pod') || 'unknown-pod'
+    return HttpResponse.json({
+      source: 'mock',
+      logs: [
+        `[mock] Tail logs for pod=${pod}`,
+        '2024-01-01T00:00:00Z INFO  starting container',
+        '2024-01-01T00:00:01Z INFO  listening on :8080',
+        '2024-01-01T00:00:02Z INFO  handling request GET /',
+      ].join('\n'),
     })
   }),
 
@@ -631,13 +658,48 @@ export const handlers = [
     return HttpResponse.json({ success: true })
   }),
 
+  // ── Prometheus query mock (vLLM metrics in demo mode) ────────────
+  // Return mock Prometheus-style responses for AI/ML dashboard metrics
+  http.get('/prometheus/query', ({ request }) => {
+    const url = new URL(request.url)
+    const query = url.searchParams.get('query') || ''
+    // Return a plausible scalar value based on the metric
+    let value = 0.5
+    if (query.includes('gpu_cache_usage')) value = 0.42
+    else if (query.includes('num_requests_running')) value = 3
+    else if (query.includes('num_requests_waiting')) value = 1
+    else if (query.includes('throughput')) value = 145.7
+    else if (query.includes('time_to_first_token')) value = 0.028
+    else if (query.includes('time_per_output_token')) value = 0.006
+    return HttpResponse.json({
+      status: 'success',
+      data: { resultType: 'vector', result: [{ metric: {}, value: [Date.now() / 1000, String(value)] }] },
+    })
+  }),
+
   // ── Passthrough for Netlify Functions that work in demo mode ─────
   // These endpoints are backed by Netlify Functions and return real data
   // even in demo mode — let them through to the actual backend.
   http.get('/api/youtube/playlist', () => passthrough()),
   http.get('/api/youtube/thumbnail/*', () => passthrough()),
+  http.get('/api/medium/blog', () => passthrough()),
   http.get('/api/missions/file', () => passthrough()),
   http.get('/api/missions/browse', () => passthrough()),
+  http.get('/api/rewards/github', () => passthrough()),
+
+  // ── Kubara Platform Catalog (demo) ──────────────────────────────
+  http.get('/api/github/repos/kubara-io/kubara/contents/*', () => {
+    return HttpResponse.json([
+      { name: 'prometheus-stack', path: 'helm/prometheus-stack', type: 'directory', description: 'Production Prometheus + Grafana + Alertmanager' },
+      { name: 'cert-manager', path: 'helm/cert-manager', type: 'directory', description: 'Automated TLS certificate management' },
+      { name: 'falco-runtime-security', path: 'helm/falco-runtime-security', type: 'directory', description: 'Runtime threat detection and response' },
+      { name: 'kyverno-policies', path: 'helm/kyverno-policies', type: 'directory', description: 'Kubernetes policy engine for security' },
+      { name: 'argocd-gitops', path: 'helm/argocd-gitops', type: 'directory', description: 'Declarative GitOps continuous delivery' },
+      { name: 'istio-service-mesh', path: 'helm/istio-service-mesh', type: 'directory', description: 'Service mesh for traffic management and security' },
+      { name: 'velero-backups', path: 'helm/velero-backups', type: 'directory', description: 'Cluster backup and disaster recovery' },
+      { name: 'external-secrets', path: 'helm/external-secrets', type: 'directory', description: 'Sync secrets from external providers' },
+    ])
+  }),
 
   // ── Catch-all for unmocked API routes ────────────────────────────
   // On Netlify, unhandled /api/* and /health requests fall through to the SPA

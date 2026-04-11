@@ -4,8 +4,25 @@ import { useSortable } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
 import { CardWrapper } from '../cards/CardWrapper'
 import { CARD_COMPONENTS, DEMO_DATA_CARDS, LIVE_DATA_CARDS } from '../cards/cardRegistry'
+import { useCardCollapse } from '../../lib/cards/cardHooks'
 import { formatCardTitle } from '../../lib/formatCardTitle'
 import type { Card } from './dashboardUtils'
+
+/**
+ * Number of grid rows a collapsed card occupies (#6072). Collapsed cards
+ * only show their header, so they shrink to a single row regardless of the
+ * card's stored `position.h`. The original `position.h` is preserved on the
+ * card model and reapplied when the card is expanded again.
+ */
+const COLLAPSED_CARD_ROW_SPAN = 1
+
+/**
+ * Minimum pixel height a non-collapsed sortable card cell should occupy.
+ * Mirrors the legacy `auto-rows-[minmax(180px,auto)]` baseline so expanded
+ * cards keep their previous look when the grid container itself uses
+ * `auto-rows-min` (which is required so collapsed cards can shrink).
+ */
+const EXPANDED_CARD_MIN_HEIGHT_PX = 180
 
 interface SortableCardProps {
   card: Card
@@ -23,6 +40,26 @@ interface SortableCardProps {
   onInsertAfter?: () => void
   /** When true, a workload item (not a card) is being dragged — disable sortable to prevent card from hijacking the drag */
   isWorkloadDragActive?: boolean
+}
+
+/**
+ * Shallow-equal comparison for card config objects.
+ * Replaces JSON.stringify which is O(n) allocation-heavy and unstable
+ * for semantically equivalent objects with different key order (#4665).
+ */
+function shallowEqualConfig(
+  a: Record<string, unknown> | undefined,
+  b: Record<string, unknown> | undefined,
+): boolean {
+  if (a === b) return true
+  if (!a || !b) return false
+  const keysA = Object.keys(a)
+  const keysB = Object.keys(b)
+  if (keysA.length !== keysB.length) return false
+  for (const key of keysA) {
+    if (a[key] !== b[key]) return false
+  }
+  return true
 }
 
 /** Below this width, clamp small cards to half-width (6 cols) for readability */
@@ -49,24 +86,47 @@ export const SortableCard = memo(function SortableCard({ card, onConfigure, onRe
   useEffect(() => {
     const mq = window.matchMedia(`(max-width: ${NARROW_BREAKPOINT - 1}px)`)
     const handler = (e: MediaQueryListEvent) => setIsNarrow(e.matches)
-    setIsNarrow(mq.matches)
+    if (mq.matches !== isNarrow) setIsNarrow(mq.matches)
     mq.addEventListener('change', handler)
     return () => mq.removeEventListener('change', handler)
-  }, [])
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   const posW = card.position?.w || 4
   const posH = card.position?.h || 2
   const effectiveW = isNarrow && posW < MIN_NARROW_COLS ? MIN_NARROW_COLS : posW
 
+  // Read the card's collapse state so the grid cell shrinks to a single row
+  // when the card is collapsed (#6072). The original `posH` stays untouched
+  // on the card model — expanding restores the full row span.
+  const { isCollapsed } = useCardCollapse(card.id)
+  const effectiveRowSpan = isCollapsed ? COLLAPSED_CARD_ROW_SPAN : posH
+
   const style = {
     transform: CSS.Transform.toString(transform),
     transition,
     gridColumn: `span ${effectiveW}`,
-    gridRow: `span ${posH}`,
+    gridRow: `span ${effectiveRowSpan}`,
+    // Only enforce the legacy minimum height when expanded; collapsed cards
+    // must be free to shrink to their header height so neighbouring rows can
+    // pack upward instead of leaving dead space.
+    minHeight: isCollapsed ? undefined : `${EXPANDED_CARD_MIN_HEIGHT_PX}px`,
     opacity: isDragging ? 0.5 : 1,
   }
 
   const CardComponent = CARD_COMPONENTS[card.card_type]
+
+  // Render a visible fallback for missing/misspelled card types (#4932)
+  if (!CardComponent) {
+    return (
+      <div
+        ref={(el) => { setNodeRef(el); registerRef?.(el) }}
+        style={style}
+        className="glass rounded-lg p-4 flex items-center justify-center text-muted-foreground text-sm border border-dashed border-warning/40"
+      >
+        Unknown card type: <code className="ml-1 font-mono text-warning">{card.card_type}</code>
+      </div>
+    )
+  }
 
   return (
     <div
@@ -133,7 +193,7 @@ export const SortableCard = memo(function SortableCard({ card, onConfigure, onRe
     (prevProps.card.position?.h || 2) === (nextProps.card.position?.h || 2) &&
     prevProps.card.title === nextProps.card.title &&
     prevProps.card.last_summary === nextProps.card.last_summary &&
-    JSON.stringify(prevProps.card.config) === JSON.stringify(nextProps.card.config) &&
+    shallowEqualConfig(prevProps.card.config, nextProps.card.config) &&
     prevProps.isDragging === nextProps.isDragging &&
     prevProps.isRefreshing === nextProps.isRefreshing &&
     prevProps.lastUpdated === nextProps.lastUpdated &&

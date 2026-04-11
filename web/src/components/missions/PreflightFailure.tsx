@@ -5,7 +5,7 @@
  * replacing the generic error message with targeted guidance.
  */
 
-import { useState, useCallback, useRef, useEffect } from 'react'
+import { useState, useRef, useEffect } from 'react'
 
 const COPY_FEEDBACK_MS = 2000
 import {
@@ -20,11 +20,11 @@ import {
   Check,
   RotateCcw,
   ExternalLink,
-  Info,
-} from 'lucide-react'
+  Info } from 'lucide-react'
 import type { PreflightError, PreflightErrorCode, RemediationAction } from '../../lib/missions/preflightCheck'
 import { getRemediationActions } from '../../lib/missions/preflightCheck'
 import { cn } from '../../lib/cn'
+import { copyToClipboard } from '../../lib/clipboard'
 
 // ============================================================================
 // Icon / color mapping per error code
@@ -35,39 +35,32 @@ const ERROR_DISPLAY: Record<PreflightErrorCode, { icon: typeof ShieldAlert; colo
     icon: KeyRound,
     color: 'text-amber-400',
     bgColor: 'bg-amber-500/10',
-    title: 'Missing Credentials',
-  },
+    title: 'Missing Credentials' },
   EXPIRED_CREDENTIALS: {
     icon: Clock,
     color: 'text-orange-400',
     bgColor: 'bg-orange-500/10',
-    title: 'Expired Credentials',
-  },
+    title: 'Expired Credentials' },
   RBAC_DENIED: {
     icon: ShieldX,
     color: 'text-red-400',
     bgColor: 'bg-red-500/10',
-    title: 'Permission Denied',
-  },
+    title: 'Permission Denied' },
   CONTEXT_NOT_FOUND: {
     icon: MapPin,
     color: 'text-purple-400',
     bgColor: 'bg-purple-500/10',
-    title: 'Context Not Found',
-  },
+    title: 'Context Not Found' },
   CLUSTER_UNREACHABLE: {
     icon: WifiOff,
     color: 'text-blue-400',
     bgColor: 'bg-blue-500/10',
-    title: 'Cluster Unreachable',
-  },
+    title: 'Cluster Unreachable' },
   UNKNOWN_EXECUTION_FAILURE: {
     icon: AlertTriangle,
     color: 'text-gray-400',
     bgColor: 'bg-gray-500/10',
-    title: 'Preflight Check Failed',
-  },
-}
+    title: 'Preflight Check Failed' } }
 
 // ============================================================================
 // Action button renderer
@@ -75,8 +68,7 @@ const ERROR_DISPLAY: Record<PreflightErrorCode, { icon: typeof ShieldAlert; colo
 
 function ActionButton({
   action,
-  onRetry,
-}: {
+  onRetry }: {
   action: RemediationAction
   onRetry?: () => void
 }) {
@@ -90,11 +82,21 @@ function ActionButton({
     }
   }, [])
 
-  const handleCopy = useCallback(() => {
+  const handleCopy = async () => {
     if (action.codeSnippet) {
-      navigator.clipboard.writeText(action.codeSnippet).catch(() => {
-        // Fallback: select text in a temporary textarea
-      })
+      // #6229: route through the shared lib/clipboard helper which guards
+      // typeof navigator?.clipboard?.writeText === 'function' and falls back
+      // to a hidden textarea + execCommand on browsers without the API.
+      // The previous direct call had an empty .catch() so failures were
+      // completely silent.
+      const ok = await copyToClipboard(action.codeSnippet)
+      if (!ok) {
+        // Surface the failure as a transient label flip — the existing
+        // setCopied(true) toast becomes a no-op and the user sees nothing
+        // change, which is at least less confusing than the old silent
+        // failure path.
+        return
+      }
       setCopied(true)
       if (copyTimeoutRef.current) clearTimeout(copyTimeoutRef.current)
       copyTimeoutRef.current = setTimeout(() => {
@@ -102,14 +104,13 @@ function ActionButton({
         copyTimeoutRef.current = null
       }, COPY_FEEDBACK_MS)
     }
-  }, [action.codeSnippet])
+  }
 
   const iconMap = {
     copy: copied ? Check : Copy,
     retry: RotateCcw,
     link: ExternalLink,
-    info: Info,
-  }
+    info: Info }
   const Icon = iconMap[action.actionType]
 
   if (action.actionType === 'info') {

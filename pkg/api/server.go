@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime/debug"
 	"sort"
@@ -145,6 +146,7 @@ type Server struct {
 	loadingSrv          *http.Server // temporary loading screen server
 	shuttingDown        int32        // atomic flag: 1 during graceful shutdown
 	gpuUtilWorker       *GPUUtilizationWorker
+	done                chan struct{} // closed on Shutdown to stop background goroutines
 }
 
 // NewServer creates a new API server. It starts a temporary loading page
@@ -221,10 +223,10 @@ func NewServer(cfg Config) (*Server, error) {
 	// Initialize Kubernetes multi-cluster client
 	k8sClient, err := k8s.NewMultiClusterClient(cfg.Kubeconfig)
 	if err != nil {
-		slog.Info("No kubeconfig found — connect clusters via Settings or place a kubeconfig at ~/.kube/config")
+		slog.Warn("Kubernetes client initialization failed — connect clusters via Settings or place a kubeconfig at ~/.kube/config", "error", err)
 	} else {
 		if err := k8sClient.LoadConfig(); err != nil {
-			slog.Info("No kubeconfig found — connect clusters via Settings or place a kubeconfig at ~/.kube/config")
+			slog.Warn("Failed to load kubeconfig — connect clusters via Settings or place a kubeconfig at ~/.kube/config", "error", err)
 		} else {
 			slog.Info("Kubernetes client initialized successfully")
 			// Warmup: probe all clusters to populate health cache before serving.
@@ -238,8 +240,7 @@ func NewServer(cfg Config) (*Server, error) {
 				slog.Info("Broadcasted kubeconfig change to all clients")
 			})
 			if err := k8sClient.StartWatching(); err != nil {
-				// Watcher fails when kubeconfig doesn't exist — already logged above
-				_ = err
+				slog.Warn("Kubeconfig file watcher failed to start", "error", err)
 			}
 		}
 	}
@@ -298,6 +299,7 @@ func NewServer(cfg Config) (*Server, error) {
 		notificationService: notificationService,
 		persistenceStore:    persistenceStore,
 		loadingSrv:          loadingSrv,
+		done:                make(chan struct{}),
 	}
 
 	server.setupMiddleware()
@@ -417,6 +419,18 @@ setInterval(async function(){try{var r=await fetch('/healthz');if(r.ok){var d=aw
 </body>
 </html>`
 
+// oauthConfigured reports whether the server has a usable GitHub OAuth
+// configuration. Both the client ID AND the client secret must be present
+// — a partial config (one without the other) is unusable because the
+// token-exchange step cannot authenticate to GitHub without the secret,
+// and the health probe must not report such an install as OAuth-ready
+// (#6056). Prior to the fix this returned true as soon as the client ID
+// was set, which caused downstream UIs to show a "GitHub login" button
+// that was guaranteed to fail on click.
+func (s *Server) oauthConfigured() bool {
+	return s.config.GitHubClientID != "" && s.config.GitHubSecret != ""
+}
+
 func (s *Server) setupRoutes() {
 	// Minimal probe endpoint for load balancers and k8s liveness checks.
 	// Returns only status — no configuration metadata.
@@ -434,10 +448,32 @@ func (s *Server) setupRoutes() {
 			return c.JSON(fiber.Map{"status": "shutting_down", "version": Version})
 		}
 		inCluster := s.k8sClient != nil && s.k8sClient.IsInCluster()
+
+		// Determine cluster reachability status. If we have a k8s client,
+		// check cached health data — if no clusters are reachable, report
+		// "degraded" instead of "ok" so monitoring can detect the problem.
+		healthStatus := "ok"
+		if s.k8sClient != nil {
+			cachedHealth := s.k8sClient.GetCachedHealth()
+			if len(cachedHealth) > 0 {
+				anyReachable := false
+				for _, h := range cachedHealth {
+					if h != nil && h.Reachable {
+						anyReachable = true
+						break
+					}
+				}
+				if !anyReachable {
+					healthStatus = "degraded"
+				}
+			}
+			// If no cached health data yet, keep "ok" — health poller hasn't run yet
+		}
+
 		resp := fiber.Map{
-			"status":           "ok",
+			"status":           healthStatus,
 			"version":          Version,
-			"oauth_configured": s.config.GitHubClientID != "",
+			"oauth_configured": s.oauthConfigured(),
 			"in_cluster":       inCluster,
 			"install_method":   detectInstallMethod(inCluster),
 			"project":          s.config.ConsoleProject,
@@ -480,14 +516,29 @@ func (s *Server) setupRoutes() {
 		return c.JSON(resp)
 	})
 
-	// Version endpoint — lightweight, returns only build metadata
+	// Version endpoint — lightweight, returns only build metadata.
+	// In dev mode (go run), VCS info from debug.ReadBuildInfo() may be empty,
+	// so we fall back to git commands for commit and time.
 	s.app.Get("/api/version", func(c *fiber.Ctx) error {
+		gitCommit := buildInfo.VCSRevision
+		gitTime := buildInfo.VCSTime
+		gitDirty := buildInfo.VCSModified == "true"
+
+		// Fallback: if VCS revision is empty (e.g. go run without VCS info),
+		// try to read from git directly
+		if gitCommit == "" {
+			gitCommit = gitFallbackRevision()
+		}
+		if gitTime == "" {
+			gitTime = gitFallbackTime()
+		}
+
 		return c.JSON(fiber.Map{
 			"version":    Version,
 			"go_version": buildInfo.GoVersion,
-			"git_commit": buildInfo.VCSRevision,
-			"git_time":   buildInfo.VCSTime,
-			"git_dirty":  buildInfo.VCSModified == "true",
+			"git_commit": gitCommit,
+			"git_time":   gitTime,
+			"git_dirty":  gitDirty,
 		})
 	})
 
@@ -519,6 +570,8 @@ func (s *Server) setupRoutes() {
 			return c.Status(429).JSON(fiber.Map{"error": "too many requests, try again later"})
 		},
 	})
+	// Wire WebSocket hub into auth handler so logout disconnects WS sessions (#4906)
+	auth.SetHub(s.hub)
 	s.app.Get("/auth/github", authLimiter, auth.GitHubLogin)
 	s.app.Get("/auth/github/callback", authLimiter, auth.GitHubCallback)
 	s.app.Post("/auth/refresh", authLimiter, auth.RefreshToken)
@@ -547,6 +600,8 @@ func (s *Server) setupRoutes() {
 	})
 
 	// Active users heartbeat endpoint (for demo mode session counting)
+	// This is unauthenticated telemetry — session IDs are validated for length
+	// and the total number of unique sessions is capped to prevent inflation.
 	s.app.Post("/api/active-users", func(c *fiber.Ctx) error {
 		var body struct {
 			SessionID string `json:"sessionId"`
@@ -554,7 +609,9 @@ func (s *Server) setupRoutes() {
 		if err := c.BodyParser(&body); err != nil || body.SessionID == "" {
 			return c.Status(400).JSON(fiber.Map{"error": "sessionId required"})
 		}
-		s.hub.RecordDemoSession(body.SessionID)
+		if !s.hub.RecordDemoSession(body.SessionID) {
+			return c.Status(429).JSON(fiber.Map{"error": "session limit reached"})
+		}
 		demoCount := s.hub.GetDemoSessionCount()
 		return c.JSON(fiber.Map{
 			"activeUsers":      demoCount,
@@ -588,6 +645,9 @@ func (s *Server) setupRoutes() {
 	// YouTube playlist (public — proxies to YouTube RSS feed, cached 1h)
 	s.app.Get("/api/youtube/playlist", handlers.YouTubePlaylistHandler)
 	s.app.Get("/api/youtube/thumbnail/:id", handlers.YouTubeThumbnailProxy)
+
+	// Medium blog (public — proxies to Medium RSS feed, cached 1h)
+	s.app.Get("/api/medium/blog", handlers.MediumBlogHandler)
 
 	// Mission knowledge base browse/file (public — proxies to public GitHub repo)
 	missions := handlers.NewMissionsHandler()
@@ -714,6 +774,15 @@ func (s *Server) setupRoutes() {
 	// Mission knowledge base routes (validate, share — protected)
 	missions.RegisterRoutes(api.Group("/missions"))
 
+	// Orbit (recurring maintenance) routes — protected
+	orbitDataDir := filepath.Dir(s.config.DatabasePath)
+	if orbitDataDir == "" || orbitDataDir == "." {
+		orbitDataDir = "./data"
+	}
+	orbit := handlers.NewOrbitHandler(orbitDataDir)
+	orbit.RegisterRoutes(api.Group("/orbit"))
+	orbit.StartScheduler(s.done)
+
 	// MCP routes (cluster operations via kubestellar tools and direct k8s)
 	// SECURITY: All MCP routes require authentication in both dev and production modes
 	api.Get("/mcp/status", mcpHandlers.GetStatus)
@@ -795,7 +864,7 @@ func (s *Server) setupRoutes() {
 
 	// GitOps routes (drift detection and sync)
 	// SECURITY: All GitOps routes require authentication in both dev and production modes
-	gitopsHandlers := handlers.NewGitOpsHandlers(s.bridge, s.k8sClient)
+	gitopsHandlers := handlers.NewGitOpsHandlers(s.bridge, s.k8sClient, s.store)
 	api.Get("/gitops/drifts", gitopsHandlers.ListDrifts)
 	api.Get("/gitops/helm-releases", gitopsHandlers.ListHelmReleases)
 	api.Get("/gitops/helm-history", gitopsHandlers.ListHelmHistory)
@@ -813,7 +882,7 @@ func (s *Server) setupRoutes() {
 	api.Post("/gitops/helm-uninstall", gitopsHandlers.UninstallHelmRelease)
 	api.Post("/gitops/helm-upgrade", gitopsHandlers.UpgradeHelmRelease)
 	// Helm self-upgrade (in-cluster Deployment patch)
-	selfUpgradeHandler := handlers.NewSelfUpgradeHandler(s.k8sClient, s.hub)
+	selfUpgradeHandler := handlers.NewSelfUpgradeHandler(s.k8sClient, s.hub, s.store)
 	api.Get("/self-upgrade/status", selfUpgradeHandler.GetStatus)
 	api.Post("/self-upgrade/trigger", selfUpgradeHandler.TriggerUpgrade)
 	// ArgoCD routes (Application CRD discovery and sync)
@@ -912,13 +981,46 @@ func (s *Server) setupRoutes() {
 	})
 	api.Get("/rewards/github", rewardsHandler.GetGitHubRewards)
 
+	// Persistent per-user reward balances (issue #6011). Every authenticated
+	// user can read and mutate their own row — no RBAC gate needed because
+	// the handler scopes every query by the JWT-derived user id.
+	rewardsPersistence := handlers.NewRewardsPersistenceHandler(s.store)
+	api.Get("/rewards/me", rewardsPersistence.GetUserRewards)
+	api.Put("/rewards/me", rewardsPersistence.UpdateUserRewards)
+	api.Post("/rewards/coins", rewardsPersistence.IncrementCoins)
+	api.Post("/rewards/daily-bonus", rewardsPersistence.ClaimDailyBonus)
+
+	// Persistent per-user token-usage state (folded into #6011 PR — same
+	// motivation: clearing the browser cache should not wipe the running
+	// totals shown in the token-budget widget). Every user reads and writes
+	// only their own row; the handler resolves the user via JWT.
+	tokenUsage := handlers.NewTokenUsageHandler(s.store)
+	api.Get("/token-usage/me", tokenUsage.GetUserTokenUsage)
+	api.Post("/token-usage/me", tokenUsage.UpdateUserTokenUsage)
+	api.Post("/token-usage/delta", tokenUsage.AddTokenDelta)
+
 	// Nightly E2E status (GitHub Actions proxy with server-side token + cache)
 	nightlyE2E := handlers.NewNightlyE2EHandler(s.config.GitHubToken)
 	api.Get("/nightly-e2e/runs", nightlyE2E.GetRuns)
 	api.Get("/nightly-e2e/run-logs", nightlyE2E.GetRunLogs)
 
-	// GPU reservation routes
-	gpuHandler := handlers.NewGPUHandler(s.store)
+	// GPU reservation routes — capacity provider uses live k8s node data
+	// so the server never trusts client-supplied GPU limits (#5421).
+	gpuCapacity := handlers.ClusterCapacityProvider(func(ctx context.Context, cluster string) int {
+		if s.k8sClient == nil {
+			return 0
+		}
+		nodes, err := s.k8sClient.GetNodes(ctx, cluster)
+		if err != nil {
+			return 0
+		}
+		total := 0
+		for _, n := range nodes {
+			total += n.GPUCount
+		}
+		return total
+	})
+	gpuHandler := handlers.NewGPUHandler(s.store, gpuCapacity)
 	api.Post("/gpu/reservations", gpuHandler.CreateReservation)
 	api.Get("/gpu/reservations", gpuHandler.ListReservations)
 	api.Get("/gpu/reservations/:id", gpuHandler.GetReservation)
@@ -957,7 +1059,7 @@ func (s *Server) setupRoutes() {
 	api.Post("/kagenti-provider/tools/call", kagentiProviderHandler.CallTool)
 
 	// Console persistence routes (CRD-based state management)
-	persistenceHandler := handlers.NewConsolePersistenceHandlers(s.persistenceStore, s.k8sClient, s.hub)
+	persistenceHandler := handlers.NewConsolePersistenceHandlers(s.persistenceStore, s.k8sClient, s.hub, s.store)
 	api.Get("/persistence/config", persistenceHandler.GetConfig)
 	api.Put("/persistence/config", persistenceHandler.UpdateConfig)
 	api.Get("/persistence/status", persistenceHandler.GetStatus)
@@ -1032,6 +1134,13 @@ func preCompressedStatic(root string) fiber.Handler {
 			p = "/index.html"
 		}
 		filePath := filepath.Join(root, p)
+
+		// Security: prevent path traversal — ensure resolved path stays within root
+		absRoot, _ := filepath.Abs(root)
+		absFile, _ := filepath.Abs(filePath)
+		if !strings.HasPrefix(absFile, absRoot+string(filepath.Separator)) && absFile != absRoot {
+			return c.Next()
+		}
 
 		// Only serve actual static files
 		info, err := os.Stat(filePath)
@@ -1175,6 +1284,9 @@ func waitForPortRelease(port int, timeout time.Duration) error {
 func (s *Server) Shutdown() error {
 	atomic.StoreInt32(&s.shuttingDown, 1)
 
+	// Signal background goroutines (orbit scheduler, etc.) to stop.
+	close(s.done)
+
 	// If Shutdown is called before Start, the temporary loading server
 	// is still running and holding the port. Shut it down first.
 	if s.loadingSrv != nil {
@@ -1220,7 +1332,11 @@ func customErrorHandler(c *fiber.Ctx, err error) error {
 func LoadConfigFromEnv() Config {
 	port := 8080
 	if p := os.Getenv("PORT"); p != "" {
-		fmt.Sscanf(p, "%d", &port)
+		if v, err := strconv.Atoi(p); err != nil {
+			slog.Warn("[Server] invalid PORT, using default", "value", p, "default", port, "error", err)
+		} else {
+			port = v
+		}
 	}
 
 	var backendPort int
@@ -1347,6 +1463,27 @@ func generateDevSecret() string {
 		return fmt.Sprintf("dev-fallback-%d", b)
 	}
 	return hex.EncodeToString(b)
+}
+
+// gitFallbackRevision returns the current git HEAD SHA by shelling out to git.
+// Used as a fallback when debug.ReadBuildInfo() doesn't include VCS metadata
+// (e.g. when running with `go run` outside a module-aware build).
+func gitFallbackRevision() string {
+	out, err := exec.Command("git", "rev-parse", "HEAD").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// gitFallbackTime returns the commit time of HEAD by shelling out to git.
+// Used as a fallback when debug.ReadBuildInfo() doesn't include VCS metadata.
+func gitFallbackTime() string {
+	out, err := exec.Command("git", "log", "-1", "--format=%cI").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }
 
 // detectInstallMethod returns how the console was installed: dev, binary, or helm.

@@ -1,10 +1,14 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { Box, Server, Crown, RotateCcw, Trophy, Play, Loader2 } from 'lucide-react'
 import { CardComponentProps } from './cardRegistry'
 import { useCardExpanded } from './CardWrapper'
 import { useReportCardDataState } from './CardDataContext'
 import { useTranslation } from 'react-i18next'
 import { emitGameStarted, emitGameEnded } from '../../lib/analytics'
+import { safeGet, safeGetJSON, safeSetJSON, safeRemove } from '../../lib/safeLocalStorage'
+
+/** localStorage key for Checkers win/loss score tracking */
+const SCORE_STORAGE_KEY = 'checkers-score'
 
 // Board is 8x8, pieces only on dark squares
 const BOARD_SIZE = 8
@@ -36,8 +40,7 @@ type Difficulty = 'easy' | 'medium' | 'hard'
 const DIFFICULTY_DEPTH: Record<Difficulty, number> = {
   easy: 1,
   medium: 2,
-  hard: 3,
-}
+  hard: 3 }
 
 // Pirate jokes for the AI to say while waiting
 const PIRATE_TAUNTS = [
@@ -141,8 +144,7 @@ function getValidMoves(board: Board, pos: Position, mustJump: boolean = false): 
             from: pos,
             to: { row: jumpRow, col: jumpCol },
             captures: [{ row: midRow, col: midCol }],
-            isJump: true,
-          })
+            isJump: true })
         }
       }
     }
@@ -165,8 +167,7 @@ function getValidMoves(board: Board, pos: Position, mustJump: boolean = false): 
             from: pos,
             to: { row: newRow, col: newCol },
             captures: [],
-            isJump: false,
-          })
+            isJump: false })
         }
       }
     }
@@ -361,8 +362,7 @@ function minimax(
 function PieceComponent({
   piece,
   isSelected,
-  isSmall,
-}: {
+  isSmall }: {
   piece: Piece
   isSelected: boolean
   isSmall: boolean
@@ -402,20 +402,17 @@ interface SavedGameState {
 }
 
 function loadGameState(): SavedGameState | null {
+  const stored = safeGet(STORAGE_KEY)
+  if (!stored) return null
   try {
-    const stored = localStorage.getItem(STORAGE_KEY)
-    return stored ? JSON.parse(stored) : null
+    return JSON.parse(stored) as SavedGameState
   } catch {
     return null
   }
 }
 
 function saveGameState(state: SavedGameState) {
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state))
-  } catch {
-    // Ignore storage errors
-  }
+  safeSetJSON(STORAGE_KEY, state)
 }
 
 export function Checkers(_props: CardComponentProps) {
@@ -440,14 +437,9 @@ export function Checkers(_props: CardComponentProps) {
   const [pirateTaunt, setPirateTaunt] = useState('')
   const [combatCell, setCombatCell] = useState<Position | null>(null)
   const [showCombat, setShowCombat] = useState(false)
-  const [highScore, setHighScore] = useState<{ wins: number; losses: number }>(() => {
-    try {
-      const stored = localStorage.getItem('checkers-score')
-      return stored ? JSON.parse(stored) : { wins: 0, losses: 0 }
-    } catch {
-      return { wins: 0, losses: 0 }
-    }
-  })
+  const [highScore, setHighScore] = useState<{ wins: number; losses: number }>(() =>
+    safeGetJSON<{ wins: number; losses: number }>(SCORE_STORAGE_KEY, { wins: 0, losses: 0 }),
+  )
 
   // Check for game over
   useEffect(() => {
@@ -462,7 +454,7 @@ export function Checkers(_props: CardComponentProps) {
       emitGameEnded('checkers', 'loss', moveCount)
       setHighScore(prev => {
         const newScore = { ...prev, losses: prev.losses + 1 }
-        localStorage.setItem('checkers-score', JSON.stringify(newScore))
+        safeSetJSON(SCORE_STORAGE_KEY, newScore)
         return newScore
       })
     } else if (counts.nodes === 0 || nodeMoves.length === 0) {
@@ -470,7 +462,7 @@ export function Checkers(_props: CardComponentProps) {
       emitGameEnded('checkers', 'win', moveCount)
       setHighScore(prev => {
         const newScore = { ...prev, wins: prev.wins + 1 }
-        localStorage.setItem('checkers-score', JSON.stringify(newScore))
+        safeSetJSON(SCORE_STORAGE_KEY, newScore)
         return newScore
       })
     }
@@ -480,15 +472,14 @@ export function Checkers(_props: CardComponentProps) {
   useEffect(() => {
     if (gameOver) {
       // Clear saved game on game over
-      localStorage.removeItem(STORAGE_KEY)
+      safeRemove(STORAGE_KEY)
     } else {
       saveGameState({
         board,
         currentPlayer,
         difficulty,
         moveCount,
-        gameOver,
-      })
+        gameOver })
     }
   }, [board, currentPlayer, difficulty, moveCount, gameOver])
 
@@ -598,7 +589,7 @@ export function Checkers(_props: CardComponentProps) {
   }, [currentPlayer, gameOver]) // Only trigger on player change or game over
 
   // Handle cell click
-  const handleCellClick = useCallback((row: number, col: number) => {
+  const handleCellClick = (row: number, col: number) => {
     if (currentPlayer !== 'pods' || gameOver || isThinking) return
 
     const piece = board[row][col]
@@ -680,10 +671,10 @@ export function Checkers(_props: CardComponentProps) {
         setValidMoves([])
       }
     }
-  }, [board, currentPlayer, selectedPos, validMoves, gameOver, isThinking, mustContinueJump])
+  }
 
   // New game
-  const newGame = useCallback(() => {
+  const newGame = () => {
     setBoard(createInitialBoard())
     setCurrentPlayer('pods')
     setSelectedPos(null)
@@ -693,7 +684,7 @@ export function Checkers(_props: CardComponentProps) {
     setMoveCount(0)
     setIsThinking(false)
     emitGameStarted('checkers')
-  }, [])
+  }
 
   const isSmall = !isExpanded
   const cellSize = isSmall ? 'w-7 h-7' : 'w-12 h-12'
@@ -759,7 +750,7 @@ export function Checkers(_props: CardComponentProps) {
       </div>
 
       {/* Board */}
-      <div className="flex-1 flex items-center justify-center relative min-h-0">
+      <div className="flex-1 flex items-center justify-center min-h-0">
         <div className="inline-block border border-border rounded overflow-hidden">
           {board.map((row, rowIdx) => (
             <div key={rowIdx} className="flex">
@@ -806,21 +797,21 @@ export function Checkers(_props: CardComponentProps) {
             </div>
           ))}
         </div>
+      </div>
 
-        {/* Pirate Taunt — absolute overlay, no layout shift */}
-        {pirateTaunt && (
-          <div className="absolute bottom-0 left-0 right-0 z-10 p-1 animate-fade-in pointer-events-none">
-            <div className="flex items-start gap-2 px-2">
-              <div className="text-lg flex-shrink-0">🏴‍☠️</div>
-              <div className="bg-background/80 backdrop-blur-sm border border-orange-400/50 rounded-lg px-2 py-1.5 flex-1">
-                <span className="text-orange-300 italic text-xs font-medium leading-tight block">
-                  &quot;{pirateTaunt}&quot;
-                </span>
-              </div>
+      {/* Pirate Taunt — below board, no overlap */}
+      {pirateTaunt && (
+        <div className="flex-shrink-0 p-1 animate-fade-in">
+          <div className="flex items-start gap-2 px-2">
+            <div className="text-lg flex-shrink-0">🏴‍☠️</div>
+            <div className="bg-background/80 backdrop-blur-sm border border-orange-400/50 rounded-lg px-2 py-1.5 flex-1">
+              <span className="text-orange-300 italic text-xs font-medium leading-tight block">
+                &quot;{pirateTaunt}&quot;
+              </span>
             </div>
           </div>
-        )}
-      </div>
+        </div>
+      )}
 
       {/* Game over overlay */}
       {gameOver && (

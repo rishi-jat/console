@@ -20,6 +20,14 @@ const (
 	// Connections that exceed this without sending a ping are closed to prevent DoS via
 	// exhausted file descriptors.
 	wsIdleTimeout = 90 * time.Second
+	// wsMaxBroadcastBytes is the maximum serialized size of a single broadcast message.
+	// Messages exceeding this limit are dropped to prevent memory spikes.
+	wsMaxBroadcastBytes = 1 * 1024 * 1024 // 1 MB
+	// maxDemoSessions caps unique demo session IDs to prevent inflation attacks.
+	// This is unauthenticated telemetry — the cap is a reasonable upper bound.
+	maxDemoSessions = 500
+	// maxSessionIDLen is the maximum allowed length for a demo session ID.
+	maxSessionIDLen = 128
 )
 
 // Message represents a WebSocket message
@@ -148,6 +156,11 @@ func (h *Hub) Broadcast(userID uuid.UUID, msg Message) {
 		return
 	}
 
+	if len(data) > wsMaxBroadcastBytes {
+		slog.Warn("[WebSocket] dropping oversized broadcast message", "user", userID, "type", msg.Type, "bytes", len(data), "limit", wsMaxBroadcastBytes)
+		return
+	}
+
 	select {
 	case h.broadcast <- broadcastMessage{userID: userID, data: data}:
 		// Message queued successfully
@@ -174,11 +187,46 @@ func (h *Hub) GetTotalConnectionsCount() int {
 	return len(h.clients)
 }
 
-// RecordDemoSession records a heartbeat from a demo mode session
-func (h *Hub) RecordDemoSession(sessionID string) {
+// DisconnectUser closes all WebSocket connections belonging to the given user.
+// Called by the logout handler to enforce session invalidation (#4906).
+func (h *Hub) DisconnectUser(userID uuid.UUID) {
+	h.mu.RLock()
+	clients := make([]*Client, len(h.userIndex[userID]))
+	copy(clients, h.userIndex[userID])
+	h.mu.RUnlock()
+
+	for _, client := range clients {
+		// Send a close message so the client knows the session was terminated.
+		_ = client.conn.WriteMessage(websocket.CloseMessage,
+			websocket.FormatCloseMessage(websocket.CloseNormalClosure, "session invalidated"))
+		client.conn.Close()
+	}
+	slog.Info("[WebSocket] disconnected all connections for user", "user", userID, "count", len(clients))
+}
+
+// RecordDemoSession records a heartbeat from a demo mode session.
+// The endpoint is unauthenticated (demo mode only) so we cap the number of
+// unique sessions and reject oversized IDs to limit abuse potential.
+func (h *Hub) RecordDemoSession(sessionID string) bool {
+	if len(sessionID) > maxSessionIDLen {
+		return false
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
+
+	// Allow updates to existing sessions unconditionally
+	if _, exists := h.demoSessions[sessionID]; exists {
+		h.demoSessions[sessionID] = time.Now()
+		return true
+	}
+
+	// Reject new sessions if at capacity
+	if len(h.demoSessions) >= maxDemoSessions {
+		return false
+	}
+
 	h.demoSessions[sessionID] = time.Now()
+	return true
 }
 
 // GetDemoSessionCount returns the number of active demo sessions (seen in last 60 seconds)
@@ -216,6 +264,11 @@ func (h *Hub) BroadcastAll(msg Message) {
 		return
 	}
 
+	if len(data) > wsMaxBroadcastBytes {
+		slog.Warn("[WebSocket] dropping oversized broadcast-all message", "type", msg.Type, "bytes", len(data), "limit", wsMaxBroadcastBytes)
+		return
+	}
+
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 
@@ -247,14 +300,18 @@ func (h *Hub) HandleConnection(conn *websocket.Conn) {
 
 	if err := conn.ReadJSON(&authMsg); err != nil {
 		slog.Error("[WebSocket] SECURITY: failed to read auth message", "error", err)
-		conn.WriteJSON(Message{Type: "error", Data: map[string]string{"message": "authentication required"}})
+		if wErr := conn.WriteJSON(Message{Type: "error", Data: map[string]string{"message": "authentication required"}}); wErr != nil {
+			slog.Error("[WebSocket] failed to send auth error", "error", wErr)
+		}
 		conn.Close()
 		return
 	}
 
 	if authMsg.Type != "auth" || authMsg.Token == "" {
 		slog.Warn("SECURITY: Invalid or missing auth message")
-		conn.WriteJSON(Message{Type: "error", Data: map[string]string{"message": "authentication required"}})
+		if wErr := conn.WriteJSON(Message{Type: "error", Data: map[string]string{"message": "authentication required"}}); wErr != nil {
+			slog.Error("[WebSocket] failed to send auth error", "error", wErr)
+		}
 		conn.Close()
 		return
 	}
@@ -268,14 +325,18 @@ func (h *Hub) HandleConnection(conn *websocket.Conn) {
 		slog.Info("Demo-mode WebSocket connection for presence tracking (dev mode)")
 	} else if authMsg.Token == "demo-token" && !h.devMode {
 		slog.Warn("SECURITY: Rejected demo-token WebSocket connection (dev mode not enabled)")
-		conn.WriteJSON(Message{Type: "error", Data: map[string]string{"message": "demo-token not allowed in production"}})
+		if wErr := conn.WriteJSON(Message{Type: "error", Data: map[string]string{"message": "demo-token not allowed in production"}}); wErr != nil {
+			slog.Error("[WebSocket] failed to send rejection error", "error", wErr)
+		}
 		conn.Close()
 		return
 	} else if h.jwtSecret != "" {
 		claims, err := middleware.ValidateJWT(authMsg.Token, h.jwtSecret)
 		if err != nil {
 			slog.Warn("[WebSocket] SECURITY: rejected invalid token", "error", err)
-			conn.WriteJSON(Message{Type: "error", Data: map[string]string{"message": "invalid token"}})
+			if wErr := conn.WriteJSON(Message{Type: "error", Data: map[string]string{"message": "invalid token"}}); wErr != nil {
+				slog.Error("[WebSocket] failed to send token error", "error", wErr)
+			}
 			conn.Close()
 			return
 		}
@@ -291,13 +352,19 @@ func (h *Hub) HandleConnection(conn *websocket.Conn) {
 
 	if !authenticated {
 		slog.Error("SECURITY: WebSocket authentication failed")
-		conn.WriteJSON(Message{Type: "error", Data: map[string]string{"message": "authentication failed"}})
+		if wErr := conn.WriteJSON(Message{Type: "error", Data: map[string]string{"message": "authentication failed"}}); wErr != nil {
+			slog.Error("[WebSocket] failed to send auth failure", "error", wErr)
+		}
 		conn.Close()
 		return
 	}
 
 	// Send authentication success message
-	conn.WriteJSON(Message{Type: "authenticated", Data: map[string]string{"status": "connected"}})
+	if err := conn.WriteJSON(Message{Type: "authenticated", Data: map[string]string{"status": "connected"}}); err != nil {
+		slog.Error("[WebSocket] failed to send auth success", "error", err)
+		conn.Close()
+		return
+	}
 
 	// Set idle read deadline — reset on every received message or pong.
 	// This prevents idle connections from holding OS file descriptors forever

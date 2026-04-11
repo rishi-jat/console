@@ -45,8 +45,7 @@ Please help me diagnose and fix the issue:
 5. If c2p is installed, verify the policy engine bridge is configured
 6. If pods are crashing, check resource limits
 
-Please diagnose step by step and fix any issues found.`,
-}
+Please diagnose step by step and fix any issues found.` }
 
 export function TrestleScan({ config: _config }: CardConfig) {
   const { t } = useTranslation(['common', 'cards'])
@@ -60,7 +59,7 @@ export function TrestleScan({ config: _config }: CardConfig) {
   const allChecked = clustersChecked >= totalClusters && totalClusters > 0
 
   // Filter by selected clusters
-  const filtered = useMemo(() => {
+  const filtered = (() => {
     if (selectedClusters.length === 0) return aggregated
     const agg = { totalControls: 0, passedControls: 0, failedControls: 0, otherControls: 0, overallScore: 0 }
     for (const [name, s] of Object.entries(statuses)) {
@@ -74,17 +73,17 @@ export function TrestleScan({ config: _config }: CardConfig) {
       ? Math.round((agg.passedControls / agg.totalControls) * 100)
       : 0
     return agg
-  }, [statuses, aggregated, selectedClusters])
+  })()
 
   const hasData = installed || isDemoData
   useCardLoadingState({ isLoading: isLoading && !hasData, isRefreshing, hasAnyData: hasData, isDemoData })
 
   // Detect degraded state: installed but no assessments
-  const isDegraded = useMemo(() => {
+  const isDegraded = (() => {
     if (!installed || isLoading) return false
     const installedClusters = Object.values(statuses).filter(s => s.installed)
     return installedClusters.length > 0 && installedClusters.every(s => s.totalControls === 0)
-  }, [installed, isLoading, statuses])
+  })()
 
   const handleInstall = () => {
     startMission({
@@ -112,8 +111,7 @@ Please help me:
    kubectl get assessmentresults -A
 
 Please proceed step by step. Start with verifying prerequisites (Python 3.9+, kubectl access).`,
-      context: {},
-    })
+      context: {} })
   }
 
   const handleTroubleshoot = () => {
@@ -122,8 +120,7 @@ Please proceed step by step. Start with verifying prerequisites (Python 3.9+, ku
       description: TROUBLESHOOT_MISSION.description,
       type: 'troubleshoot',
       initialPrompt: TROUBLESHOOT_MISSION.prompt,
-      context: {},
-    })
+      context: {} })
   }
 
   // Get all profiles from all clusters
@@ -261,7 +258,7 @@ Please proceed step by step. Start with verifying prerequisites (Python 3.9+, ku
               title={t('cards:trestleScan.viewPassingControls')}
             >
               <CheckCircle className="w-3 h-3 text-green-400" />
-              <span>{filtered.passedControls} {t('cards:trestleScan.passed')}</span>
+              <span>{filtered.passedControls} {t('cards:trestleScan.controlsPassed', 'controls passed')}</span>
             </button>
             <button
               onClick={() => drillToCompliance('fail', {})}
@@ -269,7 +266,7 @@ Please proceed step by step. Start with verifying prerequisites (Python 3.9+, ku
               title={t('cards:trestleScan.viewFailingControls')}
             >
               <XCircle className="w-3 h-3 text-red-400" />
-              <span>{filtered.failedControls} {t('cards:trestleScan.failed')}</span>
+              <span>{filtered.failedControls} {t('cards:trestleScan.controlsFailed', 'controls failed')}</span>
             </button>
             {filtered.otherControls > 0 && (
               <button
@@ -315,11 +312,11 @@ Please proceed step by step. Start with verifying prerequisites (Python 3.9+, ku
           return (
             <div
               key={profile.name}
-              className="w-full text-left p-2.5 rounded-lg border border-border/50 hover:border-border transition-colors bg-secondary/20"
+              className="w-full text-left p-2.5 rounded-lg border border-border/50 hover:border-border transition-colors bg-secondary/20 cursor-pointer"
+              onClick={() => setExpandedProfile(isExpanded ? null : profile.name)}
             >
               <div className="flex items-center justify-between gap-2">
-                <button
-                  onClick={() => setExpandedProfile(isExpanded ? null : profile.name)}
+                <div
                   className="flex-1 text-left"
                   title={t('cards:trestleScan.toggleProfileDetails', { name: profile.name })}
                 >
@@ -338,10 +335,10 @@ Please proceed step by step. Start with verifying prerequisites (Python 3.9+, ku
                       <ChevronRight className={`w-3 h-3 text-muted-foreground transition-transform ${isExpanded ? 'rotate-90' : ''}`} />
                     </div>
                   </div>
-                </button>
+                </div>
 
                 <button
-                  onClick={() => drillToCompliance('', { profile: profile.name })}
+                  onClick={(e) => { e.stopPropagation(); drillToCompliance('', { profile: profile.name }) }}
                   className="cursor-pointer"
                   title={t('cards:trestleScan.viewProfileControls', { name: profile.name })}
                 >
@@ -369,7 +366,7 @@ Please proceed step by step. Start with verifying prerequisites (Python 3.9+, ku
               {isExpanded && (
                 <div className="mt-2 grid grid-cols-3 gap-2 text-xs">
                   <button
-                    onClick={() => drillToCompliance('pass', { profile: profile.name })}
+                    onClick={(e) => { e.stopPropagation(); drillToCompliance('pass', { profile: profile.name }) }}
                     className="flex items-center gap-1 text-green-400 hover:opacity-80 transition-opacity cursor-pointer"
                     title={t('cards:trestleScan.viewPassingProfileControls', { name: profile.name })}
                   >
@@ -377,7 +374,7 @@ Please proceed step by step. Start with verifying prerequisites (Python 3.9+, ku
                     <span>{profile.controlsPassed} {t('cards:trestleScan.pass')}</span>
                   </button>
                   <button
-                    onClick={() => drillToCompliance('fail', { profile: profile.name })}
+                    onClick={(e) => { e.stopPropagation(); drillToCompliance('fail', { profile: profile.name }) }}
                     className="flex items-center gap-1 text-red-400 hover:opacity-80 transition-opacity cursor-pointer"
                     title={t('cards:trestleScan.viewFailingProfileControls', { name: profile.name })}
                   >
@@ -385,7 +382,7 @@ Please proceed step by step. Start with verifying prerequisites (Python 3.9+, ku
                     <span>{profile.controlsFailed} {t('cards:trestleScan.fail')}</span>
                   </button>
                   <button
-                    onClick={() => drillToCompliance('other', { profile: profile.name })}
+                    onClick={(e) => { e.stopPropagation(); drillToCompliance('other', { profile: profile.name }) }}
                     className="flex items-center gap-1 text-muted-foreground hover:text-foreground transition-colors cursor-pointer"
                     title={t('cards:trestleScan.viewOtherProfileControls', { name: profile.name })}
                   >

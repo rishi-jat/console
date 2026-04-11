@@ -149,13 +149,13 @@ func (s *Server) handleSettingsAll(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(all)
 
 	case "PUT":
+		defer r.Body.Close()
 		body, err := io.ReadAll(io.LimitReader(r.Body, maxRequestBodyBytes))
 		if err != nil {
 			w.WriteHeader(http.StatusBadRequest)
 			json.NewEncoder(w).Encode(protocol.ErrorPayload{Code: "read_error", Message: "Failed to read request body"})
 			return
 		}
-		defer r.Body.Close()
 
 		var all settings.AllSettings
 		if err := json.Unmarshal(body, &all); err != nil {
@@ -251,13 +251,13 @@ func (s *Server) handleSettingsImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	defer r.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxRequestBodyBytes))
 	if err != nil || len(body) == 0 {
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(protocol.ErrorPayload{Code: "empty_body", Message: "Empty request body"})
 		return
 	}
-	defer r.Body.Close()
 
 	sm := settings.GetSettingsManager()
 	if err := sm.ImportEncrypted(body); err != nil {
@@ -520,11 +520,11 @@ func validateOpenAIKey(ctx context.Context, apiKey string) (bool, error) {
 
 // validateGeminiKey tests a Google Gemini API key
 func validateGeminiKey(ctx context.Context, apiKey string) (bool, error) {
-	url := fmt.Sprintf("%s?key=%s", geminiAPIBaseURL, apiKey)
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", geminiAPIBaseURL, nil)
 	if err != nil {
 		return false, err
 	}
+	req.Header.Set("x-goog-api-key", apiKey)
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -710,6 +710,11 @@ func (s *Server) handlePredictionsAI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !s.validateToken(r) {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
 	if r.Method != "GET" {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -739,6 +744,11 @@ func (s *Server) handlePredictionsAnalyze(w http.ResponseWriter, r *http.Request
 
 	if r.Method == "OPTIONS" {
 		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	if !s.validateToken(r) {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
 
@@ -805,6 +815,11 @@ func (s *Server) handlePredictionsFeedback(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	if !s.validateToken(r) {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
 	if r.Method != "POST" {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -843,6 +858,11 @@ func (s *Server) handlePredictionsStats(w http.ResponseWriter, r *http.Request) 
 
 	if r.Method == "OPTIONS" {
 		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	if !s.validateToken(r) {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
 
@@ -910,6 +930,11 @@ func (s *Server) handleDeviceAlerts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !s.validateToken(r) {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
 	if r.Method != "GET" {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -943,16 +968,18 @@ func (s *Server) handleDeviceAlertsClear(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	if !s.validateToken(r) {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
 	if r.Method != "POST" {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	if s.deviceTracker == nil {
-		http.Error(w, "Device tracker not available", http.StatusServiceUnavailable)
-		return
-	}
-
+	// Validate request body before checking device tracker availability so
+	// callers always get a 400 for malformed requests regardless of server state.
 	var req struct {
 		AlertID string `json:"alertId"`
 	}
@@ -963,6 +990,11 @@ func (s *Server) handleDeviceAlertsClear(w http.ResponseWriter, r *http.Request)
 
 	if req.AlertID == "" {
 		http.Error(w, "alertId is required", http.StatusBadRequest)
+		return
+	}
+
+	if s.deviceTracker == nil {
+		http.Error(w, "Device tracker not available", http.StatusServiceUnavailable)
 		return
 	}
 

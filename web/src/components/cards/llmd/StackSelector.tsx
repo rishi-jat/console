@@ -11,14 +11,14 @@ import { useOptionalStack } from '../../../contexts/StackContext'
 import type { LLMdStack } from '../../../hooks/useStackDiscovery'
 import { useTranslation } from 'react-i18next'
 import { StatusBadge } from '../../ui/StatusBadge'
+import { Skeleton } from '../../ui/Skeleton'
 import { useModalState } from '../../../lib/modals'
 
 const STATUS_COLORS = {
   healthy: 'bg-green-500',
   degraded: 'bg-yellow-500',
   unhealthy: 'bg-red-500',
-  unknown: 'bg-gray-500 dark:bg-gray-400',
-}
+  unknown: 'bg-gray-500 dark:bg-gray-400' }
 
 type SortField = 'name' | 'accelerators' | 'status' | 'replicas'
 type SortDirection = 'asc' | 'desc'
@@ -98,8 +98,7 @@ const StackOption = memo(function StackOption({ stack, isSelected, onSelect }: S
     prefillCount: stack.components.prefill.reduce((sum, c) => sum + c.replicas, 0),
     decodeCount: stack.components.decode.reduce((sum, c) => sum + c.replicas, 0),
     unifiedCount: stack.components.both.reduce((sum, c) => sum + c.replicas, 0),
-    gpuInfo: estimateAccelerators(stack),
-  }), [stack])
+    gpuInfo: estimateAccelerators(stack) }), [stack])
 
   return (
     <button
@@ -311,8 +310,7 @@ export function StackSelector() {
   }
 
   // Group stacks by cluster (with fallback for undefined cluster names)
-  const stacksByCluster = useMemo(() => {
-    return filteredAndSortedStacks.reduce((acc, stack) => {
+  const stacksByCluster = filteredAndSortedStacks.reduce((acc, stack) => {
       const clusterName = stack.cluster || 'unknown'
       if (!acc[clusterName]) {
         acc[clusterName] = []
@@ -320,7 +318,6 @@ export function StackSelector() {
       acc[clusterName].push(stack)
       return acc
     }, {} as Record<string, LLMdStack[]>)
-  }, [filteredAndSortedStacks])
 
   const toggleSort = (field: SortField) => {
     if (sortField === field) {
@@ -525,8 +522,22 @@ export function StackSelector() {
                   </div>
                 ))
               ) : isLoading ? (
-                <div className="px-3 py-4 text-center text-muted-foreground text-sm">
-                  Loading stacks...
+                <div className="px-3 py-4 space-y-3">
+                  {Array.from({ length: 3 }).map((_, i) => (
+                    <div key={i} className="px-3 py-2.5 border-b border-border/50 last:border-0">
+                      <div className="flex items-center justify-between mb-1">
+                        <div className="flex items-center gap-2">
+                          <Skeleton variant="circular" width={8} height={8} />
+                          <Skeleton variant="text" width={120} height={14} />
+                        </div>
+                        <Skeleton variant="text" width={40} height={12} />
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <Skeleton variant="rounded" width={80} height={16} />
+                        <Skeleton variant="rounded" width={60} height={16} />
+                      </div>
+                    </div>
+                  ))}
                 </div>
               ) : (
                 <div className="px-3 py-4 text-center text-muted-foreground text-sm">

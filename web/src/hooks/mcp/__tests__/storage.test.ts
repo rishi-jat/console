@@ -74,6 +74,7 @@ vi.mock('../shared', () => ({
   MIN_REFRESH_INDICATOR_MS: 500,
   getEffectiveInterval: (ms: number) => ms,
   LOCAL_AGENT_URL: 'http://localhost:8585',
+  agentFetch: (...args: unknown[]) => fetch(...(args as Parameters<typeof fetch>)),
   clusterCacheRef: mockClusterCacheRef,
 }))
 
@@ -124,6 +125,10 @@ beforeEach(() => {
   mockApiGet.mockResolvedValue({ data: { pvcs: [], pvs: [] } })
   mockApiPost.mockResolvedValue({ data: { resourceQuota: {} } })
   mockApiDelete.mockResolvedValue({})
+  // Reset module-level caches to prevent cross-test contamination.
+  // The registerCacheReset callback sets pvcsCache = null internally.
+  const resetStorage = capturedCacheResets.get('storage')
+  if (resetStorage) resetStorage()
 })
 
 afterEach(() => {

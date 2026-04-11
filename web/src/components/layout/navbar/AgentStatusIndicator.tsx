@@ -1,5 +1,5 @@
-import { useState, useRef, useEffect, useCallback } from 'react'
-import { Server, Box, Wifi, WifiOff } from 'lucide-react'
+import { useState, useRef, useEffect } from 'react'
+import { Server, Box, Wifi, WifiOff, Loader2 } from 'lucide-react'
 import { useLocalAgent } from '../../../hooks/useLocalAgent'
 import { useMissions } from '../../../hooks/useMissions'
 import { useBackendHealth } from '../../../hooks/useBackendHealth'
@@ -23,15 +23,16 @@ export function AgentStatusIndicator() {
   const [showSetupDialog, setShowSetupDialog] = useState(false)
   const [showApprovalDialog, setShowApprovalDialog] = useState(false)
   const [discoveredAgents, setDiscoveredAgents] = useState<AgentInfo[]>([])
+  const [isDiscoveringAgents, setIsDiscoveringAgents] = useState(false)
   const agentRef = useRef<HTMLDivElement>(null)
 
   // Fetch agents from kc-agent health endpoint (works even in demo mode
   // when the WebSocket is not connected)
-  const fetchAgentsFromHealth = useCallback(async () => {
+  const fetchAgentsFromHealth = async () => {
+    setIsDiscoveringAgents(true)
     try {
       const res = await fetch(`${LOCAL_AGENT_HTTP_URL}/health`, {
-        signal: AbortSignal.timeout(BACKEND_HEALTH_CHECK_TIMEOUT_MS),
-      })
+        signal: AbortSignal.timeout(BACKEND_HEALTH_CHECK_TIMEOUT_MS) })
       if (!res.ok) return
       const data = await res.json()
       if (data.availableProviders) {
@@ -44,21 +45,21 @@ export function AgentStatusIndicator() {
           'antigravity': 'google-ag',
           'bob': 'bob',
           'gh-copilot': 'github',
-          'vscode': 'microsoft',
-        }
+          'vscode': 'microsoft' }
         setDiscoveredAgents(data.availableProviders.map((p: { name: string; displayName: string; capabilities: number }) => ({
           name: p.name,
           displayName: p.displayName,
           description: '',
           provider: nameToProvider[p.name] || p.name,
           available: true,
-          capabilities: p.capabilities,
-        })))
+          capabilities: p.capabilities })))
       }
     } catch {
       // kc-agent not reachable
+    } finally {
+      setIsDiscoveringAgents(false)
     }
-  }, [])
+  }
   const dropdownRef = useRef<HTMLDivElement>(null)
 
   // ── Stabilize pill status ──────────────────────────────────────────────
@@ -73,7 +74,7 @@ export function AgentStatusIndicator() {
   //    Fix: sticky demo styling that persists until agent actually connects.
 
   // --- Status debounce (fixes navigation flicker) ---
-  const connectingTimerRef = useRef<ReturnType<typeof setTimeout>>()
+  const connectingTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined)
   const [stableStatus, setStableStatus] = useState(agentStatus)
 
   useEffect(() => {
@@ -97,7 +98,7 @@ export function AgentStatusIndicator() {
   // When demo mode is on, showDemoStyle=true. When demo mode is toggled off,
   // showDemoStyle stays true (sticky) until the agent connects or 3s elapses.
   const [showDemoStyle, setShowDemoStyle] = useState(isDemoMode)
-  const demoExitTimerRef = useRef<ReturnType<typeof setTimeout>>()
+  const demoExitTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined)
 
   // Set sticky flag when entering demo mode
   useEffect(() => {
@@ -206,6 +207,7 @@ export function AgentStatusIndicator() {
                 <span className="text-sm font-medium text-foreground">{t('agent.demoMode')}</span>
               </div>
               <button
+                disabled={isDiscoveringAgents}
                 onClick={() => {
                   if (isDemoModeForced && isDemoMode) {
                     setShowSetupDialog(true)
@@ -223,15 +225,20 @@ export function AgentStatusIndicator() {
                 }}
                 className={cn(
                   'relative w-11 h-6 rounded-full transition-colors',
-                  isDemoMode ? 'bg-purple-500' : 'bg-secondary'
+                  isDemoMode ? 'bg-purple-500' : 'bg-secondary',
+                  isDiscoveringAgents && 'opacity-50 cursor-wait'
                 )}
               >
-                <span
-                  className={cn(
-                    'absolute top-1 left-1 w-4 h-4 bg-white rounded-full transition-transform shadow-sm',
-                    isDemoMode ? 'translate-x-5' : 'translate-x-0'
-                  )}
-                />
+                {isDiscoveringAgents ? (
+                  <Loader2 className="absolute top-1 left-3.5 w-4 h-4 animate-spin text-purple-200" />
+                ) : (
+                  <span
+                    className={cn(
+                      'absolute top-1 left-1 w-4 h-4 bg-white rounded-full transition-transform shadow-sm',
+                      isDemoMode ? 'translate-x-5' : 'translate-x-0'
+                    )}
+                  />
+                )}
               </button>
             </div>
             <p className="text-xs text-muted-foreground mt-1.5">
@@ -258,6 +265,22 @@ export function AgentStatusIndicator() {
                 </span>
               )}
             </div>
+            {/* Show selected agent name and model when connected */}
+            {isConnected && selectedAgent && selectedAgent !== 'none' && (() => {
+              const activeAgent = agents.find(a => a.name === selectedAgent)
+              return activeAgent ? (
+                <div className="flex items-center gap-2 mt-1.5">
+                  <span className="text-xs text-foreground font-medium">{activeAgent.displayName}</span>
+                  {activeAgent.model ? (
+                    <span className="text-2xs text-muted-foreground bg-secondary/50 px-1.5 py-0.5 rounded">
+                      {activeAgent.model}
+                    </span>
+                  ) : activeAgent.provider === 'github-cli' ? (
+                    <span className="text-2xs text-muted-foreground italic">Default model</span>
+                  ) : null}
+                </div>
+              ) : null
+            })()}
             <p className="text-xs text-muted-foreground mt-1">
               {isDemoMode
                 ? t('agent.agentBypassedInDemo')

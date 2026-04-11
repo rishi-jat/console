@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useRef, useMemo, startTransition } from 'react'
+import { useState, useEffect, useRef, startTransition } from 'react'
 import { useTranslation } from 'react-i18next'
 import {
   Plus, X, Save, Trash2, Activity, Sparkles,
@@ -10,15 +10,13 @@ import {
   Terminal, Code, Wifi, WifiOff, Clock, Users,
   Gauge, TrendingUp, TrendingDown, ArrowUpRight, Flame,
   HelpCircle,
-  type LucideIcon,
-} from 'lucide-react'
+  type LucideIcon } from 'lucide-react'
 import { BaseModal, ConfirmDialog } from '../../lib/modals'
 import { cn } from '../../lib/cn'
 import {
   saveDynamicStatsDefinition,
   deleteDynamicStatsDefinition,
-  getAllDynamicStats,
-} from '../../lib/dynamic-cards'
+  getAllDynamicStats } from '../../lib/dynamic-cards'
 import type { StatsDefinition, StatBlockDefinition, StatBlockColor, StatBlockValueSource } from '../../lib/stats/types'
 import { COLOR_CLASSES } from '../../lib/stats/types'
 import { AiGenerationPanel } from './AiGenerationPanel'
@@ -35,6 +33,8 @@ interface StatBlockFactoryModalProps {
   isOpen: boolean
   onClose: () => void
   onStatsCreated?: (type: string) => void
+  /** When true, renders content inline without BaseModal wrapper (used by Console Studio) */
+  embedded?: boolean
 }
 
 type Tab = 'builder' | 'ai' | 'manage'
@@ -76,8 +76,7 @@ const ICON_MAP: Record<string, LucideIcon> = {
   Layers, Box, Shield, Lock, Globe, Cloud, GitBranch,
   Terminal, Code, Wifi, WifiOff, Clock, Users,
   Gauge, TrendingUp, TrendingDown, ArrowUpRight, Flame,
-  HelpCircle,
-}
+  HelpCircle }
 
 function getIcon(name: string): LucideIcon {
   return ICON_MAP[name] ?? HelpCircle
@@ -91,8 +90,7 @@ function createEmptyBlock(): BlockEditorItem {
     color: 'purple',
     field: '',
     format: '',
-    tooltip: '',
-  }
+    tooltip: '' }
 }
 
 // ============================================================================
@@ -243,7 +241,7 @@ function validateStatBlockResult(
 // Main Component
 // ============================================================================
 
-export function StatBlockFactoryModal({ isOpen, onClose, onStatsCreated }: StatBlockFactoryModalProps) {
+export function StatBlockFactoryModal({ isOpen, onClose, onStatsCreated, embedded = false }: StatBlockFactoryModalProps) {
   const { t } = useTranslation()
   const [tab, setTab] = useState<Tab>('builder')
   const { isFeatureEnabled } = useAIMode()
@@ -281,7 +279,7 @@ export function StatBlockFactoryModal({ isOpen, onClose, onStatsCreated }: StatB
     }
   }, [])
 
-  const handleTabChange = useCallback((newTab: Tab) => {
+  const handleTabChange = (newTab: Tab) => {
     // Batch state updates to prevent flicker
     startTransition(() => {
       setTab(newTab)
@@ -289,13 +287,13 @@ export function StatBlockFactoryModal({ isOpen, onClose, onStatsCreated }: StatB
         setExistingStats(getAllDynamicStats())
       }
     })
-  }, [])
+  }
 
-  const addBlock = useCallback(() => {
+  const addBlock = () => {
     setBlocks(prev => [...prev, createEmptyBlock()])
-  }, [])
+  }
 
-  const updateBlock = useCallback((idx: number, field: keyof BlockEditorItem, value: string) => {
+  const updateBlock = (idx: number, field: keyof BlockEditorItem, value: string) => {
     setBlocks(prev => prev.map((b, i) => {
       if (i !== idx) return b
       const updated = { ...b, [field]: value }
@@ -305,13 +303,13 @@ export function StatBlockFactoryModal({ isOpen, onClose, onStatsCreated }: StatB
       }
       return updated
     }))
-  }, [])
+  }
 
-  const removeBlock = useCallback((idx: number) => {
+  const removeBlock = (idx: number) => {
     setBlocks(prev => prev.filter((_, i) => i !== idx))
-  }, [])
+  }
 
-  const moveBlock = useCallback((idx: number, direction: 'up' | 'down') => {
+  const moveBlock = (idx: number, direction: 'up' | 'down') => {
     setBlocks(prev => {
       const newBlocks = [...prev]
       const targetIdx = direction === 'up' ? idx - 1 : idx + 1
@@ -319,9 +317,9 @@ export function StatBlockFactoryModal({ isOpen, onClose, onStatsCreated }: StatB
       ;[newBlocks[idx], newBlocks[targetIdx]] = [newBlocks[targetIdx], newBlocks[idx]]
       return newBlocks
     })
-  }, [])
+  }
 
-  const handleSave = useCallback(() => {
+  const handleSave = () => {
     const type = statsType.trim() || `custom_${Date.now()}`
     if (blocks.filter(b => b.label.trim()).length === 0) {
       // Validation feedback should show immediately
@@ -342,18 +340,15 @@ export function StatBlockFactoryModal({ isOpen, onClose, onStatsCreated }: StatB
         order: idx,
         valueSource: b.field ? {
           field: b.field,
-          format: (b.format || undefined) as StatBlockValueSource['format'],
-        } : undefined,
-        tooltip: b.tooltip || undefined,
-      }))
+          format: (b.format || undefined) as StatBlockValueSource['format'] } : undefined,
+        tooltip: b.tooltip || undefined }))
 
     const definition: StatsDefinition = {
       type,
       title: title.trim() || 'Custom Stats',
       blocks: statBlocks,
       defaultCollapsed: false,
-      grid: gridCols > 0 ? { columns: gridCols } : undefined,
-    }
+      grid: gridCols > 0 ? { columns: gridCols } : undefined }
 
     saveDynamicStatsDefinition(definition)
     setSaveMessage(`Stats "${definition.title}" created!`)
@@ -361,18 +356,18 @@ export function StatBlockFactoryModal({ isOpen, onClose, onStatsCreated }: StatB
 
     const saveSuccessTimeoutId = window.setTimeout(() => setSaveMessage(null), SAVE_MESSAGE_TIMEOUT_MS)
     timeoutsRef.current.push(saveSuccessTimeoutId)
-  }, [statsType, blocks, title, gridCols, onStatsCreated])
+  }
 
-  const handleDelete = useCallback((type: string) => {
+  const handleDelete = (type: string) => {
     // Batch state updates to prevent flicker
     deleteDynamicStatsDefinition(type)
     startTransition(() => {
       setExistingStats(getAllDynamicStats())
     })
-  }, [])
+  }
 
   // Handle inline AI assist result
-  const handleAssistResult = useCallback((result: StatAssistResult) => {
+  const handleAssistResult = (result: StatAssistResult) => {
     // Batch state updates to prevent flicker
     startTransition(() => {
       if (result.title) setTitle(result.title)
@@ -384,21 +379,17 @@ export function StatBlockFactoryModal({ isOpen, onClose, onStatsCreated }: StatB
           color: (AVAILABLE_COLORS.includes(b.color as StatBlockColor) ? b.color : 'purple') as StatBlockColor,
           field: b.field || '',
           format: b.format || '',
-          tooltip: b.tooltip || '',
-        })))
+          tooltip: b.tooltip || '' })))
       }
     })
-  }, [])
+  }
 
   // Smart default suggestions per block
-  const smartDefaults = useMemo(
-    () => blocks.map(b => getSmartDefault(b.label)),
-    [blocks]
-  )
+  const smartDefaults = blocks.map(b => getSmartDefault(b.label))
 
-  const applySmartDefault = useCallback((idx: number, defaults: SmartDefault) => {
+  const applySmartDefault = (idx: number, defaults: SmartDefault) => {
     setBlocks(prev => prev.map((b, i) => i === idx ? { ...b, icon: defaults.icon, color: defaults.color } : b))
-  }, [])
+  }
 
   const tabs = [
     { id: 'builder' as Tab, label: t('dashboard.statFactory.buildTab'), icon: Activity },
@@ -406,20 +397,11 @@ export function StatBlockFactoryModal({ isOpen, onClose, onStatsCreated }: StatB
     { id: 'manage' as Tab, label: t('dashboard.statFactory.manageTab'), icon: Activity },
   ]
 
-  return (
-    <BaseModal isOpen={isOpen} onClose={onClose} size="xl" closeOnBackdrop={false}>
-      <BaseModal.Header title={t('dashboard.statFactory.title')} icon={Activity} onClose={onClose} showBack={false} />
-
-      <BaseModal.Tabs
-        tabs={tabs}
-        activeTab={tab}
-        onTabChange={(t) => handleTabChange(t as Tab)}
-      />
-
-      <BaseModal.Content className="max-h-[70vh]">
+  const statContent = (
+    <>
         {/* Save feedback */}
         {saveMessage && (
-          <div className="mb-3 flex items-center gap-2 px-3 py-2 rounded-md bg-green-500/10 border border-green-500/20">
+          <div className="mb-3 flex items-center gap-2 px-3 py-2 rounded-lg bg-green-500/10 border border-green-500/20">
             <CheckCircle className="w-4 h-4 text-green-400 shrink-0" />
             <span className="text-sm text-green-400">{saveMessage}</span>
           </div>
@@ -447,7 +429,7 @@ export function StatBlockFactoryModal({ isOpen, onClose, onStatsCreated }: StatB
                     value={title}
                     onChange={e => setTitle(e.target.value)}
                     placeholder={t('dashboard.statFactory.titlePlaceholder')}
-                    className="w-full text-sm px-3 py-2 rounded-md bg-secondary/50 border border-border text-foreground focus:outline-none focus:ring-1 focus:ring-purple-500/50"
+                    className="w-full text-sm px-3 py-2 rounded-lg bg-secondary text-foreground focus:outline-none focus:ring-1 focus:ring-purple-500/50"
                   />
                 </div>
                 <div>
@@ -457,7 +439,7 @@ export function StatBlockFactoryModal({ isOpen, onClose, onStatsCreated }: StatB
                     value={statsType}
                     onChange={e => setStatsType(e.target.value)}
                     placeholder={t('dashboard.statFactory.typeIdPlaceholder')}
-                    className="w-full text-sm px-3 py-2 rounded-md bg-secondary/50 border border-border text-foreground focus:outline-none focus:ring-1 focus:ring-purple-500/50"
+                    className="w-full text-sm px-3 py-2 rounded-lg bg-secondary text-foreground focus:outline-none focus:ring-1 focus:ring-purple-500/50"
                   />
                 </div>
                 <div>
@@ -465,7 +447,7 @@ export function StatBlockFactoryModal({ isOpen, onClose, onStatsCreated }: StatB
                   <select
                     value={gridCols}
                     onChange={e => setGridCols(Number(e.target.value))}
-                    className="w-full text-sm px-3 py-2 rounded-md bg-secondary/50 border border-border text-foreground focus:outline-none focus:ring-1 focus:ring-purple-500/50"
+                    className="w-full text-sm px-3 py-2 rounded-lg bg-secondary text-foreground focus:outline-none focus:ring-1 focus:ring-purple-500/50"
                   >
                     <option value={0}>{t('dashboard.statFactory.autoOption')}</option>
                     <option value={2}>2</option>
@@ -487,7 +469,7 @@ export function StatBlockFactoryModal({ isOpen, onClose, onStatsCreated }: StatB
                   </label>
                   <button
                     onClick={addBlock}
-                    className="flex items-center gap-1 text-xs px-2 py-1 rounded-md bg-secondary text-muted-foreground hover:text-foreground transition-colors"
+                    className="flex items-center gap-1 text-xs px-2 py-1 rounded-lg bg-secondary text-muted-foreground hover:text-foreground transition-colors"
                   >
                     <Plus className="w-3 h-3" />
                     {t('dashboard.statFactory.addBlock')}
@@ -502,7 +484,7 @@ export function StatBlockFactoryModal({ isOpen, onClose, onStatsCreated }: StatB
                       (block.icon !== smartDefault.icon || block.color !== smartDefault.color)
 
                     return (
-                      <div key={block.id + idx} className="rounded-md bg-card/50 border border-border p-2">
+                      <div key={block.id + idx} className="rounded-lg bg-card/50 border border-border p-2">
                         <div className="flex items-center gap-2">
                           {/* Drag handle / order */}
                           <div className="flex flex-col items-center gap-0.5">
@@ -520,7 +502,7 @@ export function StatBlockFactoryModal({ isOpen, onClose, onStatsCreated }: StatB
                             <button
                               onClick={() => setEditingBlockIcon(editingBlockIcon === idx ? null : idx)}
                               className={cn(
-                                'p-1.5 min-h-11 min-w-11 rounded-md border transition-colors',
+                                'p-1.5 min-h-11 min-w-11 rounded-lg border transition-colors',
                                 editingBlockIcon === idx
                                   ? 'border-purple-500 bg-purple-500/10'
                                   : 'border-border bg-secondary/50 hover:border-purple-500/50',
@@ -531,7 +513,7 @@ export function StatBlockFactoryModal({ isOpen, onClose, onStatsCreated }: StatB
                               <IconComponent className={cn('w-4 h-4', COLOR_CLASSES[block.color])} />
                             </button>
                             {editingBlockIcon === idx && (
-                              <div className="absolute z-50 top-full mt-1 left-0 bg-card border border-border rounded-lg shadow-lg p-2 w-64 max-h-40 overflow-y-auto">
+                              <div className="absolute z-dropdown top-full mt-1 left-0 bg-card border border-border rounded-lg shadow-lg p-2 w-64 max-h-40 overflow-y-auto">
                                 <div className="grid grid-cols-8 gap-1">
                                   {POPULAR_ICONS.map(iconName => {
                                     const Ic = getIcon(iconName)
@@ -579,7 +561,7 @@ export function StatBlockFactoryModal({ isOpen, onClose, onStatsCreated }: StatB
                             value={block.label}
                             onChange={e => updateBlock(idx, 'label', e.target.value)}
                             placeholder={t('dashboard.statFactory.labelPlaceholder')}
-                            className="flex-1 text-xs px-2 py-1.5 rounded-md bg-secondary/50 border border-border text-foreground focus:outline-none focus:ring-1 focus:ring-purple-500/50"
+                            className="flex-1 text-xs px-2 py-1.5 rounded-lg bg-secondary text-foreground focus:outline-none focus:ring-1 focus:ring-purple-500/50"
                           />
 
                           {/* Value field */}
@@ -588,14 +570,14 @@ export function StatBlockFactoryModal({ isOpen, onClose, onStatsCreated }: StatB
                             value={block.field}
                             onChange={e => updateBlock(idx, 'field', e.target.value)}
                             placeholder={t('dashboard.statFactory.dataFieldPlaceholder')}
-                            className="w-24 text-xs px-2 py-1.5 rounded-md bg-secondary/50 border border-border text-foreground focus:outline-none focus:ring-1 focus:ring-purple-500/50"
+                            className="w-24 text-xs px-2 py-1.5 rounded-lg bg-secondary text-foreground focus:outline-none focus:ring-1 focus:ring-purple-500/50"
                           />
 
                           {/* Format */}
                           <select
                             value={block.format}
                             onChange={e => updateBlock(idx, 'format', e.target.value)}
-                            className="w-20 text-xs px-1.5 py-1.5 rounded-md bg-secondary/50 border border-border text-foreground focus:outline-none"
+                            className="w-20 text-xs px-1.5 py-1.5 rounded-lg bg-secondary text-foreground focus:outline-none"
                           >
                             {VALUE_FORMATS.map(f => (
                               <option key={f.value} value={f.value}>{f.label}</option>
@@ -616,7 +598,7 @@ export function StatBlockFactoryModal({ isOpen, onClose, onStatsCreated }: StatB
                           <div className="mt-1.5 ml-7">
                             <button
                               onClick={() => applySmartDefault(idx, smartDefault)}
-                              className="text-2xs text-purple-400/60 hover:text-purple-400 transition-colors"
+                              className="text-xs text-purple-400/60 hover:text-purple-400 transition-colors"
                             >
                               Suggested: {(() => { const SugIcon = getIcon(smartDefault.icon); return <SugIcon className="w-3 h-3 inline mr-0.5" /> })()}
                               {smartDefault.icon} · {smartDefault.color}
@@ -634,7 +616,7 @@ export function StatBlockFactoryModal({ isOpen, onClose, onStatsCreated }: StatB
                 onClick={handleSave}
                 disabled={blocks.filter(b => b.label.trim()).length === 0}
                 className={cn(
-                  'w-full flex items-center justify-center gap-2 py-2 rounded-md text-sm font-medium transition-colors',
+                  'w-full flex items-center justify-center gap-2 py-2 rounded-lg text-sm font-medium transition-colors',
                   blocks.filter(b => b.label.trim()).length > 0
                     ? 'bg-purple-500/20 text-purple-400 hover:bg-purple-500/30'
                     : 'bg-secondary text-muted-foreground cursor-not-allowed',
@@ -650,7 +632,7 @@ export function StatBlockFactoryModal({ isOpen, onClose, onStatsCreated }: StatB
               <div className="flex items-center justify-center border-l border-border/50 bg-secondary/10 w-10 shrink-0">
                 <button
                   onClick={() => setPreviewCollapsed(false)}
-                  className="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
+                  className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
                   title={t('dashboard.preview.showPreview')}
                 >
                   <Eye className="w-4 h-4" />
@@ -662,7 +644,7 @@ export function StatBlockFactoryModal({ isOpen, onClose, onStatsCreated }: StatB
                 <div className="flex items-center justify-between px-3 py-1.5 border-b border-border/30">
                   <div className="flex items-center gap-1.5">
                     <Eye className="w-3 h-3 text-muted-foreground" />
-                    <span className="text-2xs font-medium text-muted-foreground uppercase tracking-wide">{t('dashboard.preview.header')}</span>
+                    <span className="text-xs font-medium text-muted-foreground uppercase tracking-wide">{t('dashboard.preview.header')}</span>
                     <StatusBadge color="purple" size="xs">
                       {t('dashboard.preview.sampleValues')}
                     </StatusBadge>
@@ -718,8 +700,7 @@ export function StatBlockFactoryModal({ isOpen, onClose, onStatsCreated }: StatB
                   color: (AVAILABLE_COLORS.includes(b.color as StatBlockColor) ? b.color : 'purple') as StatBlockColor,
                   field: b.field,
                   format: b.format || '',
-                  tooltip: b.tooltip || '',
-                }))}
+                  tooltip: b.tooltip || '' }))}
               />
             )}
             onSave={(result) => {
@@ -733,17 +714,14 @@ export function StatBlockFactoryModal({ isOpen, onClose, onStatsCreated }: StatB
                 order: idx,
                 valueSource: b.field ? {
                   field: b.field,
-                  format: (b.format || undefined) as StatBlockValueSource['format'],
-                } : undefined,
-                tooltip: b.tooltip || undefined,
-              }))
+                  format: (b.format || undefined) as StatBlockValueSource['format'] } : undefined,
+                tooltip: b.tooltip || undefined }))
 
               const definition: StatsDefinition = {
                 type,
                 title: result.title || 'AI-Generated Stats',
                 blocks: statBlocks,
-                defaultCollapsed: false,
-              }
+                defaultCollapsed: false }
 
               saveDynamicStatsDefinition(definition)
               // Execute parent callback and show success message immediately
@@ -769,7 +747,7 @@ export function StatBlockFactoryModal({ isOpen, onClose, onStatsCreated }: StatB
               </div>
             ) : (
               existingStats.map(stats => (
-                <div key={stats.type} className="rounded-md bg-card/50 border border-border p-3 flex items-start gap-3">
+                <div key={stats.type} className="rounded-lg bg-card/50 border border-border p-3 flex items-start gap-3">
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2">
                       <Activity className="w-4 h-4 text-purple-400 shrink-0" />
@@ -787,7 +765,7 @@ export function StatBlockFactoryModal({ isOpen, onClose, onStatsCreated }: StatB
                         return (
                           <span
                             key={block.id}
-                            className="inline-flex items-center gap-1 text-2xs px-1.5 py-0.5 rounded bg-secondary/50 text-muted-foreground"
+                            className="inline-flex items-center gap-1 text-xs px-1.5 py-0.5 rounded bg-secondary/50 text-muted-foreground"
                           >
                             <BlockIcon className={cn('w-3 h-3', COLOR_CLASSES[block.color])} />
                             {block.label}
@@ -795,7 +773,7 @@ export function StatBlockFactoryModal({ isOpen, onClose, onStatsCreated }: StatB
                         )
                       })}
                       {stats.blocks.length > 8 && (
-                        <span className="text-2xs px-1.5 py-0.5 text-muted-foreground">
+                        <span className="text-xs px-1.5 py-0.5 text-muted-foreground">
                           +{stats.blocks.length - 8} more
                         </span>
                       )}
@@ -813,23 +791,57 @@ export function StatBlockFactoryModal({ isOpen, onClose, onStatsCreated }: StatB
             )}
           </div>
         )}
-      </BaseModal.Content>
+    </>
+  )
 
-      <ConfirmDialog
-        isOpen={deleteConfirmType !== null}
-        onClose={() => setDeleteConfirmType(null)}
-        onConfirm={() => {
-          if (deleteConfirmType) {
-            handleDelete(deleteConfirmType)
-            setDeleteConfirmType(null)
-          }
-        }}
-        title={t('dashboard.statFactory.deleteStatBlock')}
-        message={t('dashboard.delete.warning')}
-        confirmLabel={t('actions.delete')}
-        cancelLabel={t('actions.cancel')}
-        variant="danger"
-      />
+  const statConfirmDialog = (
+    <ConfirmDialog
+      isOpen={deleteConfirmType !== null}
+      onClose={() => setDeleteConfirmType(null)}
+      onConfirm={() => {
+        if (deleteConfirmType) {
+          handleDelete(deleteConfirmType)
+          setDeleteConfirmType(null)
+        }
+      }}
+      title={t('dashboard.statFactory.deleteStatBlock')}
+      message={t('dashboard.delete.warning')}
+      confirmLabel={t('actions.delete')}
+      cancelLabel={t('actions.cancel')}
+      variant="danger"
+    />
+  )
+
+  // Embedded mode: render inline within Console Studio
+  if (embedded) {
+    return (
+      <div className="h-full flex flex-col overflow-hidden">
+        <div className="flex-1 overflow-y-auto p-4">
+          {/* Tabs inside scrollable content — matches Card Factory layout */}
+          <div className="flex items-center gap-1 border-b border-border pb-2 mb-4">
+            {tabs.map(tb => (
+              <button key={tb.id} onClick={() => handleTabChange(tb.id)}
+                className={`px-3 py-1.5 text-sm font-medium rounded-lg transition-colors ${tab === tb.id ? 'bg-purple-500/20 text-purple-400' : 'text-muted-foreground hover:text-foreground hover:bg-secondary'}`}>
+                {tb.label}
+              </button>
+            ))}
+          </div>
+          {statContent}
+        </div>
+        {statConfirmDialog}
+      </div>
+    )
+  }
+
+  // Standard modal mode
+  return (
+    <BaseModal isOpen={isOpen} onClose={onClose} size="xl" closeOnBackdrop={false}>
+      <BaseModal.Header title={t('dashboard.statFactory.title')} icon={Activity} onClose={onClose} showBack={false} />
+      <BaseModal.Tabs tabs={tabs} activeTab={tab} onTabChange={(t) => handleTabChange(t as Tab)} />
+      <BaseModal.Content className="max-h-[70vh]">
+        {statContent}
+      </BaseModal.Content>
+      {statConfirmDialog}
     </BaseModal>
   )
 }

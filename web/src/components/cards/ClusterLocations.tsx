@@ -1,8 +1,9 @@
-import { useMemo, useState, useRef, useCallback, useEffect } from 'react'
+import { useMemo, useState, useRef, useEffect } from 'react'
 import { Globe, Server, Cloud, ZoomIn, ZoomOut, Maximize2, Filter, X } from 'lucide-react'
 import { useClusters, type ClusterInfo } from '../../hooks/useMCP'
 import { useGlobalFilters } from '../../hooks/useGlobalFilters'
 import { useDrillDownActions } from '../../hooks/useDrillDown'
+import { useDebouncedValue } from '../../hooks/useDebouncedValue'
 import { Skeleton } from '../ui/Skeleton'
 import { detectCloudProvider, CloudProviderIcon, type CloudProvider } from '../ui/CloudProviderIcon'
 import DOMPurify from 'dompurify'
@@ -10,6 +11,9 @@ import WorldMapSvgUrl from '../../assets/world-map.svg'
 import { useCardLoadingState } from './CardDataContext'
 import { useTranslation } from 'react-i18next'
 import { useDemoMode } from '../../hooks/useDemoMode'
+
+/** Search input debounce delay (#6213). */
+const SEARCH_DEBOUNCE_MS = 250
 
 interface ClusterLocationsProps {
   config?: Record<string, unknown>
@@ -109,8 +113,7 @@ const REGION_COORDINATES: Record<string, { x: number; y: number; label: string }
   'cn-shenzhen': { x: 80, y: 48, label: 'Shenzhen' },
   // Local/unknown - center of map
   'local': { x: 50, y: 85, label: 'Local' },
-  'unknown': { x: 50, y: 85, label: 'Unknown' },
-}
+  'unknown': { x: 50, y: 85, label: 'Unknown' } }
 
 interface RegionInfo {
   region: string
@@ -191,8 +194,7 @@ function extractRegion(cluster: ClusterInfo): string | null {
     'amsterdam': 'ams3',
     'bangalore': 'blr1',
     'cape-town': 'af-south-1',
-    'capetown': 'af-south-1',
-  }
+    'capetown': 'af-south-1' }
 
   for (const [keyword, region] of Object.entries(locationKeywords)) {
     if (name.includes(keyword) || context.includes(keyword)) return region
@@ -204,7 +206,7 @@ function extractRegion(cluster: ClusterInfo): string | null {
   }
 
   // Check for zone patterns (zone-a, zone-b, etc. often include region prefix)
-  const zoneMatch = name.match(/([a-z]{2,}-[a-z]+-\d)[a-z]?/)
+  const zoneMatch = name.match(/([a-z]{2 }-[a-z]+-\d)[a-z]?/)
   if (zoneMatch && REGION_COORDINATES[zoneMatch[1]]) {
     return zoneMatch[1]
   }
@@ -226,14 +228,12 @@ export function ClusterLocations({ config: _config }: ClusterLocationsProps) {
     isLoading: isLoading && !hasData,
     isRefreshing,
     hasAnyData: hasData,
-    isDemoData: isDemoMode,
-  })
+    isDemoData: isDemoMode })
 
   const {
     selectedClusters: globalSelectedClusters,
     isAllClustersSelected,
-    customFilter,
-  } = useGlobalFilters()
+    customFilter } = useGlobalFilters()
 
   // Map SVG state
   const [mapSvg, setMapSvg] = useState<string>('')
@@ -278,6 +278,11 @@ export function ClusterLocations({ config: _config }: ClusterLocationsProps) {
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all')
   const [showFilters, setShowFilters] = useState(false)
   const [searchFilter, setSearchFilter] = useState('')
+  // #6213: debounce the heavy filter so the cluster filter pipeline
+  // (which feeds region grouping + map markers) doesn't re-run on
+  // every keystroke. The <input value={searchFilter}/> still updates
+  // at typing speed.
+  const debouncedSearchFilter = useDebouncedValue(searchFilter, SEARCH_DEBOUNCE_MS)
 
   // Hover state
   const [hoveredCluster, setHoveredCluster] = useState<string | null>(null)
@@ -305,8 +310,8 @@ export function ClusterLocations({ config: _config }: ClusterLocationsProps) {
       result = result.filter(c => !c.healthy)
     }
 
-    if (searchFilter.trim()) {
-      const query = searchFilter.toLowerCase()
+    if (debouncedSearchFilter.trim()) {
+      const query = debouncedSearchFilter.toLowerCase()
       result = result.filter(c =>
         c.name.toLowerCase().includes(query) ||
         c.context?.toLowerCase().includes(query)
@@ -314,10 +319,10 @@ export function ClusterLocations({ config: _config }: ClusterLocationsProps) {
     }
 
     return result
-  }, [allClusters, globalSelectedClusters, isAllClustersSelected, customFilter, statusFilter, searchFilter])
+  }, [allClusters, globalSelectedClusters, isAllClustersSelected, customFilter, statusFilter, debouncedSearchFilter])
 
   // Group clusters by region
-  const regionGroups = useMemo(() => {
+  const regionGroups = (() => {
     const groups = new Map<string, RegionInfo>()
 
     for (const cluster of clusters) {
@@ -331,66 +336,64 @@ export function ClusterLocations({ config: _config }: ClusterLocationsProps) {
           displayName: coords.label || region,
           provider,
           clusters: [],
-          coordinates: coords,
-        })
+          coordinates: coords })
       }
 
       groups.get(region)!.clusters.push(cluster)
     }
 
     return Array.from(groups.values()).sort((a, b) => b.clusters.length - a.clusters.length)
-  }, [clusters])
+  })()
 
   // Calculate stats
-  const stats = useMemo(() => {
+  const stats = (() => {
     const healthyClusters = clusters.filter(c => c.healthy).length
     const uniqueRegions = regionGroups.length
     const providers = new Set(regionGroups.map(r => r.provider))
     return { healthyClusters, totalClusters: clusters.length, uniqueRegions, providerCount: providers.size }
-  }, [clusters, regionGroups])
+  })()
 
   // Map controls
-  const handleZoomIn = useCallback(() => {
+  const handleZoomIn = () => {
     setZoom(z => Math.min(z * 1.5, 4))
-  }, [])
+  }
 
-  const handleZoomOut = useCallback(() => {
+  const handleZoomOut = () => {
     setZoom(z => Math.max(z / 1.5, 0.5))
-  }, [])
+  }
 
-  const handleReset = useCallback(() => {
+  const handleReset = () => {
     setZoom(1)
     setPan({ x: 0, y: 0 })
-  }, [])
+  }
 
-  const handleMouseDown = useCallback((e: React.MouseEvent) => {
+  const handleMouseDown = (e: React.MouseEvent) => {
     if (e.button === 0) {
       setIsPanning(true)
       setPanStart({ x: e.clientX - pan.x, y: e.clientY - pan.y })
     }
-  }, [pan])
+  }
 
-  const handleMouseMove = useCallback((e: React.MouseEvent) => {
+  const handleMouseMove = (e: React.MouseEvent) => {
     if (isPanning) {
       setPan({
         x: e.clientX - panStart.x,
-        y: e.clientY - panStart.y,
-      })
+        y: e.clientY - panStart.y })
     }
-  }, [isPanning, panStart])
+  }
 
-  const handleMouseUp = useCallback(() => {
+  const handleMouseUp = () => {
     setIsPanning(false)
-  }, [])
+  }
 
-  const handleWheel = useCallback((e: React.WheelEvent) => {
+  const handleWheel = (e: React.WheelEvent) => {
     e.preventDefault()
     if (e.deltaY < 0) {
       setZoom(z => Math.min(z * 1.1, 4))
     } else {
       setZoom(z => Math.max(z / 1.1, 0.5))
     }
-  }, [])
+  }
 
   if (showSkeleton) {
     return (
@@ -440,7 +443,7 @@ export function ClusterLocations({ config: _config }: ClusterLocationsProps) {
               className="flex-1 px-2 py-1 text-xs bg-secondary rounded border border-border text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-purple-500/50"
             />
             {searchFilter && (
-              <button onClick={() => setSearchFilter('')} className="text-muted-foreground hover:text-foreground">
+              <button onClick={() => setSearchFilter('')} aria-label={t('common:common.clearSearch', 'Clear search')} className="text-muted-foreground hover:text-foreground">
                 <X className="w-3 h-3" />
               </button>
             )}
@@ -520,8 +523,7 @@ export function ClusterLocations({ config: _config }: ClusterLocationsProps) {
             className="absolute inset-0 transition-transform duration-100"
             style={{
               transform: `scale(${zoom}) translate(${pan.x / zoom}px, ${pan.y / zoom}px)`,
-              transformOrigin: 'center center',
-            }}
+              transformOrigin: 'center center' }}
           >
             {/* SVG Map Background */}
             <div
@@ -544,8 +546,7 @@ export function ClusterLocations({ config: _config }: ClusterLocationsProps) {
                     className="absolute transform -translate-x-1/2 -translate-y-1/2 z-10"
                     style={{
                       left: `${group.coordinates.x + offsetX}%`,
-                      top: `${group.coordinates.y + offsetY}%`,
-                    }}
+                      top: `${group.coordinates.y + offsetY}%` }}
                     onMouseEnter={() => setHoveredCluster(cluster.name)}
                     onMouseLeave={() => setHoveredCluster(null)}
                   >
@@ -557,8 +558,7 @@ export function ClusterLocations({ config: _config }: ClusterLocationsProps) {
                         width: 24,
                         height: 24,
                         marginLeft: -4,
-                        marginTop: -4,
-                      }}
+                        marginTop: -4 }}
                     />
 
                     {/* Cluster badge */}

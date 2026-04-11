@@ -1,6 +1,16 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect } from 'react'
 import { getDemoMode, isDemoModeForced } from './useDemoMode'
 import { STORAGE_KEY_TOKEN } from '../lib/constants'
+
+/**
+ * Disconnect the presence WebSocket and stop the heartbeat.
+ * MUST be called during logout to prevent stale auth tokens from being
+ * transmitted on a persistent connection after the user signs out (#4936).
+ */
+export function disconnectPresence(): void {
+  stopPresenceConnection()
+  stopHeartbeat()
+}
 
 export interface ActiveUsersInfo {
   activeUsers: number
@@ -30,8 +40,7 @@ function isJsonResponse(resp: Response): boolean {
 // Singleton state to share across all hook instances
 let sharedInfo: ActiveUsersInfo = {
   activeUsers: 0,
-  totalConnections: 0,
-}
+  totalConnections: 0 }
 let pollStarted = false
 let pollInterval: ReturnType<typeof setInterval> | null = null
 let consecutiveFailures = 0
@@ -47,10 +56,32 @@ let presencePingInterval: ReturnType<typeof setInterval> | null = null
 
 // Netlify heartbeat state (serverless mode)
 let heartbeatStarted = false
+let heartbeatTimeoutId: ReturnType<typeof setTimeout> | null = null
 
 // Smoothing for unstable Netlify Blobs counts (eventual consistency causes fluctuations)
 const recentCounts: number[] = []
 const SMOOTHING_WINDOW = 5 // Keep last 5 counts
+
+/**
+ * Reset all singleton state. Exported for tests only — avoids state leaking
+ * between test cases when the module is shared across a test file.
+ * @internal
+ */
+export function __resetForTest(): void {
+  sharedInfo = { activeUsers: 0, totalConnections: 0 }
+  if (pollInterval) { clearInterval(pollInterval); pollInterval = null }
+  pollStarted = false
+  consecutiveFailures = 0
+  hasFetchedOnce = false
+  subscribers.clear()
+  stateSubscribers.clear()
+  if (presencePingInterval) { clearInterval(presencePingInterval); presencePingInterval = null }
+  if (presenceWs) { presenceWs.onclose = null; presenceWs.close(); presenceWs = null }
+  presenceStarted = false
+  if (heartbeatTimeoutId) { clearTimeout(heartbeatTimeoutId); heartbeatTimeoutId = null }
+  heartbeatStarted = false
+  recentCounts.length = 0
+}
 
 // Generate a unique session ID per browser tab (survives page navigation, not tab close)
 function getSessionId(): string {
@@ -73,8 +104,7 @@ async function sendHeartbeat() {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ sessionId: getSessionId() }),
-      signal: AbortSignal.timeout(5000),
-    })
+      signal: AbortSignal.timeout(5000) })
   } catch {
     // Best-effort — don't block on failure
   }
@@ -91,12 +121,35 @@ function startHeartbeat() {
   // Subsequent heartbeats with jitter to spread them out
   function scheduleNextHeartbeat() {
     const jitter = Math.random() * HEARTBEAT_JITTER
-    setTimeout(() => {
+    heartbeatTimeoutId = setTimeout(() => {
       sendHeartbeat()
       scheduleNextHeartbeat()
     }, HEARTBEAT_INTERVAL + jitter)
   }
   scheduleNextHeartbeat()
+}
+
+// Stop heartbeat timer chain
+function stopHeartbeat() {
+  if (heartbeatTimeoutId) {
+    clearTimeout(heartbeatTimeoutId)
+    heartbeatTimeoutId = null
+  }
+  heartbeatStarted = false
+}
+
+// Tear down presence WebSocket connection
+function stopPresenceConnection() {
+  if (presencePingInterval) {
+    clearInterval(presencePingInterval)
+    presencePingInterval = null
+  }
+  if (presenceWs) {
+    presenceWs.onclose = null // Prevent reconnect from onclose handler
+    presenceWs.close()
+    presenceWs = null
+  }
+  presenceStarted = false
 }
 
 // Start WebSocket presence connection (backend mode)
@@ -207,8 +260,7 @@ async function fetchActiveUsers() {
 
     const smoothedData: ActiveUsersInfo = {
       activeUsers: smoothedCount,
-      totalConnections: smoothedCount,
-    }
+      totalConnections: smoothedCount }
 
     const dataChanged = smoothedData.activeUsers !== sharedInfo.activeUsers ||
         smoothedData.totalConnections !== sharedInfo.totalConnections
@@ -306,21 +358,25 @@ export function useActiveUsers() {
       window.removeEventListener('kc-demo-mode-change', handleDemoChange)
       document.removeEventListener('visibilitychange', handleVisibility)
 
-      // Stop polling when no subscribers remain to prevent leaked intervals
-      if (subscribers.size === 0 && pollInterval) {
-        clearInterval(pollInterval)
-        pollInterval = null
-        pollStarted = false
+      // Stop all singleton resources when no subscribers remain
+      if (subscribers.size === 0) {
+        if (pollInterval) {
+          clearInterval(pollInterval)
+          pollInterval = null
+          pollStarted = false
+        }
+        stopHeartbeat()
+        stopPresenceConnection()
       }
     }
   }, [])
 
-  const refetch = useCallback(() => {
+  const refetch = () => {
     // Reset circuit breaker so manual refetch always works
     consecutiveFailures = 0
     if (!pollStarted) startPolling()
     else fetchActiveUsers()
-  }, [])
+  }
 
   // Demo mode: show total connections (sessions). OAuth mode: show unique users.
   const viewerCount = getDemoMode() ? info.totalConnections : info.activeUsers
@@ -331,6 +387,5 @@ export function useActiveUsers() {
     viewerCount,
     isLoading,
     hasError,
-    refetch,
-  }
+    refetch }
 }

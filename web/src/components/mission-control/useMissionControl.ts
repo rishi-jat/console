@@ -5,10 +5,12 @@
  * console-kb project index lookup, and localStorage persistence.
  */
 
-import { useState, useCallback, useEffect, useRef, useMemo } from 'react'
+import { useState, useEffect, useRef, useMemo } from 'react'
 import { useMissions } from '../../hooks/useMissions'
 import { useHelmReleases } from '../../hooks/mcp/helm'
 import { useClusters } from '../../hooks/mcp/clusters'
+import { isDemoMode } from '../../lib/demoMode'
+import { getDemoMissionControlState } from './demoState'
 import type {
   MissionControlState,
   PayloadProject,
@@ -16,8 +18,7 @@ import type {
   DeployPhase,
   WizardPhase,
   OverlayMode,
-  PhaseProgress,
-} from './types'
+  PhaseProgress } from './types'
 
 const STORAGE_KEY = 'kc_mission_control_state'
 // Wizard state expires after 7 days to avoid persisting abandoned mission drafts
@@ -35,19 +36,34 @@ interface PersistedStateEntry {
 function loadPersistedState(): Partial<MissionControlState> | null {
   try {
     const raw = localStorage.getItem(STORAGE_KEY) // TTL validation applied below via WIZARD_STATE_TTL_MS
-    if (!raw) return null
+    if (!raw) {
+      // In demo mode, seed with a pre-populated Mission Control state so
+      // visitors see the full blueprint visualization on console.kubestellar.io
+      if (isDemoMode()) return getDemoMissionControlState()
+      return null
+    }
     const entry = JSON.parse(raw) as PersistedStateEntry | Partial<MissionControlState>
     // Support both new format (with savedAt timestamp) and legacy format (plain state)
     if ('savedAt' in entry && typeof entry.savedAt === 'number') {
       // Check TTL — discard wizard state older than WIZARD_STATE_TTL_MS
       if (Date.now() - entry.savedAt > WIZARD_STATE_TTL_MS) {
         localStorage.removeItem(STORAGE_KEY)
+        if (isDemoMode()) return getDemoMissionControlState()
         return null
       }
-      return entry.state
+      // In demo mode, replace empty/default persisted state with demo data
+      const s = entry.state
+      if (isDemoMode() && (!s?.projects || s.projects.length === 0)) {
+        return getDemoMissionControlState()
+      }
+      return s
     }
     // Legacy format — no expiry info, return as-is
-    return entry as Partial<MissionControlState>
+    const legacy = entry as Partial<MissionControlState>
+    if (isDemoMode() && (!legacy.projects || legacy.projects.length === 0)) {
+      return getDemoMissionControlState()
+    }
+    return legacy
   } catch {
     return null
   }
@@ -81,8 +97,7 @@ function makeInitialState(persisted?: Partial<MissionControlState> | null): Miss
     planningMissionId: persisted?.planningMissionId,
     aiStreaming: false,
     launchProgress: persisted?.launchProgress ?? [],
-    groundControlDashboardId: persisted?.groundControlDashboardId,
-  }
+    groundControlDashboardId: persisted?.groundControlDashboardId }
 }
 
 // ---------------------------------------------------------------------------
@@ -111,16 +126,80 @@ export function extractJSON<T>(text: string, requiredKey?: string): T | null {
   }
   if (candidates.length > 0) return candidates[0]
 
-  // Try raw JSON (starts with { or [)
-  const rawMatch = text.match(/(\{[\s\S]*\}|\[[\s\S]*\])/)
-  if (rawMatch) {
+  // Try raw JSON — find all top-level { ... } or [ ... ] blocks by scanning
+  // for balanced braces, then return the last valid (and largest) parse.
+  // This avoids the old greedy regex which grabbed from the first { to the
+  // last } and failed when prose contained intermediate braces.  (#5505)
+  const blocks = extractBalancedBlocks(text)
+  let best: T | null = null
+  let bestLen = 0
+  for (const block of blocks) {
     try {
-      return JSON.parse(rawMatch[1]) as T
+      const parsed = JSON.parse(block) as T
+      if (requiredKey && typeof parsed === 'object' && parsed !== null && requiredKey in parsed) {
+        return parsed
+      }
+      if (block.length > bestLen) {
+        best = parsed
+        bestLen = block.length
+      }
     } catch {
-      // fall through
+      // skip unparseable blocks
     }
   }
-  return null
+  return best
+}
+
+/**
+ * Scan `text` for top-level balanced `{ ... }` and `[ ... ]` blocks.
+ * Returns them in order of appearance.  Handles nested braces correctly so
+ * `{ "a": { "b": 1 } }` is returned as one block, not two.
+ */
+function extractBalancedBlocks(text: string): string[] {
+  const results: string[] = []
+  const openers = new Set(['{', '['])
+  const closerFor: Record<string, string> = { '{': '}', '[': ']' }
+
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]
+    if (!openers.has(ch)) continue
+
+    const expected = closerFor[ch]
+    let depth = 1
+    let j = i + 1
+    let inString = false
+    let escape = false
+
+    while (j < text.length && depth > 0) {
+      const c = text[j]
+      if (escape) {
+        escape = false
+        j++
+        continue
+      }
+      if (c === '\\' && inString) {
+        escape = true
+        j++
+        continue
+      }
+      if (c === '"') {
+        inString = !inString
+        j++
+        continue
+      }
+      if (!inString) {
+        if (c === ch) depth++
+        else if (c === expected) depth--
+      }
+      j++
+    }
+
+    if (depth === 0) {
+      results.push(text.substring(i, j))
+      i = j - 1 // skip past this block
+    }
+  }
+  return results
 }
 
 // ---------------------------------------------------------------------------
@@ -172,14 +251,11 @@ export function useMissionControl() {
         // Ensure dependencies defaults to []
         const normalized = parsed.projects.map((p) => ({
           ...p,
-          dependencies: p.dependencies ?? [],
-        }))
+          dependencies: p.dependencies ?? [] }))
         lastParsedContentRef.current = latest.content
         setState((prev) => ({
           ...prev,
-          projects: mergeProjects(prev.projects, normalized),
-          aiStreaming: false,
-        }))
+          projects: mergeProjects(prev.projects, normalized) }))
       }
     } else if (state.phase === 'assign') {
       const parsed = extractJSON<{
@@ -198,9 +274,7 @@ export function useMissionControl() {
           return {
             ...prev,
             assignments: [...aiAssignments, ...preserved],
-            phases: parsed.phases ?? prev.phases,
-            aiStreaming: false,
-          }
+            phases: parsed.phases ?? prev.phases }
         })
       }
     }
@@ -213,7 +287,22 @@ export function useMissionControl() {
     if (isStreaming !== state.aiStreaming) {
       setState((prev) => ({ ...prev, aiStreaming: isStreaming }))
     }
-  }, [planningMission?.status])
+  }, [planningMission?.status, state.aiStreaming])
+
+  // Safety-net: clear aiStreaming if no planning mission appears within 30s (#5669).
+  // This handles the case where startMission() was called but no AI provider is configured,
+  // so planningMission never transitions to 'running' and the UI stays stuck.
+  const AI_SUGGEST_TIMEOUT_MS = 30_000
+  useEffect(() => {
+    if (!state.aiStreaming) return
+    const timer = setTimeout(() => {
+      setState((prev) => {
+        if (!prev.aiStreaming) return prev
+        return { ...prev, aiStreaming: false }
+      })
+    }, AI_SUGGEST_TIMEOUT_MS)
+    return () => clearTimeout(timer)
+  }, [state.aiStreaming])
 
   // ---------------------------------------------------------------------------
   // Reconcile assignments when projects change (cascade Phase 1 → 2 → 3)
@@ -233,8 +322,7 @@ export function useMissionControl() {
       // Remove stale project references from assignments
       const reconciled = prev.assignments.map((a) => ({
         ...a,
-        projectNames: a.projectNames.filter((n) => projectNames.has(n)),
-      }))
+        projectNames: a.projectNames.filter((n) => projectNames.has(n)) }))
 
       // Add newly-added projects to the first cluster that has assignments
       // (so the user can see and re-assign them on Chart Course)
@@ -243,8 +331,7 @@ export function useMissionControl() {
       if (newProjects.length > 0 && reconciled.length > 0) {
         reconciled[0] = {
           ...reconciled[0],
-          projectNames: [...reconciled[0].projectNames, ...newProjects],
-        }
+          projectNames: [...reconciled[0].projectNames, ...newProjects] }
       }
 
       // Keep all cluster assignments (even empty) so clusters persist in Flight Plan
@@ -253,8 +340,7 @@ export function useMissionControl() {
       return {
         ...prev,
         assignments: reconciled,
-        phases: [],
-      }
+        phases: [] }
     })
   }, [state.projects])
 
@@ -262,17 +348,17 @@ export function useMissionControl() {
   // Phase 1: Define Solution
   // ---------------------------------------------------------------------------
 
-  const setDescription = useCallback((description: string) => {
+  const setDescription = (description: string) => {
     setState((prev) => ({ ...prev, description }))
-  }, [])
+  }
 
-  const setTitle = useCallback((title: string) => {
+  const setTitle = (title: string) => {
     setState((prev) => ({ ...prev, title }))
-  }, [])
+  }
 
-  const setTargetClusters = useCallback((targetClusters: string[]) => {
+  const setTargetClusters = (targetClusters: string[]) => {
     setState((prev) => ({ ...prev, targetClusters }))
-  }, [])
+  }
 
   // Use refs for the latest state to avoid stale closures in askAIForSuggestions.
   // Without this, the first click on "Suggest" can be a no-op because the callback
@@ -282,8 +368,7 @@ export function useMissionControl() {
   useEffect(() => { stateRef.current = state }, [state])
   useEffect(() => { helmReleasesRef.current = helmReleases }, [helmReleases])
 
-  const askAIForSuggestions = useCallback(
-    (description: string, existingProjects: PayloadProject[] = []) => {
+  const askAIForSuggestions = (description: string, existingProjects: PayloadProject[] = []) => {
       const currentState = stateRef.current
       const currentHelmReleases = helmReleasesRef.current
       let missionId = currentState.planningMissionId
@@ -350,49 +435,38 @@ Include real CNCF projects only. Consider dependencies between projects.`
           title: 'Mission Control Planning',
           description: 'AI-assisted fix planning',
           type: 'custom',
-          initialPrompt: prompt,
-        })
+          initialPrompt: prompt })
         setState((prev) => ({
           ...prev,
           planningMissionId: missionId,
-          aiStreaming: true,
-        }))
+          aiStreaming: true }))
       } else {
         sendMessage(missionId, prompt)
         setState((prev) => ({ ...prev, aiStreaming: true }))
       }
-    },
-    [startMission, sendMessage]
-  )
+    }
 
-  const addProject = useCallback((project: PayloadProject) => {
+  const addProject = (project: PayloadProject) => {
     setState((prev) => ({
       ...prev,
       projects: prev.projects.some((p) => p.name === project.name)
         ? prev.projects
-        : [...prev.projects, project],
-    }))
-  }, [])
+        : [...prev.projects, project] }))
+  }
 
-  const removeProject = useCallback((name: string) => {
+  const removeProject = (name: string) => {
     setState((prev) => ({
       ...prev,
-      projects: prev.projects.filter((p) => p.name !== name),
-    }))
-  }, [])
+      projects: prev.projects.filter((p) => p.name !== name) }))
+  }
 
-  const updateProjectPriority = useCallback(
-    (name: string, priority: PayloadProject['priority']) => {
+  const updateProjectPriority = (name: string, priority: PayloadProject['priority']) => {
       setState((prev) => ({
         ...prev,
-        projects: prev.projects.map((p) => (p.name === name ? { ...p, priority } : p)),
-      }))
-    },
-    []
-  )
+        projects: prev.projects.map((p) => (p.name === name ? { ...p, priority } : p)) }))
+    }
 
-  const replaceProject = useCallback(
-    (oldName: string, newProject: PayloadProject) => {
+  const replaceProject = (oldName: string, newProject: PayloadProject) => {
       setState((prev) => {
         // Preserve the original AI-suggested name for swap tracking
         const existing = prev.projects.find((p) => p.name === oldName)
@@ -407,21 +481,16 @@ Include real CNCF projects only. Consider dependencies between projects.`
           // Also update assignments to swap the project name
           assignments: prev.assignments.map((a) => ({
             ...a,
-            projectNames: a.projectNames.map((n) => (n === oldName ? newProject.name : n)),
-          })),
-        }
+            projectNames: a.projectNames.map((n) => (n === oldName ? newProject.name : n)) })) }
       })
-    },
-    []
-  )
+    }
 
   // ---------------------------------------------------------------------------
   // Phase 2: Assign Clusters
   // ---------------------------------------------------------------------------
 
-  const askAIForAssignments = useCallback(
-    (projects: PayloadProject[], clustersJson: string) => {
-      if (!state.planningMissionId) return
+  const askAIForAssignments = (projects: PayloadProject[], clustersJson: string) => {
+      let missionId = stateRef.current.planningMissionId
 
       const prompt = `The user selected these projects for deployment:
 ${JSON.stringify(projects.map((p) => ({ name: p.name, displayName: p.displayName, category: p.category, dependencies: p.dependencies, priority: p.priority })), null, 2)}
@@ -472,15 +541,26 @@ Return a JSON block:
 
 Order phases by dependency — prerequisites first. Each phase completes before the next starts.`
 
-      sendMessage(state.planningMissionId, prompt)
-      setState((prev) => ({ ...prev, aiStreaming: true }))
-    },
-    [state.planningMissionId, sendMessage]
-  )
+      // If no planning mission exists (user went manual on Phase 1), start one
+      // so the AI assign button is not silently a no-op (#5502)
+      if (!missionId) {
+        missionId = startMission({
+          title: 'Mission Control Planning',
+          description: 'AI-assisted cluster assignment',
+          type: 'custom',
+          initialPrompt: prompt })
+        setState((prev) => ({
+          ...prev,
+          planningMissionId: missionId,
+          aiStreaming: true }))
+      } else {
+        sendMessage(missionId, prompt)
+        setState((prev) => ({ ...prev, aiStreaming: true }))
+      }
+    }
 
   /** Move a project from one cluster to another (for drag-and-drop in blueprint) */
-  const moveProjectToCluster = useCallback(
-    (projectName: string, fromCluster: string, toCluster: string) => {
+  const moveProjectToCluster = (projectName: string, fromCluster: string, toCluster: string) => {
       if (fromCluster === toCluster) return
       setState((prev) => ({
         ...prev,
@@ -494,14 +574,10 @@ Order phases by dependency — prerequisites first. Each phase completes before 
               : [...a.projectNames, projectName] }
           }
           return a
-        }),
-      }))
-    },
-    []
-  )
+        }) }))
+    }
 
-  const setAssignment = useCallback(
-    (clusterName: string, projectName: string, assigned: boolean) => {
+  const setAssignment = (clusterName: string, projectName: string, assigned: boolean) => {
       setState((prev) => {
         const assignments = [...prev.assignments]
         const idx = assignments.findIndex((a) => a.clusterName === clusterName)
@@ -510,9 +586,11 @@ Order phases by dependency — prerequisites first. Each phase completes before 
           assignments[idx] = {
             ...existing,
             projectNames: assigned
-              ? [...existing.projectNames, projectName]
-              : existing.projectNames.filter((n) => n !== projectName),
-          }
+              // Deduplicate: only add if not already present (#5503)
+              ? existing.projectNames.includes(projectName)
+                ? existing.projectNames
+                : [...existing.projectNames, projectName]
+              : existing.projectNames.filter((n) => n !== projectName) }
         } else if (assigned) {
           assignments.push({
             clusterName,
@@ -524,57 +602,53 @@ Order phases by dependency — prerequisites first. Each phase completes before 
               cpuHeadroomPercent: 50,
               memHeadroomPercent: 50,
               storageHeadroomPercent: 50,
-              overallScore: 50,
-            },
-          })
+              overallScore: 50 } })
         }
         return { ...prev, assignments }
       })
-    },
-    []
-  )
+    }
 
   // ---------------------------------------------------------------------------
   // Phase navigation
   // ---------------------------------------------------------------------------
 
-  const setPhase = useCallback((phase: WizardPhase) => {
+  const setPhase = (phase: WizardPhase) => {
     setState((prev) => ({ ...prev, phase }))
-  }, [])
+  }
 
-  const setOverlay = useCallback((overlay: OverlayMode) => {
+  const setOverlay = (overlay: OverlayMode) => {
     setState((prev) => ({ ...prev, overlay }))
-  }, [])
+  }
 
-  const setDeployMode = useCallback((deployMode: 'phased' | 'yolo') => {
+  const setDeployMode = (deployMode: 'phased' | 'yolo') => {
     setState((prev) => ({ ...prev, deployMode }))
-  }, [])
+  }
 
-  const setDryRun = useCallback((isDryRun: boolean) => {
+  const setDryRun = (isDryRun: boolean) => {
     setState((prev) => ({ ...prev, isDryRun }))
-  }, [])
+  }
 
   // ---------------------------------------------------------------------------
   // Launch
   // ---------------------------------------------------------------------------
 
-  const updateLaunchProgress = useCallback((progress: PhaseProgress[]) => {
+  const updateLaunchProgress = (progress: PhaseProgress[]) => {
     setState((prev) => ({ ...prev, launchProgress: progress }))
-  }, [])
+  }
 
-  const setGroundControlDashboardId = useCallback((id: string) => {
+  const setGroundControlDashboardId = (id: string) => {
     setState((prev) => ({ ...prev, groundControlDashboardId: id }))
-  }, [])
+  }
 
   // ---------------------------------------------------------------------------
   // Reset
   // ---------------------------------------------------------------------------
 
-  const reset = useCallback(() => {
+  const reset = () => {
     localStorage.removeItem(STORAGE_KEY)
     lastParsedContentRef.current = ''
     setState(makeInitialState())
-  }, [])
+  }
 
   // Detect installed projects via helm releases + cluster namespaces
   const { installedProjects, installedOnCluster } = useMemo(() => {
@@ -589,8 +663,7 @@ Order phases by dependency — prerequisites first. Each phase completes before 
       logging: ['fluent-bit', 'fluentd', 'loki', 'fluentbit'],
       security: ['falco', 'kyverno', 'opa', 'trivy'],
       ingress: ['nginx', 'traefik', 'haproxy', 'ingress-nginx'],
-      'gatekeeper-system': ['opa', 'open-policy-agent', 'opa-gatekeeper'],
-    }
+      'gatekeeper-system': ['opa', 'open-policy-agent', 'opa-gatekeeper'] }
 
     // Build per-cluster name sets from helm releases
     const clusterNames = new Map<string, Set<string>>()
@@ -619,9 +692,7 @@ Order phases by dependency — prerequisites first. Each phase completes before 
     for (const project of state.projects) {
       const pName = project.name.toLowerCase()
       for (const [clusterName, names] of clusterNames) {
-        const found = Array.from(names).some(n =>
-          n === pName || n.includes(pName) || pName.includes(n)
-        )
+        const found = names.has(pName)
         if (found) {
           installed.add(project.name)
           if (!perCluster.has(project.name)) perCluster.set(project.name, new Set())
@@ -629,15 +700,30 @@ Order phases by dependency — prerequisites first. Each phase completes before 
         }
       }
     }
+    // In demo mode, seed some projects as already installed to show the
+    // mixed installed/new-deploy visual in the Flight Plan blueprint
+    if (isDemoMode() && installed.size === 0 && state.projects.length > 0) {
+      // Prometheus and cert-manager are "already installed" on the first cluster
+      for (const name of ['prometheus', 'cert-manager']) {
+        if (state.projects.some(p => p.name === name)) {
+          installed.add(name)
+          const firstCluster = state.assignments[0]?.clusterName
+          if (firstCluster) {
+            if (!perCluster.has(name)) perCluster.set(name, new Set())
+            perCluster.get(name)!.add(firstCluster)
+          }
+        }
+      }
+    }
+
     return { installedProjects: installed, installedOnCluster: perCluster }
-  }, [helmReleases, clusters, state.projects])
+  }, [helmReleases, clusters, state.projects, state.assignments])
 
   // ---------------------------------------------------------------------------
   // Auto-assign: deterministic local algorithm (no AI)
   // ---------------------------------------------------------------------------
 
-  const autoAssignProjects = useCallback(
-    (availableClusters: Array<{ name: string; context?: string; distribution?: string; cpuCores?: number; memoryGB?: number; storageGB?: number; cpuUsageCores?: number; cpuRequestsCores?: number; memoryUsageGB?: number; memoryRequestsGB?: number }>) => {
+  const autoAssignProjects = (availableClusters: Array<{ name: string; context?: string; distribution?: string; cpuCores?: number; memoryGB?: number; storageGB?: number; cpuUsageCores?: number; cpuRequestsCores?: number; memoryUsageGB?: number; memoryRequestsGB?: number }>) => {
       if (availableClusters.length === 0 || state.projects.length === 0) return
 
       // Category groups — projects in the same group have affinity
@@ -654,8 +740,7 @@ Order phases by dependency — prerequisites first. Each phase completes before 
         'Service Mesh': 'networking',
         Ingress: 'networking',
         Storage: 'storage',
-        'Backup & Recovery': 'storage',
-      }
+        'Backup & Recovery': 'storage' }
 
       // Score each cluster for resource headroom (0-100)
       const clusterScores = new Map<string, number>()
@@ -751,15 +836,11 @@ Order phases by dependency — prerequisites first. Each phase completes before 
               cpuHeadroomPercent: Math.round(clusterScores.get(c.name) ?? 50),
               memHeadroomPercent: Math.round(clusterScores.get(c.name) ?? 50),
               storageHeadroomPercent: 50,
-              overallScore: Math.round(clusterScores.get(c.name) ?? 50),
-            },
-          }
+              overallScore: Math.round(clusterScores.get(c.name) ?? 50) } }
         })
         return { ...prev, assignments }
       })
-    },
-    [state.projects, installedOnCluster]
-  )
+    }
 
   return {
     state,
@@ -790,8 +871,7 @@ Order phases by dependency — prerequisites first. Each phase completes before 
     // Planning mission
     planningMission,
     // Reset
-    reset,
-  }
+    reset }
 }
 
 // ---------------------------------------------------------------------------

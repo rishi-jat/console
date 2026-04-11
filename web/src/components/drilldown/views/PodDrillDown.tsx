@@ -18,10 +18,10 @@ import {
   PodRelatedTab,
   PodOutputTab,
   PodAiAnalysis,
-  PodDeleteSection,
-} from './pod-drilldown'
+  PodDeleteSection } from './pod-drilldown'
 import type { TabType, RelatedResource, CachedData } from './pod-drilldown'
 import { copyToClipboard } from '../../../lib/clipboard'
+import { useToast } from '../../ui/Toast'
 
 /** Keys that must never be used as object property names (prototype pollution prevention). */
 const UNSAFE_KEYS = new Set(['__proto__', 'constructor', 'prototype'])
@@ -61,8 +61,7 @@ export function PodDrillDown({ data }: { data: Record<string, unknown> }) {
   // Update cache metadata
   setPodCache(cluster, namespace, podName, {
     lastOpened: now,
-    openCount: (persistentCache?.openCount || 0) + 1,
-  })
+    openCount: (persistentCache?.openCount || 0) + 1 })
 
   // Clean up old cache entries periodically
   cleanupPodCache()
@@ -80,6 +79,9 @@ export function PodDrillDown({ data }: { data: Record<string, unknown> }) {
   const [podStatusLoading, setPodStatusLoading] = useState(false)
   const [aiAnalysis, setAiAnalysis] = useState<string | null>(cache.aiAnalysis || null)
   const [aiAnalysisLoading, setAiAnalysisLoading] = useState(false)
+  // #5945 — Track AI analysis errors so failures are surfaced in the UI instead of silently swallowed
+  const [aiAnalysisError, setAiAnalysisError] = useState<string | null>(null)
+  const { showToast } = useToast()
   const [labels, setLabels] = useState<Record<string, string> | null>(cache.labels || null)
   const [annotations, setAnnotations] = useState<Record<string, string> | null>(cache.annotations || null)
   const [showAllLabels, setShowAllLabels] = useState(false)
@@ -116,7 +118,7 @@ export function PodDrillDown({ data }: { data: Record<string, unknown> }) {
   const status = data.status as string
   const restarts = (data.restarts as number) || 0
   const reason = data.reason as string
-  const passedIssues = useMemo(() => (data.issues as string[]) || [], [data.issues])
+  const passedIssues = (data.issues as string[]) || []
   const passedLabels = data.labels as Record<string, string> | undefined
   const passedAnnotations = data.annotations as Record<string, string> | undefined
 
@@ -325,6 +327,9 @@ export function PodDrillDown({ data }: { data: Record<string, unknown> }) {
   const fetchAiAnalysis = async () => {
     if (!agentConnected || aiAnalysisLoading) return
     setAiAnalysisLoading(true)
+    // #5945 — Clear any previous error when starting a new analysis so stale
+    // failures don't linger in the UI while the new request is in flight.
+    setAiAnalysisError(null)
 
     try {
       // Helper to run a kubectl command and get output
@@ -490,27 +495,50 @@ Be specific and reference actual values from the data. Keep response to 3-4 sent
           const msg = JSON.parse(event.data)
           if (msg.id === requestId) {
             if (msg.payload?.content) {
+              // #5945 — Success path: clear any lingering error state
               setAiAnalysis(msg.payload.content)
+              setAiAnalysisError(null)
             } else if (msg.payload?.error || msg.payload?.message) {
-              setAiAnalysis(`Analysis unavailable: ${msg.payload.error || msg.payload.message}`)
+              // #5945 — Surface backend error via dedicated error state + toast
+              // so the user sees a clear failure instead of a silent no-op.
+              const errMsg = `Analysis unavailable: ${msg.payload.error || msg.payload.message}`
+              setAiAnalysisError(errMsg)
+              setAiAnalysis(null)
+              showToast(errMsg, 'error')
             } else {
               setAiAnalysis('Analysis complete - no specific issues identified.')
+              setAiAnalysisError(null)
             }
           }
         } catch {
-          // Ignore malformed WebSocket messages
+          // #5945 — Even malformed WebSocket messages must be reported as a
+          // failure so the user knows the analysis did not complete.
+          const errMsg = 'AI analysis failed: received an invalid response from the agent.'
+          setAiAnalysisError(errMsg)
+          showToast(errMsg, 'error')
         }
         ws.close()
         setAiAnalysisLoading(false)
       }
 
       ws.onerror = () => {
-        setAiAnalysis('Could not connect to AI analysis service.')
+        // #5945 — Previously this only set aiAnalysis to a plain string which
+        // made the error look like a successful result. Now we route it to
+        // the error state and also show a toast so the failure is visible.
+        const errMsg = 'Could not connect to AI analysis service. Please check that the agent is running and try again.'
+        setAiAnalysisError(errMsg)
+        setAiAnalysis(null)
+        showToast(errMsg, 'error')
         setAiAnalysisLoading(false)
         ws.close()
       }
     } catch (err) {
-      setAiAnalysis(`Failed to perform AI analysis: ${err}`)
+      // #5945 — Unexpected errors (kubectl failures, network issues, etc.)
+      // must also be surfaced so the failure is not silent.
+      const errMsg = `Failed to perform AI analysis: ${err instanceof Error ? err.message : String(err)}`
+      setAiAnalysisError(errMsg)
+      setAiAnalysis(null)
+      showToast(errMsg, 'error')
       setAiAnalysisLoading(false)
     }
   }
@@ -643,8 +671,7 @@ Be specific and reference actual values from the data. Keep response to 3-4 sent
       pvcs: pvcs.length > 0 ? pvcs : undefined,
       serviceAccount: serviceAccount || undefined,
       ownerChain: ownerChain.length > 0 ? ownerChain : undefined,
-      fetchedAt: Date.now(),
-    })
+      fetchedAt: Date.now() })
   }, [cluster, namespace, podName, describeOutput, logsOutput, eventsOutput, yamlOutput, podStatusOutput, aiAnalysis, labels, annotations, configMaps, secrets, pvcs, serviceAccount, ownerChain])
 
   const handleRepairPod = () => {
@@ -674,9 +701,7 @@ Please proceed step by step and ask for confirmation before making any changes.`
         cluster,
         status,
         restarts,
-        issues,
-      },
-    })
+        issues } })
   }
 
   // Check if user can delete pods in this namespace
@@ -686,8 +711,7 @@ Please proceed step by step and ask for confirmation before making any changes.`
         cluster,
         verb: 'delete',
         resource: 'pods',
-        namespace,
-      })
+        namespace })
       setCanDeletePod(result.allowed)
     } catch {
       setCanDeletePod(false)
@@ -1530,6 +1554,7 @@ Please proceed step by step and ask for confirmation before making any changes.`
           <PodAiAnalysis
             aiAnalysis={aiAnalysis}
             aiAnalysisLoading={aiAnalysisLoading}
+            aiAnalysisError={aiAnalysisError}
             fetchAiAnalysis={fetchAiAnalysis}
             handleRepairPod={handleRepairPod}
           />

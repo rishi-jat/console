@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { AlertTriangle, RefreshCw } from 'lucide-react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { useTranslation } from 'react-i18next'
@@ -46,8 +46,7 @@ const RISK_STYLES: Record<RiskLevel, RiskStyle> = {
   critical: { bg: 'bg-red-500/10', text: 'text-red-400' },
   high: { bg: 'bg-orange-500/10', text: 'text-orange-400' },
   medium: { bg: 'bg-yellow-500/10', text: 'text-yellow-400' },
-  low: { bg: 'bg-blue-500/10', text: 'text-blue-400' },
-}
+  low: { bg: 'bg-blue-500/10', text: 'text-blue-400' } }
 
 /** Ordered list of risk levels from most to least severe */
 const RISK_LEVELS: readonly RiskLevel[] = ['critical', 'high', 'medium', 'low'] as const
@@ -59,16 +58,17 @@ const RISK_LEVELS: readonly RiskLevel[] = ['critical', 'high', 'medium', 'low'] 
 export function RBACExplorer() {
   const { t } = useTranslation(['common', 'cards'])
   // ---- Live data via hook -------------------------------------------------
-  const { findings, isLoading, error, isDemoData, refetch } = useRBACFindings()
+  const { findings, isLoading, isRefreshing, consecutiveFailures, error, isDemoData, refetch } = useRBACFindings()
 
   // ---- Loading / error state reporting ------------------------------------
   const { showSkeleton, showEmptyState } = useCardLoadingState({
     isLoading,
+    isRefreshing,
+    consecutiveFailures,
     hasAnyData: (findings || []).length > 0,
     isDemoData,
     isFailed: !!error,
-    errorMessage: error || undefined,
-  })
+    errorMessage: error || undefined })
 
   // ---- Local UI state -----------------------------------------------------
   const [riskFilter, setRiskFilter] = useState<RiskLevel | null>(null)
@@ -77,7 +77,7 @@ export function RBACExplorer() {
   const [itemsPerPage] = useState(DEFAULT_PAGE_SIZE)
 
   // ---- Filtering ----------------------------------------------------------
-  const filtered = useMemo(() => {
+  const filtered = (() => {
     let result = findings || []
 
     // Risk filter
@@ -98,16 +98,16 @@ export function RBACExplorer() {
     }
 
     return result
-  }, [findings, riskFilter, search])
+  })()
 
   // ---- Risk counts (from unfiltered findings for the chips) ---------------
-  const riskCounts = useMemo(() => {
+  const riskCounts = (() => {
     const counts: Record<RiskLevel, number> = { critical: 0, high: 0, medium: 0, low: 0 }
     for (const f of (findings || [])) {
       counts[f.risk]++
     }
     return counts
-  }, [findings])
+  })()
 
   // ---- Pagination ---------------------------------------------------------
   const totalItems = filtered.length
@@ -121,10 +121,10 @@ export function RBACExplorer() {
 
   const safeCurrentPage = Math.min(currentPage, totalPages)
 
-  const paginatedItems = useMemo(() => {
+  const paginatedItems = (() => {
     const start = (safeCurrentPage - 1) * itemsPerPage
     return filtered.slice(start, start + itemsPerPage)
-  }, [filtered, safeCurrentPage, itemsPerPage])
+  })()
 
   // ---- Virtualization -----------------------------------------------------
   const scrollContainerRef = useRef<HTMLDivElement>(null)
@@ -133,8 +133,7 @@ export function RBACExplorer() {
     count: paginatedItems.length,
     getScrollElement: () => scrollContainerRef.current,
     estimateSize: () => FINDING_ROW_HEIGHT_PX,
-    overscan: VIRTUALIZER_OVERSCAN_COUNT,
-  })
+    overscan: VIRTUALIZER_OVERSCAN_COUNT })
 
   // ---- Loading state (skeleton) -------------------------------------------
   if (showSkeleton) {
@@ -224,8 +223,7 @@ export function RBACExplorer() {
             style={{
               height: `${virtualizer.getTotalSize()}px`,
               width: '100%',
-              position: 'relative',
-            }}
+              position: 'relative' }}
           >
             {virtualizer.getVirtualItems().map(virtualRow => {
               const finding = paginatedItems[virtualRow.index]
@@ -241,8 +239,7 @@ export function RBACExplorer() {
                     top: 0,
                     left: 0,
                     width: '100%',
-                    transform: `translateY(${virtualRow.start}px)`,
-                  }}
+                    transform: `translateY(${virtualRow.start}px)` }}
                 >
                   <div className={`px-2 py-1.5 mb-1 rounded-lg ${style.bg} border border-transparent hover:border-current/20 transition-colors`}>
                     <div className="flex items-center justify-between gap-2">

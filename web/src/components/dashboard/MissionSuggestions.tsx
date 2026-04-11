@@ -28,15 +28,13 @@ const MISSION_ICONS: Record<MissionType, typeof Zap> = {
   unavailable: AlertTriangle,
   security: Shield,
   health: Server,
-  resource: Activity,
-}
+  resource: Activity }
 
 /** Neutral card-gray styling for all priority levels */
 const CHIP_STYLE = {
   bg: 'bg-secondary/50',
   border: 'border-border/50',
-  text: 'text-foreground',
-}
+  text: 'text-foreground' }
 
 export function MissionSuggestions() {
   const { t } = useTranslation()
@@ -51,6 +49,12 @@ export function MissionSuggestions() {
   const [countdown, setCountdown] = useState(AUTO_COLLAPSE_SECONDS)
   const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const analyticsEmittedRef = useRef(false)
+  // Refs to each chip trigger button, keyed by suggestion id.
+  // Used so the outside-click listener can ignore clicks on the trigger itself
+  // (the trigger's own onClick handles toggling). Without this, clicking the
+  // chevron to close races the listener, which sets expandedId=null first,
+  // then the onClick sees isExpanded=false and reopens the dropdown (#6050).
+  const triggerRefs = useRef<Map<string, HTMLButtonElement | null>>(new Map())
 
   // Check agent status for offline skeleton display
   const { status: agentStatus } = useLocalAgent()
@@ -95,16 +99,16 @@ export function MissionSuggestions() {
   }, [minimized, hasSuggestions, startCountdown])
 
   // Pause countdown on hover, resume on leave
-  const handleMouseEnter = useCallback(() => {
+  const handleMouseEnter = () => {
     if (countdownRef.current) {
       clearInterval(countdownRef.current)
       countdownRef.current = null
     }
-  }, [])
+  }
 
-  const handleMouseLeave = useCallback(() => {
+  const handleMouseLeave = () => {
     if (!minimized) startCountdown()
-  }, [minimized, startCountdown])
+  }
 
   // Emit analytics once when panel first renders with suggestions
   useEffect(() => {
@@ -121,6 +125,11 @@ export function MissionSuggestions() {
     const handleClickOutside = (e: MouseEvent) => {
       // Use the currently expanded ID to find the correct dropdown element
       const activeDropdown = document.getElementById(`mission-dropdown-${expandedId}`)
+      // Ignore clicks on the trigger button itself — its onClick handles
+      // toggling. Otherwise, clicking the chevron to close races this
+      // listener and the dropdown reopens (#6050).
+      const activeTrigger = triggerRefs.current.get(expandedId)
+      if (activeTrigger && activeTrigger.contains(e.target as Node)) return
       if (activeDropdown && !activeDropdown.contains(e.target as Node)) {
         setExpandedId(null)
       }
@@ -132,13 +141,16 @@ export function MissionSuggestions() {
       }
     }
 
-    // Use setTimeout to avoid closing immediately when clicking to open
-    setTimeout(() => {
+    // Use setTimeout to avoid closing immediately when clicking to open.
+    // Store the timer ID so we can cancel it if the effect re-runs or unmounts
+    // before the callback fires — otherwise listeners attach after cleanup (#4660).
+    const timerId = setTimeout(() => {
       document.addEventListener('mousedown', handleClickOutside)
       document.addEventListener('keydown', handleEscape)
     }, 0)
 
     return () => {
+      clearTimeout(timerId)
       document.removeEventListener('mousedown', handleClickOutside)
       document.removeEventListener('keydown', handleEscape)
     }
@@ -167,8 +179,7 @@ export function MissionSuggestions() {
           description: suggestion.description,
           type: suggestion.type === 'security' ? 'analyze' : 'troubleshoot',
           initialPrompt: suggestion.action.target,
-          context: suggestion.context,
-        })
+          context: suggestion.context })
       }
     }, 0)
   }
@@ -193,8 +204,7 @@ export function MissionSuggestions() {
         description: t('dashboard.missions.autoRepairPrefix', { description: suggestion.description }),
         type: 'repair',
         initialPrompt: t('dashboard.missions.repairPrompt', { target: suggestion.action.target }),
-        context: suggestion.context,
-      })
+        context: suggestion.context })
     }, 0)
   }
 
@@ -250,6 +260,10 @@ export function MissionSuggestions() {
             return (
               <div key={suggestion.id} className="relative">
                 <button
+                  ref={(el) => {
+                    if (el) triggerRefs.current.set(suggestion.id, el)
+                    else triggerRefs.current.delete(suggestion.id)
+                  }}
                   onClick={() => setExpandedId(isExpanded ? null : suggestion.id)}
                   aria-expanded={isExpanded}
                   aria-haspopup="menu"
@@ -265,7 +279,7 @@ export function MissionSuggestions() {
                   <div
                     id={`mission-dropdown-${suggestion.id}`}
                     role="menu"
-                    className="absolute top-full left-0 mt-1 z-50 w-72 rounded-lg border border-border/50 bg-card shadow-xl"
+                    className="absolute top-full left-0 mt-1 z-dropdown w-72 rounded-lg border border-border/50 bg-card shadow-xl"
                     style={{ isolation: 'isolate' }}
                     onKeyDown={(e) => {
                       if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return
@@ -405,6 +419,10 @@ export function MissionSuggestions() {
             <div key={suggestion.id} className="relative">
               {/* Compact chip */}
               <button
+                ref={(el) => {
+                  if (el) triggerRefs.current.set(suggestion.id, el)
+                  else triggerRefs.current.delete(suggestion.id)
+                }}
                 onClick={() => setExpandedId(isExpanded ? null : suggestion.id)}
                 className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-xs font-medium transition-all hover:brightness-110 ${CHIP_STYLE.border} ${CHIP_STYLE.bg} ${CHIP_STYLE.text}`}
               >
@@ -419,7 +437,7 @@ export function MissionSuggestions() {
                 <div
                   id={`mission-dropdown-${suggestion.id}`}
                   role="menu"
-                  className="absolute top-full left-0 mt-1 z-50 w-72 rounded-lg border border-border/50 bg-card shadow-xl"
+                  className="absolute top-full left-0 mt-1 z-dropdown w-72 rounded-lg border border-border/50 bg-card shadow-xl"
                   style={{ isolation: 'isolate' }}
                   onKeyDown={(e) => {
                     if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return

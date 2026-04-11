@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useState } from 'react'
 import { GitBranch, AlertTriangle, Plus, Minus, RefreshCw, Loader2, ChevronRight, Server } from 'lucide-react'
 import { GitOpsDrift as GitOpsDriftType } from '../../hooks/useMCP'
 import { useCachedGitOpsDrifts } from '../../hooks/useCachedData'
@@ -9,6 +9,7 @@ import { Pagination } from '../ui/Pagination'
 import { CardClusterFilter, CardSearchInput } from '../../lib/cards/CardComponents'
 import { useCardData } from '../../lib/cards/cardHooks'
 import { StatusBadge } from '../ui/StatusBadge'
+import { RefreshIndicator } from '../ui/RefreshIndicator'
 import { useCardLoadingState } from './CardDataContext'
 import { GitOpsDriftDetailModal } from './deploy/GitOpsDriftDetailModal'
 import { useTranslation } from 'react-i18next'
@@ -38,34 +39,26 @@ const driftTypeConfig: Record<string, { icon: typeof RefreshCw; color: string; b
     icon: RefreshCw,
     color: 'text-yellow-400',
     bg: 'bg-yellow-500/20',
-    labelKey: 'cards:gitOpsDrift.modified',
-  },
+    labelKey: 'cards:gitOpsDrift.modified' },
   deleted: {
     icon: Minus,
     color: 'text-red-400',
     bg: 'bg-red-500/20',
-    labelKey: 'cards:gitOpsDrift.missingInCluster',
-  },
+    labelKey: 'cards:gitOpsDrift.missingInCluster' },
   added: {
     icon: Plus,
     color: 'text-blue-400',
     bg: 'bg-blue-500/20',
-    labelKey: 'cards:gitOpsDrift.notInGit',
-  },
-}
+    labelKey: 'cards:gitOpsDrift.notInGit' } }
 
 const severityColors = {
   high: 'border-l-red-500',
   medium: 'border-l-orange-500',
-  low: 'border-l-yellow-500',
-}
+  low: 'border-l-yellow-500' }
 
 export function GitOpsDrift({ config }: GitOpsDriftProps) {
   const { t } = useTranslation(['cards', 'common'])
-  const SORT_OPTIONS = useMemo(() =>
-    SORT_OPTIONS_KEYS.map(opt => ({ value: opt.value, label: String(t(opt.labelKey)) })),
-    [t]
-  )
+  const SORT_OPTIONS = SORT_OPTIONS_KEYS.map(opt => ({ value: opt.value, label: String(t(opt.labelKey)) }))
   const [modalDrift, setModalDrift] = useState<GitOpsDriftType | null>(null)
   const cluster = config?.cluster
   const namespace = config?.namespace
@@ -78,7 +71,7 @@ export function GitOpsDrift({ config }: GitOpsDriftProps) {
     isFailed,
     consecutiveFailures,
     isDemoFallback: isDemoData,
-  } = useCachedGitOpsDrifts(cluster, namespace)
+    lastRefresh: driftLastRefresh } = useCachedGitOpsDrifts(cluster, namespace)
   const { selectedSeverities, isAllSeveritiesSelected, customFilter } = useGlobalFilters()
 
   // Report loading state to CardWrapper for skeleton/refresh behavior
@@ -89,8 +82,7 @@ export function GitOpsDrift({ config }: GitOpsDriftProps) {
     hasAnyData: hasData,
     isFailed,
     consecutiveFailures,
-    isDemoData,
-  })
+    isDemoData })
 
   // Map drift severity to global SeverityLevel
   const mapDriftSeverityToGlobal = (severity: 'high' | 'medium' | 'low'): SeverityLevel[] => {
@@ -103,7 +95,7 @@ export function GitOpsDrift({ config }: GitOpsDriftProps) {
   }
 
   // Pre-filter by severity and global custom filter (outside useCardData)
-  const severityFilteredDrifts = useMemo(() => {
+  const severityFilteredDrifts = (() => {
     let result = drifts
 
     // Apply global severity filter
@@ -118,15 +110,15 @@ export function GitOpsDrift({ config }: GitOpsDriftProps) {
     if (customFilter.trim()) {
       const query = customFilter.toLowerCase()
       result = result.filter(d =>
-        d.resource.toLowerCase().includes(query) ||
-        d.kind.toLowerCase().includes(query) ||
-        d.cluster.toLowerCase().includes(query) ||
-        d.namespace.toLowerCase().includes(query)
+        (d.resource || '').toLowerCase().includes(query) ||
+        (d.kind || '').toLowerCase().includes(query) ||
+        (d.cluster || '').toLowerCase().includes(query) ||
+        (d.namespace || '').toLowerCase().includes(query)
       )
     }
 
     return result
-  }, [drifts, selectedSeverities, isAllSeveritiesSelected, customFilter])
+  })()
 
   // Use shared card data hook for filtering, sorting, and pagination
   const {
@@ -147,35 +139,27 @@ export function GitOpsDrift({ config }: GitOpsDriftProps) {
       availableClusters: availableClustersForFilter,
       showClusterFilter,
       setShowClusterFilter,
-      clusterFilterRef,
-
-    },
+      clusterFilterRef },
     sorting: {
       sortBy,
       setSortBy,
       sortDirection,
-      setSortDirection,
-    },
+      setSortDirection },
     containerRef,
-    containerStyle,
-  } = useCardData<GitOpsDriftType, SortByOption>(severityFilteredDrifts, {
+    containerStyle } = useCardData<GitOpsDriftType, SortByOption>(severityFilteredDrifts, {
     filter: {
       searchFields: ['resource', 'kind', 'cluster', 'namespace'],
       clusterField: 'cluster',
-      storageKey: 'gitops-drift',
-    },
+      storageKey: 'gitops-drift' },
     sort: {
       defaultField: 'severity',
       defaultDirection: 'asc',
       comparators: {
         severity: (a, b) => SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity],
-        type: (a, b) => a.driftType.localeCompare(b.driftType),
-        resource: (a, b) => a.resource.localeCompare(b.resource),
-        cluster: (a, b) => a.cluster.localeCompare(b.cluster),
-      },
-    },
-    defaultLimit: 5,
-  })
+        type: (a, b) => (a.driftType || '').localeCompare(b.driftType || ''),
+        resource: (a, b) => (a.resource || '').localeCompare(b.resource || ''),
+        cluster: (a, b) => (a.cluster || '').localeCompare(b.cluster || '') } },
+    defaultLimit: 5 })
 
   // Compute stats from the hook's sorted+filtered data (before pagination)
   const filteredDrifts = severityFilteredDrifts
@@ -229,6 +213,17 @@ export function GitOpsDrift({ config }: GitOpsDriftProps) {
               {t('gitOpsDrift.nDrifts', { count: totalDrifts })}
             </span>
           )}
+          {/* part 4: freshness indicator.
+              followup: hide timestamp in demo mode — `useCachedGitOpsDrifts`
+              can preserve `lastRefresh` from a prior live session, which
+              would show a misleading "Updated X ago" against demo data. */}
+          <RefreshIndicator
+            isRefreshing={isRefreshing}
+            lastUpdated={isDemoData || typeof driftLastRefresh !== 'number' ? null : new Date(driftLastRefresh)}
+            size="sm"
+            showLabel={true}
+            staleThresholdMinutes={5}
+          />
         </div>
         <div className="flex items-center gap-2">
           {/* Cluster Filter */}

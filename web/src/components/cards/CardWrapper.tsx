@@ -1,8 +1,7 @@
-import { ReactNode, useState, useEffect, useCallback, useRef, useMemo, createContext, useContext, ComponentType, Suspense, lazy } from 'react'
+import { ReactNode, useState, useEffect, useCallback, useRef, useMemo, createContext, use, ComponentType, Suspense, lazy } from 'react'
 import { createPortal } from 'react-dom'
 import {
-  Maximize2, MoreVertical, Clock, Settings, Trash2, RefreshCw, MoveHorizontal, ChevronRight, ChevronDown, Info, Download, Link2, Bug, AlertTriangle, Sparkles, X,
-} from 'lucide-react'
+  Maximize2, MoreVertical, Clock, Settings, Trash2, RefreshCw, MoveHorizontal, ChevronRight, ChevronDown, Info, Download, Link2, Bug, AlertTriangle, Sparkles, X } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { CARD_TITLES, CARD_DESCRIPTIONS, DEMO_EXEMPT_CARDS } from './cardMetadata'
 import { CARD_ICONS } from './cardIcons'
@@ -17,6 +16,7 @@ import { isDemoMode as checkIsDemoMode } from '../../lib/demoMode'
 // isInClusterMode removed — cards render immediately without offline skeleton
 import { useIsModeSwitching } from '../../lib/unified/demo'
 import { CardDataReportContext, ForceLiveContext, type CardDataState } from './CardDataContext'
+import { useDashboardContextOptional } from '../../hooks/useDashboardContext'
 import { ChatMessage } from './CardChat'
 import { CardSkeleton, type CardSkeletonProps } from '../../lib/cards/CardComponents'
 import { isCardExportable } from '../../lib/widgets/widgetRegistry'
@@ -26,6 +26,7 @@ import { useLocalAgent } from '../../hooks/useLocalAgent'
 import { CARD_INSTALL_MAP } from '../../lib/cards/cardInstallMap'
 import { loadMissionPrompt } from '../cards/multi-tenancy/missionLoader'
 import { ClusterSelectionDialog } from '../missions/ClusterSelectionDialog'
+import { ConfirmMissionPromptDialog } from '../missions/ConfirmMissionPromptDialog'
 // Lazy-load the widget export modal (~42 KB + code generator ~30 KB) — only when user exports
 const WidgetExportModal = lazy(() =>
   import('../widgets/WidgetExportModal').then(m => ({ default: m.WidgetExportModal }))
@@ -34,13 +35,50 @@ const WidgetExportModal = lazy(() =>
 const FeatureRequestModal = lazy(() =>
   import('../feedback/FeatureRequestModal').then(m => ({ default: m.FeatureRequestModal }))
 )
-import { LOADING_TIMEOUT_MS, SKELETON_DELAY_MS, INITIAL_RENDER_TIMEOUT_MS, TICK_INTERVAL_MS, CARD_LOADING_TIMEOUT_MS } from '../../lib/constants/network'
+import { LOADING_TIMEOUT_MS, SKELETON_DELAY_MS, INITIAL_RENDER_TIMEOUT_MS, TICK_INTERVAL_MS, CARD_LOADING_TIMEOUT_MS, MIN_SKELETON_DISPLAY_MS } from '../../lib/constants/network'
 import { DynamicCardErrorBoundary } from './DynamicCardErrorBoundary'
 import { copyToClipboard } from '../../lib/clipboard'
 
 
 // Minimum duration to show spin animation (ensures at least one full rotation)
 const MIN_SPIN_DURATION = 500
+
+// #6227: shared Escape-key coordinator. Multiple InfoTooltips (one per
+// CardWrapper) used to each register their own document-level keydown
+// listener; pressing Escape would fire ALL of them and close every open
+// tooltip on the dashboard at once. Now each tooltip pushes its close
+// callback onto a shared LIFO stack and only the topmost (most recently
+// opened) callback runs. A single document listener is registered on the
+// first push and removed on the last pop.
+const escapeStack: Array<() => void> = []
+let escapeListenerAttached = false
+function handleGlobalEscape(e: KeyboardEvent) {
+  if (e.key !== 'Escape' || escapeStack.length === 0) return
+  const top = escapeStack[escapeStack.length - 1]
+  // stopImmediatePropagation prevents any other peer keydown listeners
+  // (e.g. DrillDownModal) from firing on the same event when an
+  // InfoTooltip is the topmost element.
+  e.stopImmediatePropagation()
+  top()
+}
+function pushEscapeHandler(close: () => void): () => void {
+  escapeStack.push(close)
+  if (!escapeListenerAttached) {
+    document.addEventListener('keydown', handleGlobalEscape, true)
+    escapeListenerAttached = true
+  }
+  return () => {
+    const idx = escapeStack.lastIndexOf(close)
+    if (idx >= 0) escapeStack.splice(idx, 1)
+    if (escapeStack.length === 0 && escapeListenerAttached) {
+      document.removeEventListener('keydown', handleGlobalEscape, true)
+      escapeListenerAttached = false
+    }
+  }
+}
+
+/** One hour in milliseconds — default snooze duration for card swaps */
+const ONE_HOUR_MS = 60 * 60 * 1000
 
 // Format relative time (e.g., "2m ago", "1h ago")
 function formatTimeAgo(date: Date): string {
@@ -93,7 +131,7 @@ const FULLSCREEN_EXPANDED_CARDS = new Set([
   'flappy_pod', 'kube_pong', 'kube_kong', 'game_2048', 'kube_man',
   'kube_galaga', 'kube_chess', 'checkers', 'pod_crosser', 'pod_brothers',
   'pod_pitfall', 'match_game', 'solitaire', 'kubedle', 'pod_sweeper',
-  'kube_craft', 'kube_doom', 'kube_kart',
+  'kube_doom', 'kube_kart',
 ])
 
 /** Dimensions of the card's content container (updated via ResizeObserver) */
@@ -110,12 +148,11 @@ interface CardExpandedContextType {
 }
 const CardExpandedContext = createContext<CardExpandedContextType>({
   isExpanded: false,
-  containerSize: { width: 0, height: 0 },
-})
+  containerSize: { width: 0, height: 0 } })
 
 /** Hook for child components to know if their parent card is expanded and get container size */
 export function useCardExpanded() {
-  return useContext(CardExpandedContext)
+  return use(CardExpandedContext)
 }
 
 // Context to expose cardType to descendant shared components (CardControls,
@@ -125,7 +162,7 @@ const CardTypeContext = createContext<string>('')
 
 /** Hook for shared UI components to read the cardType of their parent CardWrapper */
 export function useCardType() {
-  return useContext(CardTypeContext)
+  return use(CardTypeContext)
 }
 
 // Note: Lazy mounting and eager mount scheduling have been removed.
@@ -223,7 +260,7 @@ function InfoTooltip({ text }: { text: string }) {
   const [position, setPosition] = useState<{ top: number; left: number } | null>(null)
   const triggerRef = useRef<HTMLButtonElement>(null)
   const tooltipRef = useRef<HTMLDivElement>(null)
-  const tooltipId = useMemo(() => `info-tooltip-${Math.random().toString(36).slice(2, 9)}`, [])
+  const tooltipId = `info-tooltip-${Math.random().toString(36).slice(2, 9)}`
 
   // Update position based on trigger element's current bounding rect
   const updatePosition = useCallback(() => {
@@ -271,6 +308,8 @@ function InfoTooltip({ text }: { text: string }) {
   }, [isVisible, updatePosition])
 
   // Close tooltip when clicking outside or pressing Escape
+  // #6227: Escape is routed through the shared escapeStack so only the
+  // topmost open tooltip closes — used to fire on every mounted tooltip.
   useEffect(() => {
     if (!isVisible) return
 
@@ -281,17 +320,11 @@ function InfoTooltip({ text }: { text: string }) {
       }
     }
 
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        setIsVisible(false)
-      }
-    }
-
     document.addEventListener('mousedown', handleClickOutside)
-    document.addEventListener('keydown', handleKeyDown)
+    const popEscape = pushEscapeHandler(() => setIsVisible(false))
     return () => {
       document.removeEventListener('mousedown', handleClickOutside)
-      document.removeEventListener('keydown', handleKeyDown)
+      popEscape()
     }
   }, [isVisible])
 
@@ -315,7 +348,7 @@ function InfoTooltip({ text }: { text: string }) {
           ref={tooltipRef}
           id={tooltipId}
           role="tooltip"
-          className="fixed z-[100] max-w-xs px-3 py-2.5 text-xs leading-relaxed rounded-lg bg-background border border-border text-foreground shadow-xl animate-fade-in"
+          className="fixed z-dropdown max-w-xs px-3 py-2.5 text-xs leading-relaxed rounded-lg bg-background border border-border text-foreground shadow-xl animate-fade-in"
           style={{ top: position.top, left: position.left }}
           onMouseEnter={() => setIsVisible(true)}
           onMouseLeave={() => setIsVisible(false)}
@@ -360,10 +393,9 @@ export function CardWrapper({
   skeletonType,
   skeletonRows,
   registerExpandTrigger,
-  children,
-}: CardWrapperProps) {
+  children }: CardWrapperProps) {
   const { t } = useTranslation(['cards', 'common'])
-  const { startMission, openSidebar } = useMissions()
+  const { startMission, openSidebar, setFullScreen } = useMissions()
   const { status: agentStatus } = useLocalAgent()
   const isAgentConnected = agentStatus === 'connected'
   const [isExpanded, setIsExpanded] = useState(false)
@@ -391,6 +423,15 @@ export function CardWrapper({
   const [showBugReport, setShowBugReport] = useState(false)
   const [showInstallClusterSelect, setShowInstallClusterSelect] = useState(false)
   const [showInstallGuide, setShowInstallGuide] = useState<{ mission: { mission?: { title?: string; description?: string; steps?: { title?: string; description?: string }[] } } } | null>(null)
+  /**
+   * State for the install-via-AI prompt confirmation dialog (#5913).
+   * After the user picks clusters, we load the prompt and stash it here so
+   * the user can review/edit it before the mission actually starts.
+   */
+  const [pendingInstallMission, setPendingInstallMission] = useState<{
+    prompt: string
+    clusters: string[]
+  } | null>(null)
   const installInfo = CARD_INSTALL_MAP[cardType]
 
   // Register expand trigger for keyboard navigation
@@ -449,6 +490,17 @@ export function CardWrapper({
   const [initialRenderTimedOut, setInitialRenderTimedOut] = useState(checkIsDemoMode)
   useEffect(() => {
     const timer = setTimeout(() => setInitialRenderTimedOut(true), INITIAL_RENDER_TIMEOUT_MS)
+    return () => clearTimeout(timer)
+  }, []) // Empty deps - only run on mount
+
+  // Minimum skeleton display duration guard (#5206): once the skeleton starts showing,
+  // keep it visible for at least MIN_SKELETON_DISPLAY_MS. This prevents the flicker
+  // where childDataState starts null (skeleton), then child reports state via
+  // useLayoutEffect causing a re-render that briefly shows content before the
+  // skeleton timeout completes (skeleton → content → skeleton → content).
+  const [minSkeletonElapsed, setMinSkeletonElapsed] = useState(checkIsDemoMode)
+  useEffect(() => {
+    const timer = setTimeout(() => setMinSkeletonElapsed(true), MIN_SKELETON_DISPLAY_MS)
     return () => clearTimeout(timer)
   }, []) // Empty deps - only run on mount
 
@@ -515,27 +567,45 @@ export function CardWrapper({
   const collapseKey = cardId || `${cardType}-default`
   const { isCollapsed: hookCollapsed, setCollapsed: hookSetCollapsed } = useCardCollapse(collapseKey)
 
+  // Check if this card has a previously-saved collapse state in localStorage.
+  // When the user explicitly collapsed a card, we should respect that immediately
+  // on page navigation (no delay) to prevent a flash of expanded state (#4895).
+  const hasSavedCollapseState = useMemo(() => {
+    try {
+      const stored = localStorage.getItem('kubestellar-collapsed-cards')
+      if (!stored) return false
+      const ids: string[] = JSON.parse(stored)
+      return ids.includes(collapseKey)
+    } catch {
+      return false
+    }
+  }, [collapseKey])
+
   // Track whether initial data load has completed AND content has been visible
-  const [hasCompletedInitialLoad, setHasCompletedInitialLoad] = useState(checkIsDemoMode)
-  const [collapseDelayPassed, setCollapseDelayPassed] = useState(checkIsDemoMode)
+  // Skip the delay entirely if the card has a saved collapsed state — the user
+  // explicitly collapsed it, so we should respect that immediately across navigations.
+  const [hasCompletedInitialLoad, setHasCompletedInitialLoad] = useState(checkIsDemoMode || hasSavedCollapseState)
+  const [collapseDelayPassed, setCollapseDelayPassed] = useState(checkIsDemoMode || hasSavedCollapseState)
 
   // Allow external control to override hook state
   // IMPORTANT: Don't collapse until initial data load is complete AND a brief delay has passed
   // This prevents the jarring sequence of: skeleton → collapse → show data
   // Cards stay expanded showing content briefly, then respect collapsed state
+  // Exception: if the card has a saved collapse state, apply it immediately (#4895)
   const savedCollapsedState = externalCollapsed ?? hookCollapsed
   const isCollapsed = (hasCompletedInitialLoad && collapseDelayPassed) ? savedCollapsedState : false
-  const setCollapsed = useCallback((collapsed: boolean) => {
+  const setCollapsed = (collapsed: boolean) => {
     if (onCollapsedChange) {
       onCollapsedChange(collapsed)
     }
     // Always update the hook state for persistence
     hookSetCollapsed(collapsed)
-  }, [onCollapsedChange, hookSetCollapsed])
+  }
 
   const [showSummary, setShowSummary] = useState(false)
   const [showMenu, setShowMenu] = useState(false)
   const [showWidgetExport, setShowWidgetExport] = useState(false)
+  const studioContext = useDashboardContextOptional()
   const [showResizeMenu, setShowResizeMenu] = useState(false)
   const [resizeMenuOnLeft, setResizeMenuOnLeft] = useState(false)
   const [__timeRemaining, setTimeRemaining] = useState<number | null>(null)
@@ -554,8 +624,25 @@ export function CardWrapper({
   const menuButtonRef = useRef<HTMLButtonElement>(null)
 
   // Report callback for CardDataContext (childDataState is declared earlier for refresh animation)
+  // Must be useCallback — CardDataContext children use this in useLayoutEffect deps
+  // Stable reference required — useLayoutEffect in CardDataContext depends on this.
+  // Use functional update to compare prev state and skip no-op updates that would
+  // otherwise trigger infinite re-renders (new object reference, same values).
   const reportCallback = useCallback((state: CardDataState) => {
-    setChildDataState(state)
+    setChildDataState(prev => {
+      if (prev &&
+        prev.isFailed === state.isFailed &&
+        prev.consecutiveFailures === state.consecutiveFailures &&
+        prev.errorMessage === state.errorMessage &&
+        prev.isLoading === state.isLoading &&
+        prev.isRefreshing === state.isRefreshing &&
+        prev.hasData === state.hasData &&
+        prev.isDemoData === state.isDemoData &&
+        prev.lastUpdated === state.lastUpdated) {
+        return prev
+      }
+      return state
+    })
   }, [])
   const reportCtx = useMemo(() => ({ report: reportCallback }), [reportCallback])
 
@@ -565,21 +652,24 @@ export function CardWrapper({
   // Show loading when:
   // - Card explicitly reports isLoading: true (AND stuck-loading timeout hasn't fired), OR
   // - Card hasn't reported yet AND quick timeout hasn't passed (brief skeleton for reporting cards)
+  // - Minimum skeleton display time hasn't elapsed yet (#5206) — prevents flicker from
+  //   child useLayoutEffect reports causing skeleton → content → skeleton → content
   // Static/demo cards that never report will stop showing as loading after 150ms
   // NOTE: isRefreshing is NOT included — background refreshes should be invisible to avoid flicker
   // cardLoadingTimedOut acts as a safety valve: if a card stays in isLoading:true for
   // CARD_LOADING_TIMEOUT_MS (30s), force it out of loading state to prevent permanent spinner.
-  const effectiveIsLoading = (childDataState?.isLoading && !cardLoadingTimedOut) || (childDataState === null && !initialRenderTimedOut && !skeletonTimedOut)
+  const effectiveIsLoading = (childDataState?.isLoading && !cardLoadingTimedOut) || (childDataState === null && !initialRenderTimedOut && !skeletonTimedOut) || (!minSkeletonElapsed && childDataState === null)
   // hasData logic:
   // - If card explicitly reports hasData, use it
   // - If card hasn't reported AND quick timeout passed, assume has data (static/demo card)
   // - If card hasn't reported AND skeleton timed out, assume has data (show content)
   // - If card reports isLoading:true but not hasData, assume no data (show skeleton)
   // - If stuck loading timed out, force hasData to true so content area is shown
+  // - Minimum skeleton display hasn't elapsed — don't claim hasData yet (#5206)
   // - Otherwise default to true (show content)
   const effectiveHasData = cardLoadingTimedOut ? true : (childDataState?.hasData ?? (
     childDataState === null
-      ? (initialRenderTimedOut || skeletonTimedOut)  // After quick timeout, assume static card has content
+      ? ((initialRenderTimedOut || skeletonTimedOut) && minSkeletonElapsed)  // After quick timeout AND min skeleton elapsed, assume static card has content
       : (childDataState?.isLoading ? false : true)
   ))
 
@@ -674,7 +764,7 @@ export function CardWrapper({
     return () => clearInterval(interval)
   }, [pendingSwap, onSwap])
 
-  const handleSnooze = useCallback((durationMs: number = 3600000) => {
+  const handleSnooze = (durationMs: number = ONE_HOUR_MS) => {
     if (!pendingSwap || !cardId) return
 
     snoozeSwap({
@@ -683,17 +773,16 @@ export function CardWrapper({
       originalCardTitle: title,
       newCardType: pendingSwap.newType,
       newCardTitle: newTitle || pendingSwap.newType,
-      reason: pendingSwap.reason,
-    }, durationMs)
+      reason: pendingSwap.reason }, durationMs)
 
     onSwapCancel?.()
-  }, [pendingSwap, cardId, cardType, title, newTitle, snoozeSwap, onSwapCancel])
+  }
 
-  const handleSwapNow = useCallback(() => {
+  const handleSwapNow = () => {
     if (pendingSwap && onSwap) {
       onSwap(pendingSwap.newType)
     }
-  }, [pendingSwap, onSwap])
+  }
 
   // Close resize submenu when main menu closes
   useEffect(() => {
@@ -703,17 +792,39 @@ export function CardWrapper({
     }
   }, [showMenu])
 
-  // Keep menu anchored to button on scroll/resize
+  // Keep menu anchored to button on scroll/resize.
+  // Includes boundary detection to prevent the menu from rendering off-screen (#5253).
   useEffect(() => {
     if (!showMenu || !menuButtonRef.current) return
+
+    /** Approximate height of the card action menu (px) */
+    const MENU_APPROX_HEIGHT = 300
+    /** Width of the card action menu (w-48 = 192px) */
+    const MENU_WIDTH_PX = 192
+    /** Viewport edge padding (px) */
+    const VIEWPORT_PADDING = 8
 
     const updatePosition = () => {
       if (menuButtonRef.current) {
         const rect = menuButtonRef.current.getBoundingClientRect()
-        setMenuPosition({
-          top: rect.bottom + 4,
-          right: window.innerWidth - rect.right,
-        })
+        let top = rect.bottom + 4
+        let right = window.innerWidth - rect.right
+
+        // If the menu would extend below the viewport, position it above the button
+        if (top + MENU_APPROX_HEIGHT > window.innerHeight - VIEWPORT_PADDING) {
+          top = Math.max(VIEWPORT_PADDING, rect.top - MENU_APPROX_HEIGHT - 4)
+        }
+        // If the menu would extend beyond the right edge, clamp it
+        if (right < VIEWPORT_PADDING) {
+          right = VIEWPORT_PADDING
+        }
+        // If the menu would extend beyond the left edge, clamp it
+        const leftEdge = window.innerWidth - right - MENU_WIDTH_PX
+        if (leftEdge < VIEWPORT_PADDING) {
+          right = window.innerWidth - MENU_WIDTH_PX - VIEWPORT_PADDING
+        }
+
+        setMenuPosition({ top, right })
       }
     }
 
@@ -771,10 +882,19 @@ export function CardWrapper({
   void title
   void setLocalMessages
 
+  // #6149 — Memoize inline provider values so every CardWrapper re-render
+  // (there are dozens on every dashboard) does not invalidate the
+  // CardExpandedContext / ForceLiveContext consumers inside the card.
+  const cardExpandedValue = useMemo(
+    () => ({ isExpanded, containerSize }),
+    [isExpanded, containerSize]
+  )
+  const forceLiveValue = useMemo(() => !!forceLive, [forceLive])
+
   return (
     <CardTypeContext.Provider value={cardType}>
-    <CardExpandedContext.Provider value={{ isExpanded, containerSize }}>
-      <ForceLiveContext.Provider value={!!forceLive}>
+    <CardExpandedContext.Provider value={cardExpandedValue}>
+      <ForceLiveContext.Provider value={forceLiveValue}>
       <CardDataReportContext.Provider value={reportCtx}>
         <>
           {/* Outer wrapper for demo corner brackets (outside card border) */}
@@ -921,7 +1041,7 @@ export function CardWrapper({
                   <Maximize2 className="w-4 h-4" aria-hidden="true" />
                 </button>
                 <button
-                  onClick={() => setShowBugReport(true)}
+                  onClick={() => { setFullScreen(false); setShowBugReport(true) }}
                   className="p-1.5 rounded-lg hover:bg-secondary/50 text-muted-foreground hover:text-foreground transition-colors"
                   aria-label={t('cardWrapper.reportIssue')}
                   title={t('cardWrapper.reportIssue')}
@@ -934,10 +1054,29 @@ export function CardWrapper({
                     onClick={() => {
                       if (!showMenu && menuButtonRef.current) {
                         const rect = menuButtonRef.current.getBoundingClientRect()
-                        setMenuPosition({
-                          top: rect.bottom + 4,
-                          right: window.innerWidth - rect.right,
-                        })
+                        /** Approximate height of the card action menu (px) */
+                        const MENU_APPROX_HEIGHT = 300
+                        /** Width of the card action menu (w-48 = 192px) */
+                        const MENU_WIDTH_PX = 192
+                        /** Viewport edge padding (px) */
+                        const VIEWPORT_PADDING = 8
+
+                        let top = rect.bottom + 4
+                        let right = window.innerWidth - rect.right
+
+                        // Prevent menu from rendering off-screen (#5253)
+                        if (top + MENU_APPROX_HEIGHT > window.innerHeight - VIEWPORT_PADDING) {
+                          top = Math.max(VIEWPORT_PADDING, rect.top - MENU_APPROX_HEIGHT - 4)
+                        }
+                        if (right < VIEWPORT_PADDING) {
+                          right = VIEWPORT_PADDING
+                        }
+                        const leftEdge = window.innerWidth - right - MENU_WIDTH_PX
+                        if (leftEdge < VIEWPORT_PADDING) {
+                          right = window.innerWidth - MENU_WIDTH_PX - VIEWPORT_PADDING
+                        }
+
+                        setMenuPosition({ top, right })
                       }
                       setShowMenu(!showMenu)
                     }}
@@ -1050,7 +1189,12 @@ export function CardWrapper({
                         <button
                           onClick={() => {
                             setShowMenu(false)
-                            setShowWidgetExport(true)
+                            // Open Console Studio at Widgets section with this card pre-selected
+                            if (studioContext?.openAddCardModal) {
+                              studioContext.openAddCardModal('widgets', cardType)
+                            } else {
+                              setShowWidgetExport(true)
+                            }
                           }}
                           className="w-full px-4 py-2 text-left text-sm text-muted-foreground hover:text-foreground hover:bg-secondary/50 flex items-center gap-2"
                           role="menuitem"
@@ -1116,11 +1260,38 @@ export function CardWrapper({
                         )}
                       </div>
                     )}
+                    {/* Fallback empty state: when a card finishes loading but has no data,
+                    show a helpful empty state instead of a blank card (#4894).
+                    This catches cards that don't implement their own showEmptyState check.
+                    Conditions: child reported state, not loading, no data, and timeout hasn't fired. */}
+                    {childDataState && !childDataState.isLoading && !childDataState.hasData && !cardLoadingTimedOut && (
+                      <div className="h-full flex flex-col items-center justify-center p-4 text-center" data-card-empty-state="true">
+                        <div className="w-12 h-12 rounded-full bg-secondary flex items-center justify-center mb-3">
+                          <Info className="w-6 h-6 text-muted-foreground" />
+                        </div>
+                        <p className="text-sm font-medium text-foreground mb-1">
+                          {t('cardWrapper.noDataTitle')}
+                        </p>
+                        <p className="text-xs text-muted-foreground mb-3 max-w-xs">
+                          {t('cardWrapper.noDataMessage')}
+                        </p>
+                        {onRefresh && (
+                          <button
+                            onClick={onRefresh}
+                            className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-md bg-secondary hover:bg-secondary/80 text-foreground transition-colors"
+                          >
+                            <RefreshCw className="w-3 h-3" />
+                            {t('cardWrapper.loadingTimedOutRetry')}
+                          </button>
+                        )}
+                      </div>
+                    )}
                     {/* ALWAYS render children so they can report their data state via useCardLoadingState.
-                    Hide visually when skeleton is showing or loading timed out, but keep mounted so useLayoutEffect runs.
+                    Hide visually when skeleton is showing, loading timed out, or empty state is shown,
+                    but keep mounted so useLayoutEffect runs.
                     This prevents the deadlock where CardWrapper waits for hasData but children never mount.
                     Suspense catches lazy() chunk loading so it doesn't bubble up to Layout and blank the whole page. */}
-                    <div className={(shouldShowSkeleton || (cardLoadingTimedOut && !childDataState?.hasData)) ? 'hidden' : 'contents'}>
+                    <div className={(shouldShowSkeleton || (cardLoadingTimedOut && !childDataState?.hasData) || (childDataState && !childDataState.isLoading && !childDataState.hasData && !cardLoadingTimedOut)) ? 'hidden' : 'contents'}>
                       <DynamicCardErrorBoundary cardId={cardId || cardType}>
                         <Suspense fallback={<CardSkeleton type={effectiveSkeletonType} rows={skeletonRows || 3} showHeader={false} />}>
                           {children}
@@ -1151,8 +1322,7 @@ export function CardWrapper({
                                 title: `Set up ${title} for live data`,
                                 description: `Install and configure the components needed for live data`,
                                 type: 'deploy',
-                                initialPrompt: `The user is viewing the "${title}" dashboard card which is currently showing demo data. Help them install and configure whatever is needed to get live data for this card.`,
-                              })
+                                initialPrompt: `The user is viewing the "${title}" dashboard card which is currently showing demo data. Help them install and configure whatever is needed to get live data for this card.` })
                               openSidebar()
                             }
                           }}
@@ -1186,7 +1356,7 @@ export function CardWrapper({
                   <Button
                     variant="secondary"
                     size="sm"
-                    onClick={() => handleSnooze(3600000)}
+                    onClick={() => handleSnooze(ONE_HOUR_MS)}
                     className="rounded"
                     title={t('cardWrapper.snoozeTooltip')}
                   >
@@ -1279,16 +1449,37 @@ export function CardWrapper({
                 const clusterContext = clusters.length > 0
                   ? `\n\n**Target cluster(s):** ${clusters.join(', ')}\n\nPlease install on ${clusters.length === 1 ? `cluster "${clusters[0]}"` : `the following clusters: ${clusters.join(', ')}`}.`
                   : ''
+                // #5913 — Do not start the mission yet. Stash the prompt and
+                // let the user review/edit it via ConfirmMissionPromptDialog.
+                setPendingInstallMission({
+                  prompt: prompt + clusterContext,
+                  clusters,
+                })
+              }}
+              missionTitle={`Install ${installInfo.project}`}
+            />
+          )}
+
+          {/* Install CTA: confirm and edit the AI mission prompt before running (#5913) */}
+          {pendingInstallMission && installInfo && (
+            <ConfirmMissionPromptDialog
+              open={!!pendingInstallMission}
+              missionTitle={`Install ${installInfo.project}`}
+              missionDescription={`Install and configure ${installInfo.project}`}
+              initialPrompt={pendingInstallMission.prompt}
+              onCancel={() => setPendingInstallMission(null)}
+              onConfirm={(editedPrompt) => {
+                const { clusters } = pendingInstallMission
+                setPendingInstallMission(null)
                 startMission({
                   title: `Install ${installInfo.project}`,
                   description: `Install and configure ${installInfo.project}`,
                   type: 'deploy',
                   cluster: clusters.length > 0 ? clusters.join(',') : undefined,
-                  initialPrompt: prompt + clusterContext,
+                  initialPrompt: editedPrompt,
                 })
                 openSidebar()
               }}
-              missionTitle={`Install ${installInfo.project}`}
             />
           )}
 
@@ -1327,8 +1518,7 @@ export function CardWrapper({
                 initialTab="submit"
                 initialContext={{
                   cardType,
-                  cardTitle: title || CARD_TITLES[cardType] || cardType,
-                }}
+                  cardTitle: title || CARD_TITLES[cardType] || cardType }}
               />
             </Suspense>
           )}

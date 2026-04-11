@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react'
 import { Activity, ChevronRight } from 'lucide-react'
-import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts'
+import ReactECharts from 'echarts-for-react'
 import { useMultiClusterInsights } from '../../../hooks/useMultiClusterInsights'
 import { useCachedWarningEvents } from '../../../hooks/useCachedData'
 import { useCardLoadingState } from '../CardDataContext'
@@ -10,6 +10,7 @@ import { StatusBadge } from '../../ui/StatusBadge'
 import { CardControlsRow } from '../../../lib/cards/CardComponents'
 import { useInsightSort, INSIGHT_SORT_OPTIONS, type InsightSortField } from './insightSortUtils'
 import { CHART_GRID_STROKE, CHART_TOOLTIP_CONTENT_STYLE, CHART_TOOLTIP_FONT_SIZE_COMPACT, CHART_TICK_COLOR } from '../../../lib/constants/ui'
+import { CROSS_CLUSTER_EVENT_PALETTE } from '../../../lib/theme/chartColors'
 import { InsightDetailModal } from './InsightDetailModal'
 import type { MultiClusterInsight } from '../../../types/insights'
 
@@ -19,10 +20,7 @@ const TIMELINE_BUCKET_MS = 2 * 60 * 1000
 const MAX_TIMELINE_BUCKETS = 30
 
 /** Color palette for cluster series in the stacked area chart */
-const CLUSTER_COLORS = [
-  '#3b82f6', '#22c55e', '#f59e0b', '#ef4444', '#8b5cf6',
-  '#06b6d4', '#ec4899', '#14b8a6', '#f97316', '#6366f1',
-]
+const CLUSTER_COLORS = CROSS_CLUSTER_EVENT_PALETTE
 
 export function CrossClusterEventCorrelation() {
   const { insightsByCategory, isLoading, isDemoData } = useMultiClusterInsights()
@@ -76,6 +74,46 @@ export function CrossClusterEventCorrelation() {
     return { chartData: sorted, clusterNames: clusters }
   }, [warningEvents, selectedClusters])
 
+  const chartOption = useMemo(() => {
+    if (chartData.length === 0 || clusterNames.length === 0) return {}
+    return {
+      backgroundColor: 'transparent',
+      grid: { left: 30, right: 10, top: 5, bottom: 20 },
+      xAxis: {
+        type: 'category' as const,
+        data: chartData.map(d => d.time),
+        axisLabel: { fontSize: 9, color: CHART_TICK_COLOR },
+        axisTick: { show: false },
+        axisLine: { show: false },
+      },
+      yAxis: {
+        type: 'value' as const,
+        minInterval: 1,
+        axisLabel: { fontSize: 9, color: CHART_TICK_COLOR },
+        axisLine: { show: false },
+        axisTick: { show: false },
+        splitLine: { lineStyle: { color: CHART_GRID_STROKE, type: 'dashed' as const } },
+      },
+      tooltip: {
+        trigger: 'axis' as const,
+        backgroundColor: (CHART_TOOLTIP_CONTENT_STYLE as Record<string, unknown>).backgroundColor as string,
+        borderColor: (CHART_TOOLTIP_CONTENT_STYLE as Record<string, unknown>).borderColor as string,
+        textStyle: { color: '#e0e0e0', fontSize: Number(CHART_TOOLTIP_FONT_SIZE_COMPACT.replace('px', '')) },
+      },
+      series: (clusterNames || []).map((cluster, i) => ({
+        name: cluster,
+        type: 'line',
+        stack: 'total',
+        smooth: true,
+        data: chartData.map(d => (d as Record<string, unknown>)[cluster] || 0),
+        lineStyle: { color: CLUSTER_COLORS[i % CLUSTER_COLORS.length] },
+        itemStyle: { color: CLUSTER_COLORS[i % CLUSTER_COLORS.length] },
+        areaStyle: { color: CLUSTER_COLORS[i % CLUSTER_COLORS.length], opacity: 0.3 },
+        showSymbol: false,
+      })),
+    }
+  }, [chartData, clusterNames])
+
   if (!isLoading && correlationInsightsRaw.length === 0 && chartData.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center h-full text-muted-foreground py-8">
@@ -103,27 +141,12 @@ export function CrossClusterEventCorrelation() {
       {/* Timeline chart */}
       {chartData.length > 0 && (
         <div className="h-40">
-          <ResponsiveContainer width="100%" height="100%">
-            <AreaChart data={chartData} margin={{ top: 5, right: 10, left: 0, bottom: 5 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke={CHART_GRID_STROKE} />
-              <XAxis dataKey="time" tick={{ fontSize: 9, fill: CHART_TICK_COLOR }} />
-              <YAxis tick={{ fontSize: 9, fill: CHART_TICK_COLOR }} allowDecimals={false} />
-              <Tooltip
-                contentStyle={{ ...CHART_TOOLTIP_CONTENT_STYLE, fontSize: CHART_TOOLTIP_FONT_SIZE_COMPACT }}
-              />
-              {(clusterNames || []).map((cluster, i) => (
-                <Area
-                  key={cluster}
-                  type="monotone"
-                  dataKey={cluster}
-                  stackId="1"
-                  stroke={CLUSTER_COLORS[i % CLUSTER_COLORS.length]}
-                  fill={CLUSTER_COLORS[i % CLUSTER_COLORS.length]}
-                  fillOpacity={0.3}
-                />
-              ))}
-            </AreaChart>
-          </ResponsiveContainer>
+          <ReactECharts
+            option={chartOption}
+            style={{ height: 160, width: '100%' }}
+            notMerge={true}
+            opts={{ renderer: 'svg' }}
+          />
         </div>
       )}
 

@@ -1,4 +1,4 @@
-import { useCallback, useMemo } from 'react'
+import { useMemo } from 'react'
 import { AlertCircle } from 'lucide-react'
 import { useClusters } from '../../hooks/useMCP'
 import { useGlobalFilters } from '../../hooks/useGlobalFilters'
@@ -30,7 +30,7 @@ const MOCK_FALCO_PER_CLUSTER = 1.5
 
 export function Compliance() {
   const { clusters, isLoading, refetch, lastUpdated, isRefreshing: dataRefreshing, error } = useClusters()
-  const { drillToAllSecurity } = useDrillDownActions()
+  const { drillToAllSecurity, drillToCompliance } = useDrillDownActions()
   const { getStatValue: getUniversalStatValue } = useUniversalStats()
   const { selectedClusters: globalSelectedClusters, isAllClustersSelected } = useGlobalFilters()
 
@@ -48,28 +48,43 @@ export function Compliance() {
   )
   const reachableClusters = filteredClusters.filter(c => c.reachable !== false)
 
-  // Aggregate real data across clusters
+  // Build the set of cluster names that pass the global filter, so we can
+  // scope tool aggregates to exactly those clusters (#4714, #4722).
+  const filteredClusterNames = new Set(filteredClusters.map(c => c.name))
+
+  // Aggregate real data across *filtered* clusters only
   const realData = useMemo(() => {
-    // Kyverno aggregates
-    const kyvernoStatuses = Object.values(kyverno.statuses).filter(s => s.installed)
+    // Kyverno aggregates — scoped to filtered clusters
+    const kyvernoStatuses = Object.values(kyverno.statuses)
+      .filter(s => s.installed && filteredClusterNames.has(s.cluster))
     const kyvernoInstalled = kyvernoStatuses.length > 0
     const kyvernoViolations = kyvernoStatuses.reduce((sum, s) => sum + s.totalViolations, 0)
     const kyvernoPolicies = kyvernoStatuses.reduce((sum, s) => sum + s.totalPolicies, 0)
 
-    // Kubescape aggregates
-    const kubescapeInstalled = kubescape.installed
-    const kubescapeScore = kubescape.aggregated.overallScore
-    const kubescapeFrameworks = kubescape.aggregated.frameworks || []
-    const kubescapeTotalControls = kubescape.aggregated.totalControls
-    const kubescapePassedControls = kubescape.aggregated.passedControls
-    const kubescapeFailedControls = kubescape.aggregated.failedControls
+    // Kubescape aggregates — scoped to filtered clusters
+    const kubescapeStatuses = Object.values(kubescape.statuses)
+      .filter(s => s.installed && filteredClusterNames.has(s.cluster))
+    const kubescapeInstalled = kubescapeStatuses.length > 0
+    const kubescapeTotalControls = kubescapeStatuses.reduce((sum, s) => sum + s.totalControls, 0)
+    const kubescapePassedControls = kubescapeStatuses.reduce((sum, s) => sum + s.passedControls, 0)
+    const kubescapeFailedControls = kubescapeStatuses.reduce((sum, s) => sum + s.failedControls, 0)
+    const kubescapeScore = kubescapeTotalControls > 0
+      ? Math.round((kubescapePassedControls / kubescapeTotalControls) * 100)
+      : 0
+    const kubescapeFrameworks = kubescapeStatuses.length > 0
+      ? (kubescapeStatuses[0]?.frameworks || [])
+      : []
 
-    // Trivy aggregates
-    const trivyInstalled = trivy.installed
-    const trivyVulns = trivy.aggregated.critical + trivy.aggregated.high +
-      trivy.aggregated.medium + trivy.aggregated.low + trivy.aggregated.unknown
-    const trivyCritical = trivy.aggregated.critical
-    const trivyHigh = trivy.aggregated.high
+    // Trivy aggregates — scoped to filtered clusters
+    const trivyStatuses = Object.values(trivy.statuses)
+      .filter(s => s.installed && filteredClusterNames.has(s.cluster))
+    const trivyInstalled = trivyStatuses.length > 0
+    const trivyCritical = trivyStatuses.reduce((sum, s) => sum + s.vulnerabilities.critical, 0)
+    const trivyHigh = trivyStatuses.reduce((sum, s) => sum + s.vulnerabilities.high, 0)
+    const trivyMedium = trivyStatuses.reduce((sum, s) => sum + s.vulnerabilities.medium, 0)
+    const trivyLow = trivyStatuses.reduce((sum, s) => sum + s.vulnerabilities.low, 0)
+    const trivyUnknown = trivyStatuses.reduce((sum, s) => sum + s.vulnerabilities.unknown, 0)
+    const trivyVulns = trivyCritical + trivyHigh + trivyMedium + trivyLow + trivyUnknown
 
     // Any tool installed = we have some real data
     const hasAnyRealData = kyvernoInstalled || kubescapeInstalled || trivyInstalled
@@ -93,7 +108,6 @@ export function Compliance() {
     }
     if (trivyInstalled) {
       // Trivy reports count towards total checks
-      const trivyStatuses = Object.values(trivy.statuses).filter(s => s.installed)
       const totalReports = trivyStatuses.reduce((sum, s) => sum + s.totalReports, 0)
       const reportsWithCritical = trivyCritical + trivyHigh
       totalChecks += totalReports
@@ -125,9 +139,8 @@ export function Compliance() {
       totalChecks,
       passing,
       failing,
-      warning: Math.max(0, totalChecks - passing - failing),
-    }
-  }, [kyverno.statuses, kubescape.installed, kubescape.aggregated, trivy.installed, trivy.aggregated, trivy.statuses])
+      warning: Math.max(0, totalChecks - passing - failing) }
+  }, [kyverno.statuses, kubescape.statuses, trivy.statuses, filteredClusterNames])
 
   // Only show demo/mock data when the user is explicitly in demo mode.
   // When connected to a live cluster without compliance tools, show zeros — not fake numbers.
@@ -138,7 +151,7 @@ export function Compliance() {
   const trivyIsDemo = explicitDemoMode && (trivy.isDemoData || !realData.trivyInstalled)
 
   // Stats value getter for the configurable StatsOverview component
-  const getDashboardStatValue = useCallback((blockId: string): StatBlockValue => {
+  const getDashboardStatValue = (blockId: string): StatBlockValue => {
     switch (blockId) {
       // Overall compliance — real when any tool is installed, demo otherwise
       case 'score':
@@ -148,20 +161,20 @@ export function Compliance() {
       case 'total_checks':
         return allDemo
           ? { value: (reachableClusters.length || 1) * MOCK_CHECKS_PER_CLUSTER, sublabel: 'total checks', isDemo: true, isClickable: false }
-          : { value: realData.totalChecks, sublabel: 'total checks', onClick: () => { emitComplianceDrillDown('total_checks'); drillToAllSecurity() }, isClickable: realData.totalChecks > 0 }
+          : { value: realData.totalChecks, sublabel: 'total checks', onClick: () => { emitComplianceDrillDown('total_checks'); drillToCompliance(undefined, { passing: realData.passing, failing: realData.failing, totalChecks: realData.totalChecks }) }, isClickable: realData.totalChecks > 0 }
       case 'passing':
         return allDemo
           ? { value: Math.floor((reachableClusters.length || 1) * MOCK_CHECKS_PER_CLUSTER * MOCK_PASS_RATE), sublabel: 'passing', isDemo: true, isClickable: false }
-          : { value: realData.passing, sublabel: 'passing', onClick: () => { emitComplianceDrillDown('passing'); drillToAllSecurity('passing') }, isClickable: realData.passing > 0 }
+          : { value: realData.passing, sublabel: 'passing', onClick: () => { emitComplianceDrillDown('passing'); drillToCompliance('passing', { passing: realData.passing, failing: realData.failing, totalChecks: realData.totalChecks }) }, isClickable: realData.passing > 0 }
       case 'failing':
         return allDemo
           ? { value: Math.floor((reachableClusters.length || 1) * MOCK_CHECKS_PER_CLUSTER * MOCK_FAIL_RATE), sublabel: 'failing', isDemo: true, isClickable: false }
-          : { value: realData.failing, sublabel: 'failing', onClick: () => { emitComplianceDrillDown('failing'); drillToAllSecurity('failing') }, isClickable: realData.failing > 0 }
+          : { value: realData.failing, sublabel: 'failing', onClick: () => { emitComplianceDrillDown('failing'); drillToCompliance('failing', { passing: realData.passing, failing: realData.failing, totalChecks: realData.totalChecks }) }, isClickable: realData.failing > 0 }
       case 'warning': {
         const mockTotal = (reachableClusters.length || 1) * MOCK_CHECKS_PER_CLUSTER
         return allDemo
           ? { value: mockTotal - Math.floor(mockTotal * MOCK_PASS_RATE) - Math.floor(mockTotal * MOCK_FAIL_RATE), sublabel: 'warnings', isDemo: true, isClickable: false }
-          : { value: realData.warning, sublabel: 'warnings', onClick: () => { emitComplianceDrillDown('warning'); drillToAllSecurity('warning') }, isClickable: realData.warning > 0 }
+          : { value: realData.warning, sublabel: 'warnings', onClick: () => { emitComplianceDrillDown('warning'); drillToCompliance('warning', { passing: realData.passing, failing: realData.failing, warning: realData.warning, totalChecks: realData.totalChecks }) }, isClickable: realData.warning > 0 }
       }
       case 'critical_findings':
         return allDemo
@@ -220,12 +233,9 @@ export function Compliance() {
       default:
         return { value: '-' }
     }
-  }, [allDemo, realData, kyvernoIsDemo, kubescapeIsDemo, trivyIsDemo, reachableClusters, drillToAllSecurity, explicitDemoMode])
+  }
 
-  const getStatValue = useCallback(
-    (blockId: string) => createMergedStatValueGetter(getDashboardStatValue, getUniversalStatValue)(blockId),
-    [getDashboardStatValue, getUniversalStatValue]
-  )
+  const getStatValue = (blockId: string) => createMergedStatValueGetter(getDashboardStatValue, getUniversalStatValue)(blockId)
 
   const hasData = realData.hasAnyRealData || reachableClusters.length > 0
 
@@ -247,8 +257,7 @@ export function Compliance() {
       rightExtra={<RotatingTip page="compliance" />}
       emptyState={{
         title: 'Compliance Dashboard',
-        description: 'Add cards to monitor security compliance, policy enforcement, and vulnerability scanning.',
-      }}
+        description: 'Add cards to monitor security compliance, policy enforcement, and vulnerability scanning.' }}
     >
       {/* Error Display */}
       {error && (

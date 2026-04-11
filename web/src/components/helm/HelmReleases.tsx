@@ -1,4 +1,3 @@
-import { useCallback } from 'react'
 import { AlertCircle } from 'lucide-react'
 import { useClusters } from '../../hooks/useMCP'
 import { useGlobalFilters } from '../../hooks/useGlobalFilters'
@@ -7,6 +6,7 @@ import { useUniversalStats, createMergedStatValueGetter } from '../../hooks/useU
 import { StatBlockValue } from '../ui/StatsOverview'
 import { DashboardPage } from '../../lib/dashboards/DashboardPage'
 import { getDefaultCards } from '../../config/dashboards'
+import { RotatingTip } from '../ui/RotatingTip'
 
 const HELM_CARDS_KEY = 'kubestellar-helm-cards'
 
@@ -26,7 +26,7 @@ export function HelmReleases() {
   const reachableClusters = filteredClusters.filter(c => c.reachable !== false)
 
   // Stats value getter for the configurable StatsOverview component
-  const getDashboardStatValue = useCallback((blockId: string): StatBlockValue => {
+  const getDashboardStatValue = (blockId: string): StatBlockValue => {
     switch (blockId) {
       case 'clusters':
         return { value: reachableClusters.length, sublabel: 'clusters', onClick: () => drillToAllClusters(), isClickable: reachableClusters.length > 0 }
@@ -35,18 +35,16 @@ export function HelmReleases() {
       default:
         return { value: 0 }
     }
-  }, [reachableClusters, drillToAllHelm, drillToAllClusters])
+  }
 
-  const getStatValue = useCallback(
-    (blockId: string) => createMergedStatValueGetter(getDashboardStatValue, getUniversalStatValue)(blockId),
-    [getDashboardStatValue, getUniversalStatValue]
-  )
+  const getStatValue = (blockId: string) => createMergedStatValueGetter(getDashboardStatValue, getUniversalStatValue)(blockId)
 
   return (
     <DashboardPage
       title="Helm Releases"
       subtitle="Monitor Helm chart releases and versions"
       icon="Ship"
+      rightExtra={<RotatingTip page="helm" />}
       storageKey={HELM_CARDS_KEY}
       defaultCards={DEFAULT_HELM_CARDS}
       statsType="gitops"
@@ -58,8 +56,7 @@ export function HelmReleases() {
       hasData={reachableClusters.length > 0}
       emptyState={{
         title: 'Helm Releases Dashboard',
-        description: 'Add cards to monitor Helm releases, chart versions, and release history across your clusters.',
-      }}
+        description: 'Add cards to monitor Helm releases, chart versions, and release history across your clusters.' }}
     >
       {/* Error Display */}
       {error && (

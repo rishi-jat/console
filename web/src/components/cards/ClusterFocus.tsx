@@ -1,10 +1,11 @@
-import { useState, useMemo } from 'react'
+import { useState } from 'react'
 import { Activity, Box, Cpu, HardDrive, Network, AlertTriangle } from 'lucide-react'
 import { useClusters } from '../../hooks/useMCP'
 import { useCachedPodIssues, useCachedDeploymentIssues, useCachedGPUNodes } from '../../hooks/useCachedData'
 import { useGlobalFilters } from '../../hooks/useGlobalFilters'
 import { useDrillDownActions } from '../../hooks/useDrillDown'
 import { Skeleton } from '../ui/Skeleton'
+import { RefreshIndicator } from '../ui/RefreshIndicator'
 import { useCardLoadingState } from './CardDataContext'
 import { useTranslation } from 'react-i18next'
 import { useDemoMode } from '../../hooks/useDemoMode'
@@ -18,10 +19,18 @@ interface ClusterFocusProps {
 export function ClusterFocus({ config }: ClusterFocusProps) {
   const { t } = useTranslation(['cards', 'common'])
   const selectedCluster = config?.cluster
-  const { deduplicatedClusters: allClusters, isLoading: clustersLoading, isRefreshing: clustersRefreshing, isFailed, consecutiveFailures } = useClusters()
-  const { nodes: gpuNodes, isDemoFallback: gpuDemoFallback } = useCachedGPUNodes()
-  const { issues: podIssues, isDemoFallback: podsDemoFallback } = useCachedPodIssues(selectedCluster)
-  const { issues: deploymentIssues, isDemoFallback: deployDemoFallback } = useCachedDeploymentIssues(selectedCluster)
+  const { deduplicatedClusters: allClusters, isLoading: clustersLoading, isRefreshing: clustersRefreshing, isFailed, consecutiveFailures, lastRefresh: clustersLastRefreshDate } = useClusters()
+  // #6271: useClusters returns Date|null; normalize to numeric epoch
+  // so it merges cleanly with the numeric `lastRefresh` from useCache.
+  const clustersLastRefresh: number | null = clustersLastRefreshDate instanceof Date
+    ? clustersLastRefreshDate.getTime()
+    : (typeof clustersLastRefreshDate === 'number' ? clustersLastRefreshDate : null)
+  // #6217: destructure lastRefresh from each underlying hook so the card
+  // can render a freshness indicator using the OLDEST timestamp (= the
+  // staler half of the data the user is looking at).
+  const { nodes: gpuNodes, isDemoFallback: gpuDemoFallback, isRefreshing: gpuRefreshing, lastRefresh: gpuLastRefresh } = useCachedGPUNodes()
+  const { issues: podIssues, isDemoFallback: podsDemoFallback, isRefreshing: podsRefreshing, lastRefresh: podsLastRefresh } = useCachedPodIssues(selectedCluster)
+  const { issues: deploymentIssues, isDemoFallback: deployDemoFallback, isRefreshing: deploymentsRefreshing, lastRefresh: deployLastRefresh } = useCachedDeploymentIssues(selectedCluster)
   const { drillToCluster, drillToPod, drillToDeployment } = useDrillDownActions()
   const [internalCluster, setInternalCluster] = useState<string>('')
   const { isDemoMode } = useDemoMode()
@@ -30,21 +39,19 @@ export function ClusterFocus({ config }: ClusterFocusProps) {
   const hasData = allClusters.length > 0
   const { showSkeleton, showEmptyState } = useCardLoadingState({
     isLoading: clustersLoading && !hasData,
-    isRefreshing: clustersRefreshing,
+    isRefreshing: clustersRefreshing || gpuRefreshing || podsRefreshing || deploymentsRefreshing,
     hasAnyData: hasData,
     isDemoData: isDemoMode || gpuDemoFallback || podsDemoFallback || deployDemoFallback,
     isFailed,
-    consecutiveFailures,
-  })
+    consecutiveFailures })
 
   const {
     selectedClusters: globalSelectedClusters,
     isAllClustersSelected,
-    customFilter,
-  } = useGlobalFilters()
+    customFilter } = useGlobalFilters()
 
   // Apply global filters
-  const clusters = useMemo(() => {
+  const clusters = (() => {
     let result = allClusters
 
     if (!isAllClustersSelected) {
@@ -60,19 +67,15 @@ export function ClusterFocus({ config }: ClusterFocusProps) {
     }
 
     return result
-  }, [allClusters, globalSelectedClusters, isAllClustersSelected, customFilter])
+  })()
 
   const clusterName = selectedCluster || internalCluster
 
-  const cluster = useMemo(() => {
-    return clusters.find(c => c.name === clusterName)
-  }, [clusters, clusterName])
+  const cluster = clusters.find(c => c.name === clusterName)
 
-  const clusterGPUs = useMemo(() => {
-    return gpuNodes
+  const clusterGPUs = gpuNodes
       .filter(n => n.cluster === clusterName || n.cluster.includes(clusterName))
       .reduce((sum, n) => sum + n.gpuCount, 0)
-  }, [gpuNodes, clusterName])
 
   const clusterPodIssues = podIssues.length
   const clusterDeploymentIssues = deploymentIssues.length
@@ -132,6 +135,25 @@ export function ClusterFocus({ config }: ClusterFocusProps) {
         <div className="flex items-center gap-2 min-w-0 flex-1">
           <span className="text-sm font-medium text-foreground truncate">{clusterName}</span>
           <div className={`w-2 h-2 rounded-full shrink-0 ${cluster?.healthy ? 'bg-green-500' : 'bg-red-500'}`} />
+          {/* #6217: freshness indicator using the OLDEST of the 4 cache
+              timestamps so users see the staler half of the data.
+              #6244: include cluster cache timestamp — ClusterFocus reads
+              health/metrics from useClusters(), so excluding it could
+              misrepresent overall card freshness.
+              #6273: hide the timestamp entirely in demo mode — useCache
+              preserves lastRefresh from prior live sessions, which would
+              show "Updated X ago" against demo data. */}
+          <RefreshIndicator
+            isRefreshing={clustersRefreshing || gpuRefreshing || podsRefreshing || deploymentsRefreshing}
+            lastUpdated={(() => {
+              if (isDemoMode || gpuDemoFallback || podsDemoFallback || deployDemoFallback) return null
+              const ts = [clustersLastRefresh, gpuLastRefresh, podsLastRefresh, deployLastRefresh].filter((t): t is number => typeof t === 'number')
+              return ts.length > 0 ? new Date(Math.min(...ts)) : null
+            })()}
+            size="sm"
+            showLabel={true}
+            staleThresholdMinutes={5}
+          />
         </div>
         <div className="flex items-center gap-2">
           {!selectedCluster && (
@@ -157,8 +179,7 @@ export function ClusterFocus({ config }: ClusterFocusProps) {
             nodeCount: cluster.nodeCount,
             podCount: cluster.podCount,
             cpuCores: cluster.cpuCores,
-            server: cluster.server,
-          })}
+            server: cluster.server })}
         >
           <div className="flex items-center gap-2 mb-1">
             <Activity className="w-4 h-4 text-blue-400" />
@@ -203,8 +224,7 @@ export function ClusterFocus({ config }: ClusterFocusProps) {
                 status: issue.status,
                 reason: issue.reason,
                 issues: issue.issues,
-                restarts: issue.restarts,
-              })
+                restarts: issue.restarts })
             }
           }}
           title={podIssues.length > 0 ? t('cards:clusterFocus.clickToView', { name: podIssues[0].name }) : t('cards:clusterFocus.noPodIssues')}
@@ -225,8 +245,7 @@ export function ClusterFocus({ config }: ClusterFocusProps) {
                 replicas: issue.replicas,
                 readyReplicas: issue.readyReplicas,
                 reason: issue.reason,
-                message: issue.message,
-              })
+                message: issue.message })
             }
           }}
           title={deploymentIssues.length > 0 ? t('cards:clusterFocus.clickToView', { name: deploymentIssues[0].name }) : t('cards:clusterFocus.noDeploymentIssues')}

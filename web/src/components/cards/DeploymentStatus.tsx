@@ -1,5 +1,5 @@
 import { useMemo } from 'react'
-import { CheckCircle, Clock, XCircle, ChevronRight, Filter, Server } from 'lucide-react'
+import { CheckCircle, Clock, XCircle, ChevronRight, Filter, Server, Layers } from 'lucide-react'
 import { ClusterBadge } from '../ui/ClusterBadge'
 import { useDrillDownActions } from '../../hooks/useDrillDown'
 import { useCachedDeployments } from '../../hooks/useCachedData'
@@ -8,7 +8,7 @@ import { CardControls } from '../ui/CardControls'
 import { Skeleton } from '../ui/Skeleton'
 import type { Deployment } from '../../hooks/useMCP'
 import { useCardLoadingState } from './CardDataContext'
-import { CardClusterFilter, CardSearchInput, CardAIActions } from '../../lib/cards/CardComponents'
+import { CardClusterFilter, CardSearchInput, CardAIActions, CardEmptyState } from '../../lib/cards/CardComponents'
 import { useCardData, useCardFilters, useStatusFilter, commonComparators, type SortDirection } from '../../lib/cards/cardHooks'
 import { useTranslation } from 'react-i18next'
 
@@ -29,23 +29,19 @@ const statusConfig = {
     color: 'text-green-400',
     bg: 'bg-green-500/20',
     barColor: 'bg-green-500',
-    label: 'Running',
-  },
+    label: 'Running' },
   deploying: {
     icon: Clock,
     color: 'text-yellow-400',
     bg: 'bg-yellow-500/20',
     barColor: 'bg-yellow-500',
-    label: 'Deploying',
-  },
+    label: 'Deploying' },
   failed: {
     icon: XCircle,
     color: 'text-red-400',
     bg: 'bg-red-500/20',
     barColor: 'bg-red-500',
-    label: 'Failed',
-  },
-}
+    label: 'Failed' } }
 
 // Extract version from container image
 function extractVersion(image?: string): string {
@@ -64,8 +60,28 @@ const FILTER_CONFIG = {
   searchFields: ['name', 'namespace', 'cluster', 'image'] as (keyof Deployment)[],
   clusterField: 'cluster' as keyof Deployment,
   statusField: 'status' as keyof Deployment,
-  storageKey: 'deployment-status',
-}
+  storageKey: 'deployment-status' }
+
+// Hoisted to module scope so the object reference is stable across renders.
+// Passing an inline object into useCardData invalidates its internal useMemo
+// deps every render and caused "Maximum update depth exceeded" on the home
+// dashboard default-6 card.
+const CARD_DATA_FILTER_CONFIG = {
+  searchFields: ['name', 'namespace', 'cluster'] as (keyof Deployment)[],
+  clusterField: 'cluster' as keyof Deployment,
+  statusField: 'status' as keyof Deployment,
+  storageKey: 'deployment-status' } as const
+
+const CARD_DATA_SORT_CONFIG = {
+  defaultField: 'status' as const,
+  defaultDirection: 'asc' as SortDirection,
+  comparators: {
+    status: commonComparators.statusOrder<Deployment>('status', statusOrder),
+    name: commonComparators.string<Deployment>('name'),
+    cluster: commonComparators.string<Deployment>('cluster') } } as const
+
+// Default rows per page before pagination kicks in
+const DEFAULT_PAGE_LIMIT = 5
 
 export function DeploymentStatus() {
   const { t } = useTranslation()
@@ -76,8 +92,7 @@ export function DeploymentStatus() {
     isRefreshing,
     isDemoFallback,
     isFailed,
-    consecutiveFailures,
-  } = useCachedDeployments()
+    consecutiveFailures } = useCachedDeployments()
 
   // Report data state to CardWrapper for failure badge rendering
   const { showSkeleton, showEmptyState } = useCardLoadingState({
@@ -86,33 +101,41 @@ export function DeploymentStatus() {
     isDemoData: isDemoFallback,
     hasAnyData: allDeployments.length > 0,
     isFailed,
-    consecutiveFailures,
-  })
+    consecutiveFailures })
   const isLoading = showSkeleton
 
   // Card-specific status filter (kept as separate hook)
   const { statusFilter, setStatusFilter } = useStatusFilter({
     statuses: ['all', 'running', 'deploying', 'failed'] as const,
     defaultStatus: 'all',
-    storageKey: 'deployment-status',
-  })
+    storageKey: 'deployment-status' })
 
   // Use useCardFilters for status counts (globally filtered, before status chip/search)
   const { filtered: globalFilteredDeployments } = useCardFilters(allDeployments, FILTER_CONFIG)
 
   // Status counts (from globally filtered data, before status chip)
-  const statusCounts = useMemo(() => ({
+  const statusCounts = {
     all: globalFilteredDeployments.length,
     running: globalFilteredDeployments.filter((d) => d.status === 'running').length,
     deploying: globalFilteredDeployments.filter((d) => d.status === 'deploying').length,
-    failed: globalFilteredDeployments.filter((d) => d.status === 'failed').length,
-  }), [globalFilteredDeployments])
+    failed: globalFilteredDeployments.filter((d) => d.status === 'failed').length }
 
-  // Pre-filter by status chip before passing to useCardData
+  // Pre-filter by status chip before passing to useCardData.
+  // Memoized so the array reference stays stable across renders when the
+  // source data and status filter are unchanged — otherwise downstream
+  // useMemo dependencies in useCardData invalidate every render.
   const statusPreFiltered = useMemo(() => {
     if (statusFilter === 'all') return allDeployments
     return allDeployments.filter((d) => d.status === statusFilter)
   }, [allDeployments, statusFilter])
+
+  const cardDataConfig = useMemo(
+    () => ({
+      filter: CARD_DATA_FILTER_CONFIG,
+      sort: CARD_DATA_SORT_CONFIG,
+      defaultLimit: DEFAULT_PAGE_LIMIT }),
+    []
+  )
 
   // Use shared card data hook for filtering, sorting, and pagination
   const {
@@ -133,34 +156,14 @@ export function DeploymentStatus() {
       availableClusters,
       showClusterFilter,
       setShowClusterFilter,
-      clusterFilterRef,
-    },
+      clusterFilterRef },
     sorting: {
       sortBy,
       setSortBy,
       sortDirection,
-      setSortDirection,
-    },
+      setSortDirection },
     containerRef,
-    containerStyle,
-  } = useCardData<Deployment, SortByOption>(statusPreFiltered, {
-    filter: {
-      searchFields: ['name', 'namespace', 'cluster'] as (keyof Deployment)[],
-      clusterField: 'cluster',
-      statusField: 'status',
-      storageKey: 'deployment-status',
-    },
-    sort: {
-      defaultField: 'status',
-      defaultDirection: 'asc' as SortDirection,
-      comparators: {
-        status: commonComparators.statusOrder<Deployment>('status', statusOrder),
-        name: commonComparators.string<Deployment>('name'),
-        cluster: commonComparators.string<Deployment>('cluster'),
-      },
-    },
-    defaultLimit: 5,
-  })
+    containerStyle } = useCardData<Deployment, SortByOption>(statusPreFiltered, cardDataConfig)
 
   // Handle filter changes (reset page)
   const handleFilterChange = (newFilter: StatusFilter) => {
@@ -179,8 +182,7 @@ export function DeploymentStatus() {
       version: extractVersion(deployment.image),
       replicas: deployment.replicas,
       readyReplicas: deployment.readyReplicas,
-      progress: deployment.progress,
-    })
+      progress: deployment.progress })
   }
 
   if (isLoading) {
@@ -202,9 +204,11 @@ export function DeploymentStatus() {
 
   if (showEmptyState && globalFilteredDeployments.length === 0) {
     return (
-      <div className="h-full flex items-center justify-center text-muted-foreground text-sm">
-        No deployments found
-      </div>
+      <CardEmptyState
+        icon={Layers}
+        title="No deployments found"
+        message="Deploy workloads to your clusters to see their status here."
+      />
     )
   }
 
@@ -287,13 +291,13 @@ export function DeploymentStatus() {
       </div>
 
       {/* Deployments list */}
-      <div ref={containerRef} className="flex-1 space-y-2 overflow-y-auto min-h-card-content" style={containerStyle}>
+      <div ref={containerRef} className="flex-1 space-y-1.5 overflow-y-auto min-h-card-content" style={containerStyle}>
         {paginatedDeployments.length === 0 ? (
           <div className="h-full flex items-center justify-center text-muted-foreground text-sm">
             No deployments match the current filters
           </div>
         ) : (
-          paginatedDeployments.map((deployment) => {
+          paginatedDeployments.map((deployment, idx) => {
             const config = statusConfig[deployment.status as keyof typeof statusConfig] || statusConfig.running
             const StatusIcon = config.icon
             const clusterName = deployment.cluster || 'unknown'
@@ -303,7 +307,7 @@ export function DeploymentStatus() {
               <div
                 key={`${deployment.cluster}-${deployment.namespace}-${deployment.name}`}
                 onClick={() => handleDeploymentClick(deployment)}
-                className="p-2.5 rounded-lg bg-secondary/30 border border-border/50 cursor-pointer hover:bg-secondary/50 hover:border-border transition-colors group"
+                className={`p-3 rounded-lg border border-border/50 cursor-pointer hover:bg-secondary/50 hover:border-border transition-colors group ${idx % 2 === 0 ? 'bg-secondary/20' : 'bg-secondary/40'}`}
                 title={`Click to view details for ${deployment.name}`}
               >
                 <div className="flex items-start justify-between mb-1.5 gap-2">
@@ -334,8 +338,7 @@ export function DeploymentStatus() {
                           name: deployment.name,
                           namespace: deployment.namespace,
                           cluster: clusterName,
-                          status: deployment.status,
-                        }}
+                          status: deployment.status }}
                         issues={[{ name: 'Failed', message: `${deployment.readyReplicas}/${deployment.replicas} replicas ready` }]}
                         additionalContext={{ image: deployment.image, progress: deployment.progress }}
                       />

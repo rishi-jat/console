@@ -38,6 +38,8 @@ export interface MultiTenancyOverviewData {
   overallScore: number
   totalLevels: number
   isLoading: boolean
+  isRefreshing: boolean
+  consecutiveFailures: number
   isDemoData: boolean
   isFailed: boolean
 }
@@ -56,17 +58,26 @@ export function useMultiTenancyOverview(): MultiTenancyOverviewData {
   const kubevirt = kubevirtResult.data
 
   const isLoading = ovnResult.loading || kubeflexResult.loading || k3sResult.loading || kubevirtResult.loading
+  // Refreshing when ANY hook is refreshing (background re-fetch after initial load)
+  const isRefreshing = ovnResult.isRefreshing || kubeflexResult.isRefreshing || k3sResult.isRefreshing || kubevirtResult.isRefreshing
+  // Use the max consecutive failures from any sub-hook
+  const consecutiveFailures = Math.max(
+    ovnResult.consecutiveFailures,
+    kubeflexResult.consecutiveFailures,
+    k3sResult.consecutiveFailures,
+    kubevirtResult.consecutiveFailures,
+  )
   // Demo when ALL hooks are returning demo fallback data (useCache in demo mode)
   const isDemoData = ovnResult.isDemoData && kubeflexResult.isDemoData && k3sResult.isDemoData && kubevirtResult.isDemoData
   // Failed when ANY underlying hook has failed without recoverable data
   const isFailed = ovnResult.error || kubeflexResult.error || k3sResult.error || kubevirtResult.error
 
-  const components: ComponentStatus[] = useMemo(() => [
+  const components: ComponentStatus[] = [
     { name: 'OVN-K8s', detected: ovn.detected, health: ovn.health, icon: 'network' },
     { name: 'KubeFlex', detected: kubeflex.detected, health: kubeflex.health, icon: 'layers' },
     { name: 'K3s', detected: k3s.detected, health: k3s.health, icon: 'box' },
     { name: 'KubeVirt', detected: kubevirt.detected, health: kubevirt.health, icon: 'monitor' },
-  ], [ovn.detected, ovn.health, kubeflex.detected, kubeflex.health, k3s.detected, k3s.health, kubevirt.detected, kubevirt.health])
+  ]
 
   const isolationLevels: IsolationLevel[] = useMemo(() => {
     // Control-plane: Ready if KubeFlex AND K3s detected
@@ -92,10 +103,7 @@ export function useMultiTenancyOverview(): MultiTenancyOverviewData {
     ]
   }, [kubeflex.detected, kubeflex.health, k3s.detected, k3s.health, kubevirt.detected, kubevirt.health, ovn.detected, ovn.health])
 
-  const overallScore = useMemo(
-    () => (isolationLevels || []).filter(l => l.status === 'ready').length,
-    [isolationLevels],
-  )
+  const overallScore = (isolationLevels || []).filter(l => l.status === 'ready').length
 
   return {
     components,
@@ -104,7 +112,8 @@ export function useMultiTenancyOverview(): MultiTenancyOverviewData {
     overallScore,
     totalLevels: TOTAL_ISOLATION_LEVELS,
     isLoading,
+    isRefreshing,
+    consecutiveFailures,
     isDemoData,
-    isFailed,
-  }
+    isFailed }
 }

@@ -1,6 +1,6 @@
 import { useState, useMemo, useEffect, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
-import { Sparkles, Loader2, RefreshCw, ToggleLeft, Box } from 'lucide-react'
+import { Lightbulb, Loader2, RefreshCw, ToggleLeft, Box } from 'lucide-react'
 import { cn } from '../../lib/cn'
 import { BaseModal } from '../../lib/modals'
 import { Button } from '../ui/Button'
@@ -20,7 +20,7 @@ interface ReplaceCardModalProps {
   onReplace: (oldCardId: string, newCardType: string, newTitle?: string, newConfig?: Record<string, unknown>) => void
 }
 
-// Example prompts for the AI input
+// Example prompts for the keyword-matching suggestion input
 const EXAMPLE_PROMPTS = [
   "Show me CPU usage across all clusters",
   "Track warning events from the production namespace",
@@ -58,13 +58,12 @@ export function ReplaceCardModal({ isOpen, card, onClose, onReplace }: ReplaceCa
         name: config.title,
         description: config.description ?? '',
         category: config.category ?? 'general',
-        iconColor: config.iconColor,
-      }))
+        iconColor: config.iconColor }))
       .sort((a, b) => a.name.localeCompare(b.name))
   }, [card?.card_type])
 
   // Filter by search query
-  const filteredCards = useMemo(() => {
+  const filteredCards = (() => {
     if (!searchQuery.trim()) return cardTypes
     const q = searchQuery.toLowerCase()
     return cardTypes.filter(
@@ -73,13 +72,13 @@ export function ReplaceCardModal({ isOpen, card, onClose, onReplace }: ReplaceCa
            c.category.toLowerCase().includes(q) ||
            c.type.toLowerCase().includes(q)
     )
-  }, [cardTypes, searchQuery])
+  })()
 
   if (!card) return null
 
   const tabs = [
     { id: 'select', label: t('dashboard.replace.chooseCardType'), icon: ToggleLeft },
-    { id: 'ai', label: t('dashboard.replace.describeWhatYouNeed'), icon: Sparkles },
+    { id: 'ai', label: t('dashboard.replace.describeWhatYouNeed'), icon: Lightbulb },
   ]
 
   const handleSelectReplace = () => {
@@ -94,12 +93,12 @@ export function ReplaceCardModal({ isOpen, card, onClose, onReplace }: ReplaceCa
     setIsProcessing(true)
     setAiSuggestion(null)
 
-    // Simulate AI processing
+    // Simulate processing delay for keyword matching
     await new Promise((resolve) => setTimeout(resolve, NAV_AFTER_ANIMATION_MS))
 
     if (!isMountedRef.current) return
 
-    // Parse the natural language and suggest a card type
+    // Match keywords in the description and suggest a card type
     const prompt = nlPrompt.toLowerCase()
     let suggestion: typeof aiSuggestion = null
 
@@ -109,60 +108,49 @@ export function ReplaceCardModal({ isOpen, card, onClose, onReplace }: ReplaceCa
         title: prompt.includes('cpu') ? 'CPU Usage Monitor' : 'Resource Usage',
         config: {
           cluster: prompt.match(/(\w+-\w+)\s+cluster/)?.[1] || '',
-          metric: prompt.includes('cpu') ? 'cpu' : prompt.includes('memory') ? 'memory' : '',
-        },
-        explanation: 'This card will show resource utilization metrics for your clusters.',
-      }
+          metric: prompt.includes('cpu') ? 'cpu' : prompt.includes('memory') ? 'memory' : '' },
+        explanation: 'This card will show resource utilization metrics for your clusters.' }
     } else if (prompt.includes('event') || prompt.includes('warning') || prompt.includes('error')) {
       suggestion = {
         type: 'event_stream',
         title: prompt.includes('warning') ? 'Warning Events' : 'Event Stream',
         config: {
           namespace: prompt.match(/(\w+)\s+namespace/)?.[1] || '',
-          warningsOnly: prompt.includes('warning') || prompt.includes('error'),
-        },
-        explanation: 'This card displays a live stream of Kubernetes events.',
-      }
+          warningsOnly: prompt.includes('warning') || prompt.includes('error') },
+        explanation: 'This card displays a live stream of Kubernetes events.' }
     } else if (prompt.includes('pod') || prompt.includes('restart') || prompt.includes('crash')) {
       suggestion = {
         type: 'pod_issues',
         title: prompt.includes('restart') ? 'Pod Restarts' : 'Pod Issues',
         config: {
-          minRestarts: prompt.match(/(\d+)\s+times/)?.[1] ? parseInt(prompt.match(/(\d+)\s+times/)?.[1] || '0') : undefined,
-        },
-        explanation: 'This card tracks pods with issues like crashes, restarts, or failures.',
-      }
+          minRestarts: prompt.match(/(\d+)\s+times/)?.[1] ? parseInt(prompt.match(/(\d+)\s+times/)?.[1] || '0') : undefined },
+        explanation: 'This card tracks pods with issues like crashes, restarts, or failures.' }
     } else if (prompt.includes('deploy') || prompt.includes('rollout')) {
       suggestion = {
         type: 'deployment_status',
         title: 'Deployment Status',
         config: {
-          cluster: prompt.match(/(\w+-\w+)\s+cluster/)?.[1] || '',
-        },
-        explanation: 'This card monitors deployment rollout progress.',
-      }
+          cluster: prompt.match(/(\w+-\w+)\s+cluster/)?.[1] || '' },
+        explanation: 'This card monitors deployment rollout progress.' }
     } else if (prompt.includes('security') || prompt.includes('privileged') || prompt.includes('root')) {
       suggestion = {
         type: 'security_issues',
         title: 'Security Issues',
         config: {},
-        explanation: 'This card highlights security misconfigurations like privileged containers.',
-      }
+        explanation: 'This card highlights security misconfigurations like privileged containers.' }
     } else if (prompt.includes('health') || prompt.includes('cluster') || prompt.includes('status')) {
       suggestion = {
         type: 'cluster_health',
         title: 'Cluster Health',
         config: {},
-        explanation: 'This card shows the overall health status of your clusters.',
-      }
+        explanation: 'This card shows the overall health status of your clusters.' }
     } else {
       // Default suggestion
       suggestion = {
         type: 'cluster_metrics',
         title: 'Cluster Metrics',
         config: {},
-        explanation: 'Based on your request, this card will show relevant cluster metrics.',
-      }
+        explanation: 'Based on your request, this card will show relevant cluster metrics.' }
     }
 
     setAiSuggestion(suggestion)
@@ -238,11 +226,11 @@ export function ReplaceCardModal({ isOpen, card, onClose, onReplace }: ReplaceCa
             <div className="space-y-4">
               <div className="p-4 rounded-lg bg-purple-500/10 border border-purple-500/20">
                 <div className="flex items-center gap-2 mb-2">
-                  <Sparkles className="w-4 h-4 text-purple-400" />
-                  <span className="text-sm font-medium text-purple-300">{t('dashboard.replace.aiPoweredCreation')}</span>
+                  <Lightbulb className="w-4 h-4 text-purple-400" />
+                  <span className="text-sm font-medium text-purple-300">{t('dashboard.replace.smartSuggestions')}</span>
                 </div>
                 <p className="text-xs text-muted-foreground">
-                  {t('dashboard.replace.aiCreationDescription')}
+                  {t('dashboard.replace.smartSuggestionsDescription')}
                 </p>
               </div>
 
@@ -276,17 +264,17 @@ export function ReplaceCardModal({ isOpen, card, onClose, onReplace }: ReplaceCa
                   </>
                 ) : (
                   <>
-                    <Sparkles className="w-4 h-4" />
+                    <Lightbulb className="w-4 h-4" />
                     {t('dashboard.replace.generateCard')}
                   </>
                 )}
               </button>
 
-              {/* AI Suggestion */}
+              {/* Suggestion result */}
               {aiSuggestion && (
                 <div className="mt-4 p-4 rounded-lg bg-green-500/10 border border-green-500/20">
                   <div className="flex items-center gap-2 mb-3">
-                    <Sparkles className="w-4 h-4 text-green-400" />
+                    <Lightbulb className="w-4 h-4 text-green-400" />
                     <span className="text-sm font-medium text-green-300">{t('dashboard.replace.suggestedCard')}</span>
                   </div>
                   <div className="space-y-2">

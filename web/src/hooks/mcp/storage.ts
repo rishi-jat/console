@@ -4,8 +4,9 @@ import { reportAgentDataSuccess, isAgentUnavailable } from '../useLocalAgent'
 import { isDemoMode } from '../../lib/demoMode'
 import { registerCacheReset, registerRefetch } from '../../lib/modeTransition'
 import { kubectlProxy } from '../../lib/kubectlProxy'
-import { REFRESH_INTERVAL_MS, getEffectiveInterval, LOCAL_AGENT_URL, clusterCacheRef } from './shared'
+import { REFRESH_INTERVAL_MS, getEffectiveInterval, LOCAL_AGENT_URL, agentFetch, clusterCacheRef } from './shared'
 import { subscribePolling } from './pollingManager'
+import { settledWithConcurrency } from '../../lib/utils/concurrency'
 import { MCP_HOOK_TIMEOUT_MS } from '../../lib/constants/network'
 import type { PVC, PV, ResourceQuota, LimitRange, ResourceQuotaSpec } from './types'
 
@@ -152,14 +153,14 @@ export function usePVCs(cluster?: string, namespace?: string) {
           let anySuccess = false
 
           // Fetch PVCs from each cluster (in parallel for speed)
-          const fetchPromises = clustersToFetch.map(async (c) => {
+          const fetchTasks = clustersToFetch.map((c) => async () => {
             try {
               const params = new URLSearchParams()
               params.append('cluster', c.context || c.name)
               if (namespace) params.append('namespace', namespace)
               const controller = new AbortController()
               const timeoutId = setTimeout(() => controller.abort(), MCP_HOOK_TIMEOUT_MS)
-              const response = await fetch(`${LOCAL_AGENT_URL}/pvcs?${params}`, {
+              const response = await agentFetch(`${LOCAL_AGENT_URL}/pvcs?${params}`, {
                 signal: controller.signal,
                 headers: { 'Accept': 'application/json' },
               })
@@ -175,11 +176,11 @@ export function usePVCs(cluster?: string, namespace?: string) {
             return { success: false, pvcs: [] }
           })
 
-          const results = await Promise.all(fetchPromises)
-          for (const result of (results || [])) {
-            if (result.success) {
+          const settled = await settledWithConcurrency(fetchTasks)
+          for (const entry of (settled || [])) {
+            if (entry.status === 'fulfilled' && entry.value.success) {
               anySuccess = true
-              allPVCs.push(...result.pvcs)
+              allPVCs.push(...entry.value.pvcs)
             }
           }
 

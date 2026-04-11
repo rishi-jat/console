@@ -1,11 +1,12 @@
 import { useMemo } from 'react'
+import { useTranslation } from 'react-i18next'
 import { Box, CheckCircle, AlertTriangle, Clock, ChevronRight } from 'lucide-react'
 import { ClusterBadge } from '../ui/ClusterBadge'
 import { useDrillDownActions } from '../../hooks/useDrillDown'
 import { useCachedDeployments } from '../../hooks/useCachedData'
 import { useGlobalFilters } from '../../hooks/useGlobalFilters'
 import { useCardLoadingState } from './CardDataContext'
-import { CardSearchInput, CardControlsRow, CardPaginationFooter, CardSkeleton, CardAIActions } from '../../lib/cards/CardComponents'
+import { CardSearchInput, CardControlsRow, CardPaginationFooter, CardSkeleton, CardAIActions, CardEmptyState } from '../../lib/cards/CardComponents'
 import { RefreshIndicator } from '../ui/RefreshIndicator'
 import { useCardData, commonComparators } from '../../lib/cards/cardHooks'
 
@@ -24,8 +25,7 @@ const APP_SORT_COMPARATORS = {
     return bScore - aScore
   },
   name: commonComparators.string<AppData>('name'),
-  clusters: (a: AppData, b: AppData) => b.clusters.length - a.clusters.length,
-}
+  clusters: (a: AppData, b: AppData) => b.clusters.length - a.clusters.length }
 
 // eslint-disable-next-line @typescript-eslint/no-empty-object-type
 interface AppStatusConfig {
@@ -45,6 +45,7 @@ interface AppData {
 }
 
 export function AppStatus(_props: AppStatusProps) {
+  const { t } = useTranslation()
   const { drillToDeployment } = useDrillDownActions()
   const { deployments, isLoading, isRefreshing, isDemoFallback, isFailed, consecutiveFailures, lastRefresh } = useCachedDeployments()
 
@@ -55,14 +56,12 @@ export function AppStatus(_props: AppStatusProps) {
     isDemoData: isDemoFallback,
     hasAnyData: deployments.length > 0,
     isFailed,
-    consecutiveFailures,
-  })
+    consecutiveFailures })
 
   const {
     selectedClusters: globalSelectedClusters,
     isAllClustersSelected,
-    customFilter,
-  } = useGlobalFilters()
+    customFilter } = useGlobalFilters()
 
   // Transform deployments into app data grouped by name
   const rawApps = useMemo((): AppData[] => {
@@ -75,8 +74,7 @@ export function AppStatus(_props: AppStatusProps) {
           name: dep.name,
           namespace: dep.namespace,
           clusters: [],
-          status: { healthy: 0, warning: 0, pending: 0 },
-        })
+          status: { healthy: 0, warning: 0, pending: 0 } })
       }
       const app = appMap.get(key)!
       const clusterName = dep.cluster?.split('/').pop() || dep.cluster || 'unknown'
@@ -100,7 +98,7 @@ export function AppStatus(_props: AppStatusProps) {
 
   // Pre-filter by global cluster filter and custom text filter
   // (useCardData's clusterField doesn't support array fields, so we handle it here)
-  const preFilteredApps = useMemo(() => {
+  const preFilteredApps = (() => {
     let filtered = rawApps
 
     // Filter by global selected clusters (clusters is an array field)
@@ -109,8 +107,7 @@ export function AppStatus(_props: AppStatusProps) {
         ...app,
         clusters: app.clusters.filter(c =>
           globalSelectedClusters.some(gc => gc.includes(c) || c.includes(gc.split('/').pop() || gc))
-        ),
-      })).filter(app => app.clusters.length > 0)
+        ) })).filter(app => app.clusters.length > 0)
     }
 
     // Apply global custom text filter
@@ -123,7 +120,7 @@ export function AppStatus(_props: AppStatusProps) {
     }
 
     return filtered
-  }, [rawApps, globalSelectedClusters, isAllClustersSelected, customFilter])
+  })()
 
   // Use shared card data hook for search, cluster filter, sorting, and pagination
   const {
@@ -144,31 +141,25 @@ export function AppStatus(_props: AppStatusProps) {
       availableClusters,
       showClusterFilter,
       setShowClusterFilter,
-      clusterFilterRef,
-    },
+      clusterFilterRef },
     sorting: {
       sortBy,
       setSortBy,
       sortDirection,
-      setSortDirection,
-    },
+      setSortDirection },
     containerRef,
-    containerStyle,
-  } = useCardData<AppData, SortByOption>(preFilteredApps, {
+    containerStyle } = useCardData<AppData, SortByOption>(preFilteredApps, {
     filter: {
       searchFields: ['name', 'namespace'],
       // No clusterField -- array cluster filtering is handled in preFilteredApps
       storageKey: 'app-status',
       customPredicate: (item, query) =>
-        item.clusters.some(c => c.toLowerCase().includes(query)),
-    },
+        item.clusters.some(c => c.toLowerCase().includes(query)) },
     sort: {
       defaultField: 'status',
       defaultDirection: 'desc',
-      comparators: APP_SORT_COMPARATORS,
-    },
-    defaultLimit: 5,
-  })
+      comparators: APP_SORT_COMPARATORS },
+    defaultLimit: 5 })
 
   const handleAppClick = (app: AppData, cluster: string) => {
     // Drill down to the deployment in the specified cluster
@@ -181,10 +172,11 @@ export function AppStatus(_props: AppStatusProps) {
 
   if (showEmptyState) {
     return (
-      <div className="h-full flex flex-col items-center justify-center min-h-card text-muted-foreground">
-        <p className="text-sm">No applications found</p>
-        <p className="text-xs mt-1">Deploy applications to see their status</p>
-      </div>
+      <CardEmptyState
+        icon={Box}
+        title={t('appStatus.noApps', 'No applications found')}
+        message={t('appStatus.deployApps', 'Deploy applications to see their status across clusters.')}
+      />
     )
   }
 
@@ -194,8 +186,7 @@ export function AppStatus(_props: AppStatusProps) {
       <CardControlsRow
         clusterIndicator={{
           selectedCount: localClusterFilter.length,
-          totalCount: availableClusters.length,
-        }}
+          totalCount: availableClusters.length }}
         clusterFilter={{
           availableClusters,
           selectedClusters: localClusterFilter,
@@ -204,8 +195,7 @@ export function AppStatus(_props: AppStatusProps) {
           isOpen: showClusterFilter,
           setIsOpen: setShowClusterFilter,
           containerRef: clusterFilterRef,
-          minClusters: 1,
-        }}
+          minClusters: 1 }}
         cardControls={{
           limit: itemsPerPage,
           onLimitChange: setItemsPerPage,
@@ -213,8 +203,7 @@ export function AppStatus(_props: AppStatusProps) {
           sortOptions: SORT_OPTIONS,
           onSortChange: setSortBy as (sortBy: string) => void,
           sortDirection,
-          onSortDirectionChange: setSortDirection,
-        }}
+          onSortDirectionChange: setSortDirection }}
       />
 
       <RefreshIndicator isRefreshing={isRefreshing} lastUpdated={lastRefresh ? new Date(lastRefresh) : null} size="xs" />
@@ -227,19 +216,19 @@ export function AppStatus(_props: AppStatusProps) {
         className="mb-3"
       />
 
-      <div ref={containerRef} className="flex-1 space-y-3 overflow-y-auto" style={containerStyle}>
+      <div ref={containerRef} className="flex-1 space-y-1.5 overflow-y-auto" style={containerStyle}>
       {apps.length === 0 ? (
         <div className="flex items-center justify-center h-full text-muted-foreground text-sm">
           No workloads found
         </div>
-      ) : apps.map((app) => {
+      ) : apps.map((app, idx) => {
         const total = app.status.healthy + app.status.warning + app.status.pending
 
         return (
           <div
             key={`${app.name}-${app.namespace}`}
             onClick={() => handleAppClick(app, app.clusters[0])}
-            className="p-3 rounded-lg bg-secondary/30 hover:bg-secondary/50 transition-colors cursor-pointer group"
+            className={`p-3 rounded-lg hover:bg-secondary/50 transition-colors cursor-pointer group ${idx % 2 === 0 ? 'bg-secondary/20' : 'bg-secondary/40'}`}
             title={`Click to view details for ${app.name}`}
           >
             <div className="flex items-center justify-between mb-2 gap-2">
@@ -259,8 +248,7 @@ export function AppStatus(_props: AppStatusProps) {
                       name: app.name,
                       namespace: app.namespace,
                       cluster: app.clusters[0],
-                      status: app.status.warning > 0 ? 'Warning' : 'Pending',
-                    }}
+                      status: app.status.warning > 0 ? 'Warning' : 'Pending' }}
                     issues={[
                       ...(app.status.warning > 0 ? [{ name: 'Warning', message: `${app.status.warning} instance(s) with warnings across ${app.clusters.length} cluster(s)` }] : []),
                       ...(app.status.pending > 0 ? [{ name: 'Pending', message: `${app.status.pending} instance(s) pending` }] : []),

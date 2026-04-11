@@ -7,14 +7,14 @@ import { useDrillDownActions } from '../../hooks/useDrillDown'
 import { ClusterBadge } from '../ui/ClusterBadge'
 import { LimitedAccessWarning } from '../ui/LimitedAccessWarning'
 import { StatusBadge } from '../ui/StatusBadge'
+import { RefreshIndicator } from '../ui/RefreshIndicator'
 import { useCardLoadingState } from './CardDataContext'
 import { DynamicCardErrorBoundary } from './DynamicCardErrorBoundary'
 import { useCardData, commonComparators } from '../../lib/cards/cardHooks'
 import {
   CardSkeleton, CardEmptyState, CardSearchInput,
   CardControlsRow, CardListItem, CardPaginationFooter,
-  CardAIActions,
-} from '../../lib/cards/CardComponents'
+  CardAIActions } from '../../lib/cards/CardComponents'
 import { useTranslation } from 'react-i18next'
 
 type SortByOption = 'status' | 'name' | 'cluster'
@@ -30,6 +30,31 @@ interface DeploymentIssuesProps {
   config?: Record<string, unknown>
 }
 
+// #6119: hoist to module scope so the reference is stable across renders.
+// Passing an inline filter/sort object into useCardData invalidates its
+// internal useMemo deps every render and caused "Maximum update depth
+// exceeded" on the deployments card. Same pattern as #6232's
+// DeploymentStatus fix.
+const CARD_DATA_FILTER_CONFIG = {
+  searchFields: ['name', 'namespace', 'cluster', 'reason', 'message'] as (keyof DeploymentIssue)[],
+  clusterField: 'cluster' as keyof DeploymentIssue,
+  storageKey: 'deployment-issues',
+} as const
+
+const CARD_DATA_SORT_CONFIG = {
+  defaultField: 'status' as const,
+  defaultDirection: 'asc' as const,
+  comparators: {
+    status: (a: DeploymentIssue, b: DeploymentIssue) =>
+      (a.reason || '').localeCompare(b.reason || ''),
+    name: commonComparators.string<DeploymentIssue>('name'),
+    cluster: (a: DeploymentIssue, b: DeploymentIssue) =>
+      (a.cluster || '').localeCompare(b.cluster || ''),
+  },
+} as const
+
+const DEFAULT_PAGE_LIMIT = 5
+
 const getIssueIcon = (status: string, t: TFunction<readonly ['cards', 'common']>): { icon: typeof AlertCircle; tooltip: string } => {
   if (status.includes('Unavailable')) return { icon: AlertCircle, tooltip: t('deploymentIssues.tooltipUnavailable') }
   if (status.includes('Progressing')) return { icon: Clock, tooltip: t('deploymentIssues.tooltipProgressing') }
@@ -39,10 +64,7 @@ const getIssueIcon = (status: string, t: TFunction<readonly ['cards', 'common']>
 
 function DeploymentIssuesInternal({ config }: DeploymentIssuesProps) {
   const { t } = useTranslation(['cards', 'common'])
-  const SORT_OPTIONS = useMemo(() =>
-    SORT_OPTIONS_KEYS.map(opt => ({ value: opt.value, label: String(t(opt.labelKey)) })),
-    [t]
-  )
+  const SORT_OPTIONS = SORT_OPTIONS_KEYS.map(opt => ({ value: opt.value, label: String(t(opt.labelKey)) }))
   const clusterConfig = config?.cluster as string | undefined
   const namespaceConfig = config?.namespace as string | undefined
   const {
@@ -52,7 +74,8 @@ function DeploymentIssuesInternal({ config }: DeploymentIssuesProps) {
     isDemoFallback,
     isFailed,
     consecutiveFailures,
-    error
+    error,
+    lastRefresh: issuesLastRefresh
   } = useCachedDeploymentIssues(clusterConfig, namespaceConfig)
 
   const { drillToDeployment } = useDrillDownActions()
@@ -65,8 +88,19 @@ function DeploymentIssuesInternal({ config }: DeploymentIssuesProps) {
     isDemoData: isDemoFallback,
     hasAnyData: hasData,
     isFailed,
-    consecutiveFailures,
-  })
+    consecutiveFailures })
+
+  // #6119: memoized empty deps — the filter/sort config is hoisted to
+  // module scope, so the outer object is stable across renders. Matches
+  // the #6232 DeploymentStatus fix.
+  const cardDataConfig = useMemo(
+    () => ({
+      filter: CARD_DATA_FILTER_CONFIG,
+      sort: CARD_DATA_SORT_CONFIG,
+      defaultLimit: DEFAULT_PAGE_LIMIT,
+    }),
+    [],
+  )
 
   // Use shared card data hook for filtering, sorting, and pagination
   const {
@@ -87,33 +121,14 @@ function DeploymentIssuesInternal({ config }: DeploymentIssuesProps) {
       availableClusters: availableClustersForFilter,
       showClusterFilter,
       setShowClusterFilter,
-      clusterFilterRef,
-    },
+      clusterFilterRef },
     sorting: {
       sortBy,
       setSortBy,
       sortDirection,
-      setSortDirection,
-    },
+      setSortDirection },
     containerRef,
-    containerStyle,
-  } = useCardData<DeploymentIssue, SortByOption>(rawIssues, {
-    filter: {
-      searchFields: ['name', 'namespace', 'cluster', 'reason', 'message'],
-      clusterField: 'cluster',
-      storageKey: 'deployment-issues',
-    },
-    sort: {
-      defaultField: 'status',
-      defaultDirection: 'asc',
-      comparators: {
-        status: (a, b) => (a.reason || '').localeCompare(b.reason || ''),
-        name: commonComparators.string('name'),
-        cluster: (a, b) => (a.cluster || '').localeCompare(b.cluster || ''),
-      },
-    },
-    defaultLimit: 5,
-  })
+    containerStyle } = useCardData<DeploymentIssue, SortByOption>(rawIssues, cardDataConfig)
 
   const handleDeploymentClick = (issue: DeploymentIssue) => {
     if (!issue.cluster) {
@@ -124,12 +139,22 @@ function DeploymentIssuesInternal({ config }: DeploymentIssuesProps) {
       replicas: issue.replicas,
       readyReplicas: issue.readyReplicas,
       reason: issue.reason,
-      message: issue.message,
-    })
+      message: issue.message })
   }
 
   if (showSkeleton) {
     return <CardSkeleton type="list" rows={3} showHeader rowHeight={100} />
+  }
+
+  if (isFailed && !hookLoading && rawIssues.length === 0) {
+    return (
+      <CardEmptyState
+        icon={AlertTriangle}
+        title={t('deploymentIssues.failedToLoad', 'Failed to load deployment data')}
+        message={error || t('deploymentIssues.apiUnavailable', 'Deployment API is unavailable')}
+        variant="error"
+      />
+    )
   }
 
   if (issues.length === 0 && rawIssues.length === 0) {
@@ -160,12 +185,19 @@ function DeploymentIssuesInternal({ config }: DeploymentIssuesProps) {
           <StatusBadge color="red" title={t('deploymentIssues.issuesTitle', { count: rawIssues.length })}>
             {t('deploymentIssues.nIssues', { count: rawIssues.length })}
           </StatusBadge>
+          {/* #6217 part 3: freshness indicator. */}
+          <RefreshIndicator
+            isRefreshing={isRefreshing}
+            lastUpdated={typeof issuesLastRefresh === 'number' ? new Date(issuesLastRefresh) : null}
+            size="sm"
+            showLabel={true}
+            staleThresholdMinutes={5}
+          />
         </div>
         <CardControlsRow
           clusterIndicator={{
             selectedCount: localClusterFilter.length,
-            totalCount: availableClustersForFilter.length,
-          }}
+            totalCount: availableClustersForFilter.length }}
           clusterFilter={{
             availableClusters: availableClustersForFilter,
             selectedClusters: localClusterFilter,
@@ -174,8 +206,7 @@ function DeploymentIssuesInternal({ config }: DeploymentIssuesProps) {
             isOpen: showClusterFilter,
             setIsOpen: setShowClusterFilter,
             containerRef: clusterFilterRef,
-            minClusters: 1,
-          }}
+            minClusters: 1 }}
           cardControls={{
             limit: itemsPerPage,
             onLimitChange: setItemsPerPage,
@@ -183,8 +214,7 @@ function DeploymentIssuesInternal({ config }: DeploymentIssuesProps) {
             sortOptions: SORT_OPTIONS,
             onSortChange: (v) => setSortBy(v as SortByOption),
             sortDirection,
-            onSortDirectionChange: setSortDirection,
-          }}
+            onSortDirectionChange: setSortDirection }}
         />
       </div>
 
@@ -240,8 +270,7 @@ function DeploymentIssuesInternal({ config }: DeploymentIssuesProps) {
                     name: issue.name,
                     namespace: issue.namespace,
                     cluster: issue.cluster || 'default',
-                    status: issue.reason || 'Issue',
-                  }}
+                    status: issue.reason || 'Issue' }}
                   issues={[{ name: issue.reason || 'Unknown', message: issue.message || 'Deployment issue' }]}
                   additionalContext={{ replicas: issue.replicas, readyReplicas: issue.readyReplicas }}
                 />

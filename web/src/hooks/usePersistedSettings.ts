@@ -5,11 +5,11 @@ import {
   collectFromLocalStorage,
   restoreToLocalStorage,
   isLocalStorageEmpty,
-  SETTINGS_CHANGED_EVENT,
-} from '../lib/settingsSync'
+  SETTINGS_CHANGED_EVENT } from '../lib/settingsSync'
 import { LOCAL_AGENT_HTTP_URL } from '../lib/constants'
 import { FETCH_DEFAULT_TIMEOUT_MS } from '../lib/constants/network'
 import { isNetlifyDeployment } from '../lib/demoMode'
+import { safeRevokeObjectURL } from '../lib/download'
 
 const DEBOUNCE_MS = 1000
 const RETRY_DELAY_MS = 3000
@@ -24,10 +24,8 @@ async function settingsFetch<T>(path: string, options?: RequestInit): Promise<T>
     ...options,
     headers: {
       'Content-Type': 'application/json',
-      ...options?.headers,
-    },
-    signal: options?.signal ?? AbortSignal.timeout(15000),
-  })
+      ...options?.headers },
+    signal: options?.signal ?? AbortSignal.timeout(15000) })
   if (!response.ok) throw new Error(`HTTP ${response.status}`)
   // Use .catch() on .json() to prevent Firefox from firing unhandledrejection
   // before the caller's try/catch processes the rejection (microtask timing issue).
@@ -74,8 +72,7 @@ export function usePersistedSettings() {
           try {
             await settingsFetch('/settings', {
               method: 'PUT',
-              body: JSON.stringify(current),
-            })
+              body: JSON.stringify(current) })
             if (mountedRef.current) {
               setSyncStatus('saved')
               setLastSaved(new Date())
@@ -101,13 +98,12 @@ export function usePersistedSettings() {
   }, [])
 
   // Export settings as encrypted backup file
-  const exportSettings = useCallback(async () => {
+  const exportSettings = async () => {
     try {
       const response = await fetch(`${LOCAL_AGENT_HTTP_URL}/settings/export`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        signal: AbortSignal.timeout(FETCH_DEFAULT_TIMEOUT_MS),
-      })
+        signal: AbortSignal.timeout(FETCH_DEFAULT_TIMEOUT_MS) })
       if (!response.ok) throw new Error('Export failed')
       const blob = await response.blob()
       const url = URL.createObjectURL(blob)
@@ -117,22 +113,21 @@ export function usePersistedSettings() {
       document.body.appendChild(a)
       a.click()
       document.body.removeChild(a)
-      URL.revokeObjectURL(url)
+      safeRevokeObjectURL(url)
     } catch (err) {
       console.error('[settings] export failed:', err)
       throw err
     }
-  }, [])
+  }
 
   // Import settings from a backup file
-  const importSettings = useCallback(async (file: File) => {
+  const importSettings = async (file: File) => {
     try {
       const text = await file.text()
       await settingsFetch('/settings/import', {
         method: 'PUT',
         body: text,
-        signal: AbortSignal.timeout(10000),
-      })
+        signal: AbortSignal.timeout(10000) })
       // Reload settings from backend after import
       const data = await settingsFetch<AllSettings>('/settings')
       if (data) {
@@ -146,7 +141,7 @@ export function usePersistedSettings() {
       console.error('[settings] import failed:', err)
       throw err
     }
-  }, [])
+  }
 
   // Initial load from backend — re-runs when auth state changes
   useEffect(() => {
@@ -164,16 +159,23 @@ export function usePersistedSettings() {
         const data = await settingsFetch<AllSettings>('/settings')
         if (!mountedRef.current) return
 
-        if (isLocalStorageEmpty() && data) {
+        // Determine whether the backend file has meaningful content
+        const backendHasData = data && (
+          data.theme || data.aiMode || data.feedbackGithubToken ||
+          Object.keys(data.apiKeys || {}).length > 0)
+
+        if (isLocalStorageEmpty() && backendHasData) {
           // Cache was cleared — restore from backend file
-          const hasData = data.theme || data.aiMode || data.feedbackGithubToken ||
-            Object.keys(data.apiKeys || {}).length > 0
-          if (hasData) {
-            restoreToLocalStorage(data)
-            setRestoredFromFile(true)
-          }
+          restoreToLocalStorage(data)
+          setRestoredFromFile(true)
+        } else if (backendHasData) {
+          // Both sides have data — backend is authoritative (#5426).
+          // Merge: backend wins for any key it has, then push the merged
+          // result back so the two stay in sync.
+          restoreToLocalStorage(data)
+          saveToBackend()
         } else {
-          // localStorage has data — sync it to backend (initial sync)
+          // Backend is empty but localStorage has data — seed the backend
           saveToBackend()
         }
         setSyncStatus('saved')
@@ -217,6 +219,5 @@ export function usePersistedSettings() {
     lastSaved,
     filePath,
     exportSettings,
-    importSettings,
-  }
+    importSettings }
 }

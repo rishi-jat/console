@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { ChevronRight, Plus, Edit, Filter, ChevronDown, Server, RotateCcw } from 'lucide-react'
 import { useClusters } from '../../hooks/useMCP'
@@ -7,6 +7,7 @@ import { useDrillDownActions } from '../../hooks/useDrillDown'
 import { useGlobalFilters } from '../../hooks/useGlobalFilters'
 import { Skeleton } from '../ui/Skeleton'
 import { ClusterBadge } from '../ui/ClusterBadge'
+import { RefreshIndicator } from '../ui/RefreshIndicator'
 import { useCardData, commonComparators } from '../../lib/cards/cardHooks'
 import { CardSearchInput, CardControlsRow, CardPaginationFooter } from '../../lib/cards/CardComponents'
 import { useCardLoadingState } from './CardDataContext'
@@ -54,7 +55,12 @@ const SORT_OPTIONS = [
 
 export function HelmValuesDiff({ config }: HelmValuesDiffProps) {
   const { t } = useTranslation()
-  const { deduplicatedClusters: allClusters, isLoading: clustersLoading, isRefreshing: clustersRefreshing, isFailed: clustersFailed, consecutiveFailures: clustersFailures } = useClusters()
+  const { deduplicatedClusters: allClusters, isLoading: clustersLoading, isRefreshing: clustersRefreshing, isFailed: clustersFailed, consecutiveFailures: clustersFailures, lastRefresh: clustersLastRefreshDate } = useClusters()
+  // #6271: useClusters returns Date|null; normalize to numeric epoch
+  // so it merges cleanly with the numeric `lastRefresh` from useCache.
+  const clustersLastRefresh: number | null = clustersLastRefreshDate instanceof Date
+    ? clustersLastRefreshDate.getTime()
+    : (typeof clustersLastRefreshDate === 'number' ? clustersLastRefreshDate : null)
   const [selectedCluster, setSelectedCluster] = useState<string>(config?.cluster || '')
   const [selectedRelease, setSelectedRelease] = useState<string>(config?.release || '')
   const { drillToHelm } = useDrillDownActions()
@@ -82,8 +88,7 @@ export function HelmValuesDiff({ config }: HelmValuesDiffProps) {
       const rect = clusterFilterBtnRef.current.getBoundingClientRect()
       setDropdownStyle({
         top: rect.bottom + 4,
-        left: Math.max(8, rect.right - 192),
-      })
+        left: Math.max(8, rect.right - 192) })
     } else {
       setDropdownStyle(null)
     }
@@ -97,8 +102,7 @@ export function HelmValuesDiff({ config }: HelmValuesDiffProps) {
   const {
     selectedClusters: globalSelectedClusters,
     isAllClustersSelected,
-    customFilter,
-  } = useGlobalFilters()
+    customFilter } = useGlobalFilters()
 
   // Sync local selection with global filter changes
   useEffect(() => {
@@ -129,7 +133,7 @@ export function HelmValuesDiff({ config }: HelmValuesDiffProps) {
   }, [globalSelectedClusters, isAllClustersSelected])
 
   // Fetch ALL Helm releases from all clusters once (not per-cluster)
-  const { releases: allHelmReleases, isLoading: releasesLoading, isDemoFallback: isDemoData } = useCachedHelmReleases()
+  const { releases: allHelmReleases, isLoading: releasesLoading, isRefreshing: releasesRefreshing, isDemoFallback: isDemoData, lastRefresh: releasesLastRefresh } = useCachedHelmReleases()
 
   // Auto-select first cluster and release in demo mode
   useEffect(() => {
@@ -148,20 +152,20 @@ export function HelmValuesDiff({ config }: HelmValuesDiffProps) {
   }, [isDemoData, allHelmReleases, allClusters])
 
   // Look up namespace from the selected release (required for helm commands)
-  const selectedReleaseNamespace = useMemo(() => {
+  const selectedReleaseNamespace = (() => {
     if (!selectedCluster || !selectedRelease) return undefined
     const release = allHelmReleases.find(
       r => r.cluster === selectedCluster && r.name === selectedRelease
     )
     return release?.namespace
-  }, [allHelmReleases, selectedCluster, selectedRelease])
+  })()
 
   // Fetch values for selected release (hook handles caching)
   const {
     values,
     isLoading: valuesLoading,
     isRefreshing: valuesRefreshing,
-  } = useCachedHelmValues(
+    lastRefresh: valuesLastRefresh } = useCachedHelmValues(
     selectedCluster || undefined,
     selectedRelease || undefined,
     selectedReleaseNamespace
@@ -171,12 +175,11 @@ export function HelmValuesDiff({ config }: HelmValuesDiffProps) {
   const hasClusterData = allClusters.length > 0
   useCardLoadingState({
     isLoading: clustersLoading && !hasClusterData,
-    isRefreshing: clustersRefreshing || valuesRefreshing,
+    isRefreshing: clustersRefreshing || releasesRefreshing || valuesRefreshing,
     hasAnyData: hasClusterData,
     isDemoData,
     isFailed: clustersFailed,
-    consecutiveFailures: clustersFailures,
-  })
+    consecutiveFailures: clustersFailures })
   // Cached hook doesn't return format; values are always JSON objects
   const format = 'json' as string
 
@@ -184,7 +187,7 @@ export function HelmValuesDiff({ config }: HelmValuesDiffProps) {
   const isLoading = (clustersLoading || releasesLoading) && allHelmReleases.length === 0
 
   // Apply global filters to clusters
-  const clusters = useMemo(() => {
+  const clusters = (() => {
     let result = allClusters
 
     if (!isAllClustersSelected) {
@@ -200,12 +203,10 @@ export function HelmValuesDiff({ config }: HelmValuesDiffProps) {
     }
 
     return result
-  }, [allClusters, globalSelectedClusters, isAllClustersSelected, customFilter])
+  })()
 
   // Available clusters for the local cluster filter dropdown
-  const chartFilterClusters = useMemo(() => {
-    return clusters.filter(c => c.reachable !== false)
-  }, [clusters])
+  const chartFilterClusters = clusters.filter(c => c.reachable !== false)
 
   const toggleClusterFilter = (clusterName: string) => {
     if (localClusterFilter.includes(clusterName)) {
@@ -220,19 +221,19 @@ export function HelmValuesDiff({ config }: HelmValuesDiffProps) {
   }
 
   // Filter releases locally by selected cluster (no API call)
-  const filteredReleases = useMemo(() => {
+  const filteredReleases = (() => {
     if (!selectedCluster) return allHelmReleases
     return allHelmReleases.filter(r => r.cluster === selectedCluster)
-  }, [allHelmReleases, selectedCluster])
+  })()
 
   // Get unique release names for dropdown
-  const releases = useMemo(() => {
+  const releases = (() => {
     const releaseSet = new Set(filteredReleases.map(r => r.name))
     return Array.from(releaseSet).sort()
-  }, [filteredReleases])
+  })()
 
   // Process values into entries (before useCardData filtering)
-  const rawValueEntries = useMemo(() => {
+  const rawValueEntries = (() => {
     if (!values) return []
 
     let entries: ValueEntry[] = []
@@ -245,7 +246,7 @@ export function HelmValuesDiff({ config }: HelmValuesDiffProps) {
     }
 
     return entries
-  }, [values, format])
+  })()
 
   // Use useCardData for filtering, sorting, and pagination
   const {
@@ -260,21 +261,16 @@ export function HelmValuesDiff({ config }: HelmValuesDiffProps) {
     filters,
     sorting,
     containerRef,
-    containerStyle,
-  } = useCardData<ValueEntry, SortByOption>(rawValueEntries, {
+    containerStyle } = useCardData<ValueEntry, SortByOption>(rawValueEntries, {
     filter: {
-      searchFields: ['path', 'value'],
-    },
+      searchFields: ['path', 'value'] },
     sort: {
       defaultField: 'name',
       defaultDirection: 'asc',
       comparators: {
         name: commonComparators.string<ValueEntry>('path'),
-        cluster: commonComparators.string<ValueEntry>('value'),
-      },
-    },
-    defaultLimit: 5,
-  })
+        cluster: commonComparators.string<ValueEntry>('value') } },
+    defaultLimit: 5 })
 
   if (isLoading) {
     return (
@@ -301,6 +297,23 @@ export function HelmValuesDiff({ config }: HelmValuesDiffProps) {
           <span className="text-sm font-medium text-muted-foreground">
             {totalItems} values
           </span>
+          {/* part 5: freshness indicator.
+              #6265: card composes data from THREE caches (clusters,
+              releases, values), so the indicator must reflect the OLDEST
+              of the three timestamps — not just releases. Hide entirely
+              in demo mode (useCache may preserve stale lastRefresh from
+              a prior live session). */}
+          <RefreshIndicator
+            isRefreshing={clustersRefreshing || releasesRefreshing || valuesRefreshing}
+            lastUpdated={(() => {
+              if (isDemoData) return null
+              const ts = [clustersLastRefresh, releasesLastRefresh, valuesLastRefresh].filter((t): t is number => typeof t === 'number')
+              return ts.length > 0 ? new Date(Math.min(...ts)) : null
+            })()}
+            size="sm"
+            showLabel={true}
+            staleThresholdMinutes={5}
+          />
         </div>
         <div className="flex items-center gap-2">
           {/* Cluster count indicator */}
@@ -375,8 +388,7 @@ export function HelmValuesDiff({ config }: HelmValuesDiffProps) {
               sortOptions: SORT_OPTIONS,
               onSortChange: (v) => sorting.setSortBy(v as SortByOption),
               sortDirection: sorting.sortDirection,
-              onSortDirectionChange: sorting.setSortDirection,
-            }}
+              onSortDirectionChange: sorting.setSortDirection }}
           />
         </div>
       </div>
@@ -437,8 +449,7 @@ export function HelmValuesDiff({ config }: HelmValuesDiffProps) {
             onClick={() => {
               if (selectedCluster && selectedRelease && selectedReleaseNamespace) {
                 drillToHelm(selectedCluster, selectedReleaseNamespace, selectedRelease, {
-                  valuesCount: totalItems,
-                })
+                  valuesCount: totalItems })
               }
             }}
             className="flex items-center gap-2 mb-4 p-2 -mx-2 rounded-lg hover:bg-secondary/50 transition-colors cursor-pointer group min-w-0 overflow-hidden"

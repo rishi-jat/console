@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
+import { useState, useEffect, useMemo, useRef } from 'react'
 import { useCardExpanded } from './CardWrapper'
 import { useReportCardDataState } from './CardDataContext'
 import { RotateCcw, ChevronLeft, ChevronRight, Crown, Settings } from 'lucide-react'
@@ -123,8 +123,36 @@ function isValidSquare(row: number, col: number): boolean {
   return row >= 0 && row < 8 && col >= 0 && col < 8
 }
 
-// Get all possible moves for a piece (without checking for check)
-function getPieceMoves(board: Board, row: number, col: number, state: GameState): { row: number; col: number }[] {
+// Check if a square is attacked by the given color (used for castling validation).
+// Uses skipCastling=true to avoid infinite recursion with getPieceMoves.
+function isSquareAttackedBy(board: Board, targetRow: number, targetCol: number, attackerColor: Color, state: GameState): boolean {
+  for (let r = 0; r < 8; r++) {
+    for (let c = 0; c < 8; c++) {
+      const piece = board[r][c]
+      if (!piece || piece.color !== attackerColor) continue
+
+      // For pawns, only check diagonal attack squares (not forward moves)
+      if (piece.type === 'P') {
+        const direction = piece.color === 'white' ? -1 : 1
+        if (r + direction === targetRow && (c - 1 === targetCol || c + 1 === targetCol)) {
+          return true
+        }
+        continue
+      }
+
+      // For all other pieces, get moves with skipCastling to avoid recursion
+      const moves = getPieceMoves(board, r, c, state, true)
+      if (moves.some(m => m.row === targetRow && m.col === targetCol)) {
+        return true
+      }
+    }
+  }
+  return false
+}
+
+// Get all possible moves for a piece (without checking for check).
+// skipCastling prevents infinite recursion when called from isSquareAttackedBy.
+function getPieceMoves(board: Board, row: number, col: number, state: GameState, skipCastling = false): { row: number; col: number }[] {
   const piece = board[row][col]
   if (!piece) return []
 
@@ -189,15 +217,37 @@ function getPieceMoves(board: Board, row: number, col: number, state: GameState)
         }
       }
     }
-    // Castling
-    const rights = state.castlingRights[color]
-    const backRank = color === 'white' ? 7 : 0
-    if (row === backRank && col === 4) {
-      if (rights.kingside && !board[backRank][5] && !board[backRank][6]) {
-        moves.push({ row: backRank, col: 6 })
-      }
-      if (rights.queenside && !board[backRank][1] && !board[backRank][2] && !board[backRank][3]) {
-        moves.push({ row: backRank, col: 2 })
+    // Castling - only when not skipping (to avoid recursion from isSquareAttackedBy)
+    if (!skipCastling) {
+      const rights = state.castlingRights[color]
+      const backRank = color === 'white' ? 7 : 0
+      const opponent = color === 'white' ? 'black' : 'white'
+
+      if (row === backRank && col === 4) {
+        // Cannot castle while in check
+        const kingInCheck = isSquareAttackedBy(board, backRank, 4, opponent, state)
+
+        if (!kingInCheck) {
+          // Kingside: rook must be present, squares empty, king must not pass through or land on attacked square
+          const kingsideRook = board[backRank][7]
+          if (rights.kingside &&
+              kingsideRook && kingsideRook.type === 'R' && kingsideRook.color === color &&
+              !board[backRank][5] && !board[backRank][6] &&
+              !isSquareAttackedBy(board, backRank, 5, opponent, state) &&
+              !isSquareAttackedBy(board, backRank, 6, opponent, state)) {
+            moves.push({ row: backRank, col: 6 })
+          }
+
+          // Queenside: rook must be present, squares empty, king must not pass through or land on attacked square
+          const queensideRook = board[backRank][0]
+          if (rights.queenside &&
+              queensideRook && queensideRook.type === 'R' && queensideRook.color === color &&
+              !board[backRank][1] && !board[backRank][2] && !board[backRank][3] &&
+              !isSquareAttackedBy(board, backRank, 2, opponent, state) &&
+              !isSquareAttackedBy(board, backRank, 3, opponent, state)) {
+            moves.push({ row: backRank, col: 2 })
+          }
+        }
       }
     }
   } else {
@@ -515,7 +565,7 @@ function KubeChessInternal() {
   })
 
   const gameResult = useMemo(() => getGameResult(gameState), [gameState])
-  const inCheck = useMemo(() => isInCheck(gameState.board, gameState.turn, gameState), [gameState])
+  const inCheck = isInCheck(gameState.board, gameState.turn, gameState)
 
   // Save game state
   useEffect(() => {
@@ -580,7 +630,7 @@ function KubeChessInternal() {
   }, [gameResult, gameState.turn, playerColor])
 
   // Handle square click
-  const handleSquareClick = useCallback((row: number, col: number) => {
+  const handleSquareClick = (row: number, col: number) => {
     if (gameState.turn !== playerColor || gameResult !== 'ongoing' || isThinking) return
 
     const piece = gameState.board[row][col]
@@ -628,29 +678,29 @@ function KubeChessInternal() {
       setSelectedSquare(null)
       setValidMoves([])
     }
-  }, [gameState, selectedSquare, validMoves, playerColor, gameResult, isThinking])
+  }
 
   // Handle promotion
-  const handlePromotion = useCallback((pieceType: PieceType) => {
+  const handlePromotion = (pieceType: PieceType) => {
     if (promotionPending) {
       setGameState(prev => makeMove(prev, promotionPending.from, promotionPending.to, pieceType))
       setPromotionPending(null)
     }
-  }, [promotionPending])
+  }
 
   // Reset game
-  const resetGame = useCallback(() => {
+  const resetGame = () => {
     setGameState(createInitialState())
     setSelectedSquare(null)
     setValidMoves([])
     setPromotionPending(null)
     emitGameStarted('chess')
-  }, [])
+  }
 
   // Flip board
-  const flipBoard = useCallback(() => {
+  const flipBoard = () => {
     setPlayerColor(prev => prev === 'white' ? 'black' : 'white')
-  }, [])
+  }
 
   const cellSize = isExpanded ? 56 : 40
 

@@ -12,6 +12,8 @@ import {
   Hammer,
   Bookmark,
   ShieldAlert,
+  Orbit,
+  XCircle,
 } from 'lucide-react'
 import type { Mission, MissionStatus, MissionMessage } from '../../../hooks/useMissions'
 
@@ -31,6 +33,7 @@ export const STATUS_CONFIG: Record<MissionStatus, { icon: typeof Loader2; color:
   pending: { icon: Clock, color: 'text-yellow-400', label: 'Starting...' },
   running: { icon: Loader2, color: 'text-blue-400', label: 'Running' },
   cancelling: { icon: Loader2, color: 'text-orange-400', label: 'Cancelling...' },
+  cancelled: { icon: XCircle, color: 'text-orange-400', label: 'Cancelled' },
   waiting_input: { icon: MessageSquare, color: 'text-purple-400', label: 'Waiting for input' },
   completed: { icon: CheckCircle, color: 'text-green-400', label: 'Completed' },
   failed: { icon: AlertCircle, color: 'text-red-400', label: 'Failed' },
@@ -45,6 +48,7 @@ export const TYPE_ICONS: Record<Mission['type'], typeof ArrowUpCircle> = {
   deploy: Rocket,
   repair: Hammer,
   custom: Sparkles,
+  maintain: Orbit,
 }
 
 export type FontSize = 'sm' | 'base' | 'lg'

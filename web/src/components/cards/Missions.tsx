@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useMemo } from 'react'
 import {
   Rocket,
   XCircle,
@@ -10,8 +10,7 @@ import {
   Terminal,
   Stethoscope,
   Wrench,
-  Package,
-} from 'lucide-react'
+  Package } from 'lucide-react'
 import { cn } from '../../lib/cn'
 import { StatusBadge } from '../ui/StatusBadge'
 import { ClusterBadge, getClusterInfo } from '../ui/ClusterBadge'
@@ -45,8 +44,7 @@ const DEMO_MISSIONS: DeployMission[] = [
       { cluster: 'do-nyc1-prod', status: 'running', replicas: 3, readyReplicas: 3 },
     ],
     startedAt: Date.now() - 300000,
-    completedAt: Date.now() - 240000,
-  },
+    completedAt: Date.now() - 240000 },
   {
     id: 'demo-2',
     workload: 'api-gateway',
@@ -60,8 +58,7 @@ const DEMO_MISSIONS: DeployMission[] = [
       { cluster: 'rancher-mgmt', status: 'running', replicas: 2, readyReplicas: 2 },
     ],
     startedAt: Date.now() - 180000,
-    completedAt: Date.now() - 120000,
-  },
+    completedAt: Date.now() - 120000 },
 ]
 
 const STATUS_CONFIG: Record<DeployMissionStatus, {
@@ -76,34 +73,28 @@ const STATUS_CONFIG: Record<DeployMissionStatus, {
     color: 'text-blue-400',
     bg: 'bg-blue-500/20',
     label: 'Launching',
-    animateClass: 'animate-rocket-launch',
-  },
+    animateClass: 'animate-rocket-launch' },
   deploying: {
     icon: Loader2,
     color: 'text-yellow-400',
     bg: 'bg-yellow-500/20',
     label: 'Deploying',
-    animateClass: 'animate-spin',
-  },
+    animateClass: 'animate-spin' },
   orbit: {
     icon: Orbit,
     color: 'text-green-400',
     bg: 'bg-green-500/20',
-    label: 'In Orbit',
-  },
+    label: 'In Orbit' },
   abort: {
     icon: XCircle,
     color: 'text-red-400',
     bg: 'bg-red-500/20',
-    label: 'Aborted',
-  },
+    label: 'Aborted' },
   partial: {
     icon: AlertTriangle,
     color: 'text-orange-400',
     bg: 'bg-orange-500/20',
-    label: 'Partial',
-  },
-}
+    label: 'Partial' } }
 
 const CLUSTER_STATUS_CONFIG: Record<DeployClusterStatus['status'], {
   color: string
@@ -114,8 +105,7 @@ const CLUSTER_STATUS_CONFIG: Record<DeployClusterStatus['status'], {
   pending: { color: 'text-muted-foreground', bg: 'bg-gray-500/20', barColor: 'bg-gray-500', label: 'Pending' },
   applying: { color: 'text-yellow-400', bg: 'bg-yellow-500/20', barColor: 'bg-yellow-500', label: 'Applying' },
   running: { color: 'text-green-400', bg: 'bg-green-500/20', barColor: 'bg-green-500', label: 'Running' },
-  failed: { color: 'text-red-400', bg: 'bg-red-500/20', barColor: 'bg-red-500', label: 'Failed' },
-}
+  failed: { color: 'text-red-400', bg: 'bg-red-500/20', barColor: 'bg-red-500', label: 'Failed' } }
 
 // Status priority for sorting (active first)
 const STATUS_ORDER: Record<string, number> = {
@@ -123,8 +113,7 @@ const STATUS_ORDER: Record<string, number> = {
   deploying: 2,
   partial: 3,
   orbit: 4,
-  abort: 5,
-}
+  abort: 5 }
 
 type SortByOption = 'status' | 'workload' | 'time' | 'clusters'
 
@@ -144,13 +133,34 @@ export function Missions(_props: MissionsProps) {
   const { deduplicatedClusters, isLoading, isRefreshing } = useClusters()
   const { isDemoMode: demoMode } = useDemoMode()
   const missions = demoMode ? DEMO_MISSIONS : liveMissions
-  const activeMissions = useMemo(() => demoMode ? [] : liveActive, [demoMode, liveActive])
+  const activeMissions = demoMode ? [] : liveActive
   const completedMissions = demoMode ? DEMO_MISSIONS : liveCompleted
   const [expandedMissions, setExpandedMissions] = useState<Set<string>>(new Set())
   const [hideCompleted, setHideCompleted] = useState(false)
 
   // AI mission hooks at card level
-  const { startMission } = useMissions()
+  const { startMission, missions: aiMissions } = useMissions()
+
+  // Find orbit missions for "In Orbit" status display
+  const orbitMissionsByProject = useMemo(() => {
+    const map = new Map<string, { cadence: string; lastResult?: string; overdue: boolean }>()
+    for (const m of aiMissions || []) {
+      if (m.importedFrom?.missionClass !== 'orbit') continue
+      const config = m.context?.orbitConfig as { cadence?: string; lastRunAt?: string; lastRunResult?: string } | undefined
+      if (!config) continue
+      const cadenceHours = config.cadence === 'daily' ? 24 : config.cadence === 'monthly' ? 720 : 168
+      const lastRun = config.lastRunAt ? new Date(config.lastRunAt).getTime() : 0
+      const overdue = lastRun ? (Date.now() - lastRun) > cadenceHours * 3_600_000 : false
+      for (const proj of (m.context?.orbitConfig as { projects?: string[] })?.projects || []) {
+        map.set(proj.toLowerCase(), {
+          cadence: config.cadence || 'weekly',
+          lastResult: config.lastRunResult,
+          overdue,
+        })
+      }
+    }
+    return map
+  }, [aiMissions])
   const { showKeyPrompt, checkKeyAndRun, goToSettings, dismissPrompt } = useApiKeyCheck()
 
   // Report state to CardWrapper for refresh animation
@@ -159,8 +169,7 @@ export function Missions(_props: MissionsProps) {
     isLoading: isLoading && !hasData,
     isRefreshing,
     hasAnyData: hasData,
-    isDemoData: demoMode,
-  })
+    isDemoData: demoMode })
 
   // Manual cluster filter — filters by target clusters (not source).
   // Can't use useCardData's built-in cluster filter because the global
@@ -174,24 +183,24 @@ export function Missions(_props: MissionsProps) {
   const [showClusterFilter, setShowClusterFilter] = useState(false)
   const clusterFilterRef = useRef<HTMLDivElement>(null)
 
-  const persistClusterFilter = useCallback((clusters: string[]) => {
+  const persistClusterFilter = (clusters: string[]) => {
     setClusterFilter(clusters)
     if (clusters.length === 0) {
       localStorage.removeItem(CLUSTER_FILTER_STORAGE_KEY)
     } else {
       localStorage.setItem(CLUSTER_FILTER_STORAGE_KEY, JSON.stringify(clusters))
     }
-  }, [])
+  }
 
-  const toggleClusterFilter = useCallback((name: string) => {
+  const toggleClusterFilter = (name: string) => {
     persistClusterFilter(
       clusterFilter.includes(name)
         ? clusterFilter.filter(c => c !== name)
         : [...clusterFilter, name],
     )
-  }, [clusterFilter, persistClusterFilter])
+  }
 
-  const clearClusterFilter = useCallback(() => persistClusterFilter([]), [persistClusterFilter])
+  const clearClusterFilter = () => persistClusterFilter([])
 
   // Close dropdown on outside click
   useEffect(() => {
@@ -204,10 +213,7 @@ export function Missions(_props: MissionsProps) {
     return () => document.removeEventListener('mousedown', onClickOutside)
   }, [])
 
-  const availableClusters = useMemo(
-    () => deduplicatedClusters.filter(c => c.reachable !== false),
-    [deduplicatedClusters],
-  )
+  const availableClusters = deduplicatedClusters.filter(c => c.reachable !== false)
 
   const toggleMission = (id: string) => {
     setExpandedMissions(prev => {
@@ -219,7 +225,7 @@ export function Missions(_props: MissionsProps) {
   }
 
   // AI Diagnose handler
-  const handleDiagnose = useCallback((mission: DeployMission) => {
+  const handleDiagnose = (mission: DeployMission) => {
     checkKeyAndRun(() => {
       const targetClustersStr = (mission.targetClusters || []).join(', ')
       const failedClusterNames = (mission.clusterStatuses || [])
@@ -250,14 +256,12 @@ Please:
           cluster: mission.sourceCluster,
           status: mission.status,
           targetClusters: mission.targetClusters,
-          clusterStatuses: mission.clusterStatuses,
-        },
-      })
+          clusterStatuses: mission.clusterStatuses } })
     })
-  }, [checkKeyAndRun, startMission])
+  }
 
   // AI Repair handler
-  const handleRepair = useCallback((mission: DeployMission) => {
+  const handleRepair = (mission: DeployMission) => {
     checkKeyAndRun(() => {
       const targetClustersStr = (mission.targetClusters || []).join(', ')
       const failedClusterNames = (mission.clusterStatuses || [])
@@ -292,14 +296,12 @@ Please:
           cluster: mission.sourceCluster,
           status: mission.status,
           targetClusters: mission.targetClusters,
-          clusterStatuses: mission.clusterStatuses,
-        },
-      })
+          clusterStatuses: mission.clusterStatuses } })
     })
-  }, [checkKeyAndRun, startMission])
+  }
 
   // Pre-filter: hide completed + cluster filter (by target clusters)
-  const rawMissions = useMemo(() => {
+  const rawMissions = (() => {
     let list = hideCompleted ? activeMissions : missions
     if (clusterFilter.length > 0) {
       list = list.filter(m =>
@@ -307,7 +309,7 @@ Please:
       )
     }
     return list
-  }, [hideCompleted, activeMissions, missions, clusterFilter])
+  })()
 
   // useCardData handles search, sort, and pagination
   const {
@@ -321,23 +323,19 @@ Please:
     setItemsPerPage,
     filters: {
       search: localSearch,
-      setSearch: setLocalSearch,
-    },
+      setSearch: setLocalSearch },
     sorting: {
       sortBy,
       setSortBy,
       sortDirection,
-      setSortDirection,
-    },
+      setSortDirection },
     containerRef,
-    containerStyle,
-  } = useCardData<DeployMission, SortByOption>(rawMissions, {
+    containerStyle } = useCardData<DeployMission, SortByOption>(rawMissions, {
     filter: {
       searchFields: ['workload', 'namespace', 'sourceCluster', 'groupName'],
       customPredicate: (mission, query) =>
         mission.targetClusters.some(c => c.toLowerCase().includes(query)),
-      storageKey: 'deployment-missions',
-    },
+      storageKey: 'deployment-missions' },
     sort: {
       defaultField: 'status',
       defaultDirection: 'asc',
@@ -346,11 +344,8 @@ Please:
         workload: commonComparators.string<DeployMission>('workload'),
         time: (a, b) => a.startedAt - b.startedAt,
         clusters: (a, b) =>
-          (a.targetClusters || []).join(',').localeCompare((b.targetClusters || []).join(',')),
-      },
-    },
-    defaultLimit: 5,
-  })
+          (a.targetClusters || []).join(',').localeCompare((b.targetClusters || []).join(',')) } },
+    defaultLimit: 5 })
 
   return (
     <div className="h-full flex flex-col">
@@ -368,8 +363,7 @@ Please:
         <CardControlsRow
           clusterIndicator={{
             selectedCount: clusterFilter.length,
-            totalCount: availableClusters.length,
-          }}
+            totalCount: availableClusters.length }}
           clusterFilter={{
             availableClusters,
             selectedClusters: clusterFilter,
@@ -378,8 +372,7 @@ Please:
             isOpen: showClusterFilter,
             setIsOpen: setShowClusterFilter,
             containerRef: clusterFilterRef,
-            minClusters: 1,
-          }}
+            minClusters: 1 }}
           cardControls={{
             limit: itemsPerPage,
             onLimitChange: setItemsPerPage,
@@ -387,8 +380,7 @@ Please:
             sortOptions: SORT_OPTIONS,
             onSortChange: (v) => setSortBy(v as SortByOption),
             sortDirection,
-            onSortDirectionChange: setSortDirection,
-          }}
+            onSortDirectionChange: setSortDirection }}
           extra={
             completedMissions.length > 0 ? (
               <button
@@ -433,6 +425,7 @@ Please:
                 isActive={isActive}
                 onDiagnose={handleDiagnose}
                 onRepair={handleRepair}
+                orbitStatus={mission.status === 'orbit' ? orbitMissionsByProject.get(mission.workload.toLowerCase()) : undefined}
               />
             )
           })}
@@ -481,6 +474,12 @@ Please:
 // Mission Row
 // ============================================================================
 
+interface OrbitStatus {
+  cadence: string
+  lastResult?: string
+  overdue: boolean
+}
+
 interface MissionRowProps {
   mission: DeployMission
   isExpanded: boolean
@@ -488,9 +487,10 @@ interface MissionRowProps {
   isActive: boolean
   onDiagnose: (mission: DeployMission) => void
   onRepair: (mission: DeployMission) => void
+  orbitStatus?: OrbitStatus
 }
 
-function MissionRow({ mission, isExpanded, onToggle, isActive, onDiagnose, onRepair }: MissionRowProps) {
+function MissionRow({ mission, isExpanded, onToggle, isActive, onDiagnose, onRepair, orbitStatus }: MissionRowProps) {
   const { t } = useTranslation(['common', 'cards'])
   const config = STATUS_CONFIG[mission.status] || STATUS_CONFIG.launching
   const StatusIcon = config.icon
@@ -594,6 +594,28 @@ function MissionRow({ mission, isExpanded, onToggle, isActive, onDiagnose, onRep
           />
         </div>
       </div>
+
+      {/* Orbit maintenance status — shown for "in orbit" missions with maintenance configured */}
+      {mission.status === 'orbit' && orbitStatus && (
+        <div className="px-3 pb-2 flex items-center gap-1.5">
+          <Orbit className="w-2.5 h-2.5 text-purple-400" />
+          <span className="text-2xs text-muted-foreground">
+            {orbitStatus.cadence} maintenance
+          </span>
+          {orbitStatus.lastResult && (
+            <span className={cn(
+              'text-2xs font-medium',
+              orbitStatus.lastResult === 'success' ? 'text-green-400' :
+              orbitStatus.lastResult === 'warning' ? 'text-yellow-400' : 'text-red-400',
+            )}>
+              {orbitStatus.lastResult}
+            </span>
+          )}
+          {orbitStatus.overdue && (
+            <span className="text-2xs font-medium text-amber-400">overdue</span>
+          )}
+        </div>
+      )}
 
       {/* Per-cluster progress — visible for active missions; completed missions show on expand */}
       {isActive && !isExpanded && mission.clusterStatuses.length > 0 && (
@@ -757,8 +779,7 @@ const DEP_ACTION_STYLES: Record<string, { color: string; label: string }> = {
   created: { color: 'text-green-400', label: 'Created' },
   updated: { color: 'text-blue-400', label: 'Updated' },
   skipped: { color: 'text-muted-foreground', label: 'Skipped' },
-  failed: { color: 'text-red-400', label: 'Failed' },
-}
+  failed: { color: 'text-red-400', label: 'Failed' } }
 
 function DependencySummary({ dependencies }: { dependencies: DeployedDep[] }) {
   // Group by kind for summary line

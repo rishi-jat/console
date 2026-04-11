@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { GripVertical, Trash2, AlertTriangle } from 'lucide-react'
 import {
@@ -10,25 +10,25 @@ import {
   useSensors,
   DragEndEvent,
   DragOverlay,
-  DragStartEvent,
-} from '@dnd-kit/core'
+  DragStartEvent } from '@dnd-kit/core'
 import {
   arrayMove,
   SortableContext,
   sortableKeyboardCoordinates,
   useSortable,
-  rectSortingStrategy,
-} from '@dnd-kit/sortable'
+  rectSortingStrategy } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
 import { useTranslation } from 'react-i18next'
 import { api, BackendUnavailableError, UnauthenticatedError } from '../../lib/api'
 import { useDashboards, Dashboard } from '../../hooks/useDashboards'
+import { safeRevokeObjectURL } from '../../lib/download'
 import { useClusters } from '../../hooks/useMCP'
 import { useDrillDownActions } from '../../hooks/useDrillDown'
 import { useSidebarConfig } from '../../hooks/useSidebarConfig'
 import { useToast } from '../ui/Toast'
 import { CardWrapper } from '../cards/CardWrapper'
 import { CARD_COMPONENTS } from '../cards/cardRegistry'
+import { useCardCollapse } from '../../lib/cards/cardHooks'
 import { safeGetJSON, safeSetJSON, safeRemoveItem } from '../../lib/utils/localStorage'
 import { ROUTES } from '../../config/routes'
 import { AddCardModal } from './AddCardModal'
@@ -43,6 +43,7 @@ import { BaseModal } from '../../lib/modals'
 import { useModalState } from '../../lib/modals'
 import { formatCardTitle } from '../../lib/formatCardTitle'
 import { StatsOverview, StatBlockValue } from '../ui/StatsOverview'
+import { getClusterHealthState, isClusterUnreachable } from '../clusters/utils'
 import { useUniversalStats, createMergedStatValueGetter } from '../../hooks/useUniversalStats'
 import { useRefreshIndicator } from '../../hooks/useRefreshIndicator'
 import { DashboardHeader } from '../shared/DashboardHeader'
@@ -64,6 +65,15 @@ const NARROW_MAX = 1023
 
 /** Minimum card column span at narrow viewports */
 const MIN_NARROW_COLS = 6
+
+/**
+ * Minimum pixel height a non-collapsed sortable card cell should occupy.
+ * Mirrors the legacy `auto-rows-[minmax(180px,auto)]` baseline so expanded
+ * cards keep their previous look now that the grid container uses
+ * `auto-rows-min` (which is required so collapsed cards can shrink and let
+ * neighbours pack upward — see issue #6072).
+ */
+const EXPANDED_CARD_MIN_HEIGHT_PX = 180
 
 // Sortable card component
 interface SortableCardProps {
@@ -94,19 +104,25 @@ function SortableCard({ card, onConfigure, onRemove, onWidthChange, isDragging, 
   useEffect(() => {
     const mq = window.matchMedia(`(min-width: ${NARROW_MIN}px) and (max-width: ${NARROW_MAX}px)`)
     const handler = (e: MediaQueryListEvent) => setIsNarrowRange(e.matches)
-    setIsNarrowRange(mq.matches)
+    if (mq.matches !== isNarrowRange) setIsNarrowRange(mq.matches)
     mq.addEventListener('change', handler)
     return () => mq.removeEventListener('change', handler)
-  }, [])
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   const effectiveW = isNarrowRange && (card.position?.w || 4) < MIN_NARROW_COLS ? MIN_NARROW_COLS : (card.position?.w || 4)
+
+  // Read collapse state so the cell can drop its minimum height when the
+  // card is collapsed (#6072). Without this, the grid leaves dead space
+  // under collapsed cards because every cell is forced to the expanded
+  // baseline height.
+  const { isCollapsed } = useCardCollapse(card.id)
 
   const style = {
     transform: CSS.Transform.toString(transform),
     transition,
     gridColumn: `span ${effectiveW}`,
-    opacity: isDragging ? 0.5 : 1,
-  }
+    minHeight: isCollapsed ? undefined : `${EXPANDED_CARD_MIN_HEIGHT_PX}px`,
+    opacity: isDragging ? 0.5 : 1 }
 
   const CardComponent = CARD_COMPONENTS[card.card_type]
 
@@ -213,18 +229,17 @@ export function CustomDashboard() {
   const { t } = useTranslation()
 
   // Find the sidebar item matching this dashboard to get name/description
-  const sidebarItem = useMemo(() => {
-    return [...config.primaryNav, ...config.secondaryNav]
+  const sidebarItem = [...config.primaryNav, ...config.secondaryNav]
       .find(item => item.href === `/custom-dashboard/${id}`)
-  }, [config.primaryNav, config.secondaryNav, id])
 
-  // Stats data from clusters
-  const healthyClusters = deduplicatedClusters.filter((c) => c.healthy === true && c.reachable !== false).length
-  const unhealthyClusters = deduplicatedClusters.filter((c) => c.healthy === false && c.reachable !== false).length
+  // Stats data from clusters — use the centralised state machine so these
+  // counts always match the main cluster grid and sidebar (#5928).
+  const healthyClusters = deduplicatedClusters.filter((c) => !isClusterUnreachable(c) && getClusterHealthState(c) === 'healthy').length
+  const unhealthyClusters = deduplicatedClusters.filter((c) => !isClusterUnreachable(c) && getClusterHealthState(c) === 'unhealthy').length
   const totalNodes = deduplicatedClusters.reduce((sum, c) => sum + (c.nodeCount || 0), 0)
   const totalPods = deduplicatedClusters.reduce((sum, c) => sum + (c.podCount || 0), 0)
 
-  const getDashboardStatValue = useCallback((blockId: string): StatBlockValue => {
+  const getDashboardStatValue = (blockId: string): StatBlockValue => {
     switch (blockId) {
       case 'clusters':
         return { value: deduplicatedClusters.length, sublabel: 'total clusters', onClick: () => drillToAllClusters(), isClickable: deduplicatedClusters.length > 0 }
@@ -241,10 +256,10 @@ export function CustomDashboard() {
       default:
         return { value: '-' }
     }
-  }, [deduplicatedClusters, healthyClusters, unhealthyClusters, totalNodes, totalPods, drillToAllClusters, drillToAllNodes, drillToAllPods])
+  }
 
   const { getStatValue: getUniversalStatValue } = useUniversalStats()
-  const getStatValue = useMemo(() => createMergedStatValueGetter(getDashboardStatValue, getUniversalStatValue), [getDashboardStatValue, getUniversalStatValue])
+  const getStatValue = createMergedStatValueGetter(getDashboardStatValue, getUniversalStatValue)
 
   const [dashboard, setDashboard] = useState<Dashboard | null>(null)
   const [cards, setCards] = useState<Card[]>([])
@@ -277,12 +292,14 @@ export function CustomDashboard() {
   // Storage key for this dashboard's cards
   const storageKey = `kubestellar-custom-dashboard-${id}-cards`
 
+  // Request ID tracking — prevents stale async responses from overwriting newer state (#4664)
+  const requestIdRef = useRef(0)
+
   // Undo/redo support
   const cardsRef = useRef(cards)
   cardsRef.current = cards
   const {
-    snapshot, undo, redo, canUndo, canRedo,
-  } = useDashboardUndoRedo<Card>(
+    snapshot, undo, redo, canUndo, canRedo } = useDashboardUndoRedo<Card>(
     (restored) => setCards(restored),
     () => cardsRef.current,
   )
@@ -290,6 +307,9 @@ export function CustomDashboard() {
   // Load dashboard
   const loadDashboard = useCallback(async (isRefresh = false) => {
     if (!id) return
+
+    // Increment request ID so stale responses are discarded (#4664)
+    const thisRequestId = ++requestIdRef.current
 
     if (isRefresh) {
       setIsRefreshing(true)
@@ -308,6 +328,10 @@ export function CustomDashboard() {
 
       // Then fetch from API
       const data = await getDashboardWithCards(id)
+
+      // Discard if a newer request has been issued while we were waiting
+      if (thisRequestId !== requestIdRef.current) return
+
       if (data) {
         setDashboard(data)
         if (data.cards && data.cards.length > 0) {
@@ -321,6 +345,9 @@ export function CustomDashboard() {
       }
       setLastUpdated(new Date())
     } catch (error) {
+      // Discard errors from stale requests
+      if (thisRequestId !== requestIdRef.current) return
+
       const isExpectedFailure = error instanceof BackendUnavailableError ||
         error instanceof UnauthenticatedError ||
         (error instanceof Error && (
@@ -339,12 +366,15 @@ export function CustomDashboard() {
         showToast('Failed to load dashboard', 'error')
       }
     } finally {
-      setIsLoading(false)
-      setIsRefreshing(false)
+      // Only clear loading state if this is still the latest request
+      if (thisRequestId === requestIdRef.current) {
+        setIsLoading(false)
+        setIsRefreshing(false)
+      }
     }
   }, [id, getDashboardWithCards, showToast, storageKey])
 
-  const handleRefreshDashboard = useCallback(() => loadDashboard(true), [loadDashboard])
+  const handleRefreshDashboard = () => loadDashboard(true)
   const { showIndicator, triggerRefresh } = useRefreshIndicator(handleRefreshDashboard, id)
   const isRefreshing = dataRefreshing || showIndicator
   const isFetching = isLoading || isRefreshing || showIndicator
@@ -375,7 +405,7 @@ export function CustomDashboard() {
   }, [cards, storageKey])
 
   // Card operations
-  const handleAddCards = useCallback(async (newCards: Array<{ type: string; title: string; config: Record<string, unknown> }>) => {
+  const handleAddCards = async (newCards: Array<{ type: string; title: string; config: Record<string, unknown> }>) => {
     const cardsToAdd = newCards.map((c, index) => ({
       id: `card-${Date.now()}-${index}`,
       card_type: c.type,
@@ -408,9 +438,9 @@ export function CustomDashboard() {
 
     closeAddCard()
     showToast(`Added ${newCards.length} card${newCards.length > 1 ? 's' : ''}`, 'success')
-  }, [id, showToast, closeAddCard, snapshot])
+  }
 
-  const handleRemoveCard = useCallback(async (cardId: string) => {
+  const handleRemoveCard = async (cardId: string) => {
     snapshot(cardsRef.current)
     setCards(prev => prev.filter(c => c.id !== cardId))
 
@@ -422,30 +452,30 @@ export function CustomDashboard() {
         showToast('Failed to delete card from backend', 'error')
       }
     }
-  }, [id, snapshot, showToast])
+  }
 
-  const handleConfigureCard = useCallback((card: Card) => {
+  const handleConfigureCard = (card: Card) => {
     setSelectedCard(card)
     openConfigureCard()
-  }, [openConfigureCard])
+  }
 
-  const handleCardConfigured = useCallback(async (cardId: string, config: Record<string, unknown>) => {
+  const handleCardConfigured = async (cardId: string, config: Record<string, unknown>) => {
     snapshot(cardsRef.current)
     setCards(prev => prev.map(c =>
       c.id === cardId ? { ...c, config } : c
     ))
     closeConfigureCard()
     setSelectedCard(null)
-  }, [closeConfigureCard, snapshot])
+  }
 
-  const handleWidthChange = useCallback((cardId: string, newWidth: number) => {
+  const handleWidthChange = (cardId: string, newWidth: number) => {
     snapshot(cardsRef.current)
     setCards(prev => prev.map(c =>
       c.id === cardId ? { ...c, position: { ...c.position, w: newWidth } } : c
     ))
-  }, [snapshot])
+  }
 
-  const handleApplyTemplate = useCallback(async (template: DashboardTemplate) => {
+  const handleApplyTemplate = async (template: DashboardTemplate) => {
     const templateCards = template.cards.map((tc, index) => ({
       id: `template-${Date.now()}-${index}`,
       card_type: tc.card_type,
@@ -471,20 +501,20 @@ export function CustomDashboard() {
     }
 
     showToast(`Applied template "${template.name}" with ${templateCards.length} cards`, 'success')
-  }, [id, showToast, closeTemplates, snapshot])
+  }
 
-  const handleAddRecommendedCard = useCallback((cardType: string, config?: Record<string, unknown>) => {
+  const handleAddRecommendedCard = (cardType: string, config?: Record<string, unknown>) => {
     handleAddCards([{ type: cardType, title: formatCardTitle(cardType), config: config || {} }])
-  }, [handleAddCards])
+  }
 
-  const handleReset = useCallback(() => {
+  const handleReset = () => {
     snapshot(cardsRef.current)
     setCards([])
     safeRemoveItem(storageKey)
     showToast('Dashboard reset to empty', 'info')
-  }, [storageKey, showToast, snapshot])
+  }
 
-  const handleDeleteDashboard = useCallback(() => {
+  const handleDeleteDashboard = () => {
     if (!id) return
 
     // Remove sidebar item
@@ -503,14 +533,14 @@ export function CustomDashboard() {
     deleteDashboard(id).catch(() => {
       // Backend deletion is optional — sidebar + localStorage are the source of truth
     })
-  }, [id, sidebarItem, dashboard, deleteDashboard, removeItem, storageKey, showToast, navigate])
+  }
 
   // Drag handlers
-  const handleDragStart = useCallback((event: DragStartEvent) => {
+  const handleDragStart = (event: DragStartEvent) => {
     setActiveId(event.active.id as string)
-  }, [])
+  }
 
-  const handleDragEnd = useCallback((event: DragEndEvent) => {
+  const handleDragEnd = (event: DragEndEvent) => {
     const { active, over } = event
     setActiveId(null)
 
@@ -523,15 +553,15 @@ export function CustomDashboard() {
         return arrayMove(prev, oldIndex, newIndex)
       })
     }
-  }, [snapshot])
+  }
 
   // Current card types for recommendations
-  const currentCardTypes = useMemo(() => cards.map(c => {
+  const currentCardTypes = cards.map(c => {
     if (c.card_type === 'dynamic_card' && c.config?.dynamicCardId) {
       return `dynamic_card::${c.config.dynamicCardId as string}`
     }
     return c.card_type
-  }), [cards])
+  })
 
   // Loading skeleton
   if (isLoading && cards.length === 0) {
@@ -631,7 +661,7 @@ export function CustomDashboard() {
           onDragEnd={handleDragEnd}
         >
           <SortableContext items={cards.map(c => c.id)} strategy={rectSortingStrategy}>
-            <div className="grid grid-cols-1 md:grid-cols-12 gap-2 auto-rows-[minmax(180px,auto)]">
+            <div className="grid grid-cols-1 md:grid-cols-12 gap-2 auto-rows-min grid-flow-dense">
               {cards.map((card, index) => (
                 <SortableCard
                   key={card.id}
@@ -680,7 +710,7 @@ export function CustomDashboard() {
             a.href = url
             a.download = `${(dashboard?.name || 'dashboard').replace(/\s+/g, '-').toLowerCase()}.json`
             a.click()
-            URL.revokeObjectURL(url)
+            safeRevokeObjectURL(url)
             showToast('Dashboard exported', 'success')
           } catch {
             showToast('Failed to export dashboard', 'error')

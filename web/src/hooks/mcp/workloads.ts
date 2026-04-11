@@ -1240,7 +1240,10 @@ export function useJobs(cluster?: string, namespace?: string) {
     }
   }, [cluster, namespace])
 
+  const jobsInitRef = useRef(false)
   useEffect(() => {
+    if (jobsInitRef.current) return
+    jobsInitRef.current = true
     refetch()
     return () => { sseAbortRef.current?.abort() }
   }, [refetch])
@@ -1293,7 +1296,7 @@ export function useHPAs(cluster?: string, namespace?: string) {
       setConsecutiveFailures(0)
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to fetch HPAs'
-      console.error('[useHPAs] Fetch failed:', message, err)
+      if (err instanceof Error && err.name === 'UnauthenticatedError') { console.debug('[useHPAs] Skipped — no auth token') } else { console.error('[useHPAs] Fetch failed:', message, err) }
       setError(message)
       setConsecutiveFailures(prev => prev + 1)
       setHPAs([])
@@ -1302,7 +1305,10 @@ export function useHPAs(cluster?: string, namespace?: string) {
     }
   }, [cluster, namespace])
 
+  const hpasInitRef = useRef(false)
   useEffect(() => {
+    if (hpasInitRef.current) return
+    hpasInitRef.current = true
     refetch()
   }, [refetch])
 
@@ -1355,7 +1361,7 @@ export function useReplicaSets(cluster?: string, namespace?: string) {
       setConsecutiveFailures(0)
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to fetch ReplicaSets'
-      console.error('[useReplicaSets] Fetch failed:', message, err)
+      if (err instanceof Error && err.name === 'UnauthenticatedError') { console.debug('[useReplicaSets] Skipped — no auth token') } else { console.error('[useReplicaSets] Fetch failed:', message, err) }
       setError(message)
       setConsecutiveFailures(prev => prev + 1)
       setReplicaSets([])
@@ -1364,7 +1370,12 @@ export function useReplicaSets(cluster?: string, namespace?: string) {
     }
   }, [cluster, namespace])
 
-  useEffect(() => { refetch() }, [refetch])
+  const replicaSetsInitRef = useRef(false)
+  useEffect(() => {
+    if (replicaSetsInitRef.current) return
+    replicaSetsInitRef.current = true
+    refetch()
+  }, [refetch])
   return { replicasets, isLoading, error, refetch, consecutiveFailures, isFailed: consecutiveFailures >= 3 }
 }
 
@@ -1413,7 +1424,7 @@ export function useStatefulSets(cluster?: string, namespace?: string) {
       setConsecutiveFailures(0)
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to fetch StatefulSets'
-      console.error('[useStatefulSets] Fetch failed:', message, err)
+      if (err instanceof Error && err.name === 'UnauthenticatedError') { console.debug('[useStatefulSets] Skipped — no auth token') } else { console.error('[useStatefulSets] Fetch failed:', message, err) }
       setError(message)
       setConsecutiveFailures(prev => prev + 1)
       setStatefulSets([])
@@ -1422,7 +1433,12 @@ export function useStatefulSets(cluster?: string, namespace?: string) {
     }
   }, [cluster, namespace])
 
-  useEffect(() => { refetch() }, [refetch])
+  const statefulSetsInitRef = useRef(false)
+  useEffect(() => {
+    if (statefulSetsInitRef.current) return
+    statefulSetsInitRef.current = true
+    refetch()
+  }, [refetch])
   return { statefulsets, isLoading, error, refetch, consecutiveFailures, isFailed: consecutiveFailures >= 3 }
 }
 
@@ -1471,7 +1487,7 @@ export function useDaemonSets(cluster?: string, namespace?: string) {
       setConsecutiveFailures(0)
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to fetch DaemonSets'
-      console.error('[useDaemonSets] Fetch failed:', message, err)
+      if (err instanceof Error && err.name === 'UnauthenticatedError') { console.debug('[useDaemonSets] Skipped — no auth token') } else { console.error('[useDaemonSets] Fetch failed:', message, err) }
       setError(message)
       setConsecutiveFailures(prev => prev + 1)
       setDaemonSets([])
@@ -1480,7 +1496,12 @@ export function useDaemonSets(cluster?: string, namespace?: string) {
     }
   }, [cluster, namespace])
 
-  useEffect(() => { refetch() }, [refetch])
+  const daemonSetsInitRef = useRef(false)
+  useEffect(() => {
+    if (daemonSetsInitRef.current) return
+    daemonSetsInitRef.current = true
+    refetch()
+  }, [refetch])
   return { daemonsets, isLoading, error, refetch, consecutiveFailures, isFailed: consecutiveFailures >= 3 }
 }
 
@@ -1529,7 +1550,7 @@ export function useCronJobs(cluster?: string, namespace?: string) {
       setConsecutiveFailures(0)
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to fetch CronJobs'
-      console.error('[useCronJobs] Fetch failed:', message, err)
+      if (err instanceof Error && err.name === 'UnauthenticatedError') { console.debug('[useCronJobs] Skipped — no auth token') } else { console.error('[useCronJobs] Fetch failed:', message, err) }
       setError(message)
       setConsecutiveFailures(prev => prev + 1)
       setCronJobs([])
@@ -1538,7 +1559,12 @@ export function useCronJobs(cluster?: string, namespace?: string) {
     }
   }, [cluster, namespace])
 
-  useEffect(() => { refetch() }, [refetch])
+  const cronJobsInitRef = useRef(false)
+  useEffect(() => {
+    if (cronJobsInitRef.current) return
+    cronJobsInitRef.current = true
+    refetch()
+  }, [refetch])
   return { cronjobs, isLoading, error, refetch, consecutiveFailures, isFailed: consecutiveFailures >= 3 }
 }
 
@@ -1546,13 +1572,22 @@ export function useCronJobs(cluster?: string, namespace?: string) {
 // usePodLogs
 // ---------------------------------------------------------------------------
 
-export function usePodLogs(cluster: string, namespace: string, pod: string, container?: string, tail = 100) {
+/** Default tail line count when caller does not specify one (matches backend default). */
+export const USE_POD_LOGS_DEFAULT_TAIL = 100
+
+export function usePodLogs(cluster: string, namespace: string, pod: string, container?: string, tail = USE_POD_LOGS_DEFAULT_TAIL) {
   const [logs, setLogs] = useState<string>('')
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   const refetch = useCallback(async () => {
-    if (!cluster || !namespace || !pod) return
+    if (!cluster || !namespace || !pod) {
+      // Clear any stale state when required inputs are missing so the UI
+      // doesn't continue to show logs from a previously selected pod.
+      setLogs('')
+      setError(null)
+      return
+    }
     setIsLoading(true)
     setError(null)
     try {
@@ -1572,6 +1607,10 @@ export function usePodLogs(cluster: string, namespace: string, pod: string, cont
     }
   }, [cluster, namespace, pod, container, tail])
 
+  // Re-fetch whenever cluster/namespace/pod/container/tail change. A previous
+  // implementation guarded this with a `useRef(false)` latch that only fired
+  // once, which meant switching pods in the Logs dashboard never refreshed
+  // the displayed logs.
   useEffect(() => {
     refetch()
   }, [refetch])

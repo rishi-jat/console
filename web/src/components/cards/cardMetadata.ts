@@ -47,6 +47,7 @@ export const CARD_TITLES: Record<string, string> = {
   warning_events: 'Warning Events',
   recent_events: 'Recent Events',
   events_timeline: 'Events Timeline',
+  pod_logs: 'Pod Logs',
 
   // Trend cards
   pod_health_trend: 'Pod Health Trend',
@@ -181,6 +182,7 @@ export const CARD_TITLES: Record<string, string> = {
   upgrade_status: 'Cluster Upgrade Status',
   user_management: 'User Management',
   github_activity: 'GitHub Activity',
+  issue_activity_chart: 'Daily Issues & PRs',
   kubectl: 'Kubectl Terminal',
   // weather — registered via unified descriptor system
   rss_feed: 'RSS Feed',
@@ -244,7 +246,6 @@ export const CARD_TITLES: Record<string, string> = {
   kube_snake: 'Kube Snake',
   kube_galaga: 'Kube Galaga',
   kube_doom: 'Kube Doom',
-  kube_craft: 'Kube Craft',
   kube_chess: 'Kube Chess',
   missile_command: 'Missile Command',
   kube_bert: 'Kube-BERT',
@@ -301,6 +302,7 @@ export const CARD_TITLES: Record<string, string> = {
   kubeflex_status: 'KubeFlex',
   k3s_status: 'K3s',
   kubevirt_status: 'KubeVirt',
+  vcluster_status: 'vCluster Status',
   multi_tenancy_overview: 'Multi-Tenancy Overview',
   tenant_isolation_setup: 'Tenant Isolation Setup',
   tenant_topology: 'Tenant Architecture',
@@ -346,6 +348,7 @@ export const CARD_DESCRIPTIONS: Record<string, string> = {
   warning_events: 'Warning-level events that may need attention.',
   recent_events: 'Most recent events across all clusters.',
   events_timeline: 'Timeline chart of event frequency over time.',
+  pod_logs: 'Live tail of container logs for any pod across your clusters.',
   pod_health_trend: 'Historical trend of pod health status over time.',
   resource_trend: 'Resource usage trends showing CPU and memory over time.',
   storage_overview: 'Persistent volume and storage class overview.',
@@ -458,6 +461,7 @@ export const CARD_DESCRIPTIONS: Record<string, string> = {
   upgrade_status: 'Kubernetes version upgrade status and available upgrades.',
   user_management: 'Manage console users and their roles.',
   github_activity: 'Recent GitHub activity: commits, PRs, and issues.',
+  issue_activity_chart: 'Daily chart of issues opened vs closed and PRs merged, with configurable lookback period.',
   kubectl: 'Interactive kubectl terminal for running commands.',
   // weather — registered via unified descriptor system
   rss_feed: 'RSS feed reader for Kubernetes news and blogs.',
@@ -526,7 +530,6 @@ export const CARD_DESCRIPTIONS: Record<string, string> = {
   kube_snake: 'Snake game collecting Kubernetes resources.',
   kube_galaga: 'Galaga-style shooter defending against threats.',
   kube_doom: 'First-person debugging adventure.',
-  kube_craft: 'Build and manage your cluster world.',
   kube_chess: 'Chess game with Kubernetes-themed pieces.',
   missile_command: 'Missile Command arcade game defending your cluster.',
   kube_bert: 'Q*bert style platformer navigating Kubernetes pyramids.',
@@ -567,7 +570,8 @@ export const CARD_DESCRIPTIONS: Record<string, string> = {
   ovn_status: 'OVN-Kubernetes network status, User Defined Networks, and tenant isolation.',
   kubeflex_status: 'KubeFlex controller status, control planes per tenant, and CP health.',
   k3s_status: 'K3s lightweight Kubernetes server pods, agent connections, and cluster health.',
-  kubevirt_status: 'KubeVirt VM status, running/stopped/migrating VMs, and data-plane isolation.',
+  kubevirt_status: 'KubeVirt VM status across clusters — running, stopped, paused, migrating, and error states with per-cluster breakdown, CPU/memory allocation, and data-plane isolation.',
+  vcluster_status: 'Virtual cluster status across host clusters: running, paused, and failed vClusters with Kubernetes version info.',
   multi_tenancy_overview: 'Aggregated view of tenant isolation across OVN, KubeFlex, K3s, and KubeVirt.',
   tenant_isolation_setup: 'AI-powered multi-tenancy setup wizard with component detection and one-click configuration.',
   tenant_topology: 'Interactive SVG topology of the KubeCon multi-tenancy architecture: KubeVirt VMs, K3s control planes, Layer-2/3 UDN networks, and KubeFlex controller with live status indicators.',
@@ -600,7 +604,6 @@ export const DEMO_EXEMPT_CARDS = new Set([
   'pod_sweeper',
   'kube_pong',
   'kube_galaga',
-  'kube_craft',
   'kube_doom',
   'dynamic_card',
   // Cluster admin cards - no demo/live concept

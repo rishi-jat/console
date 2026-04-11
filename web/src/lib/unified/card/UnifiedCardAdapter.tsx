@@ -14,7 +14,6 @@
  *   3. Eventually deprecate legacy component
  */
 
-import { useMemo } from 'react'
 import { UnifiedCard } from './UnifiedCard'
 import { useDataHookRegistryVersion } from './hooks/useDataSource'
 import { getCardConfig } from '../../../config/cards'
@@ -225,8 +224,8 @@ export const UNIFIED_EXCLUDED_CARDS = new Set<string>([
   'kube_man', 'kube_kong', 'node_invaders', 'pod_pitfall', 'container_tetris',
   'flappy_pod', 'pod_sweeper', 'game_2048', 'checkers', 'kube_chess',
   'solitaire', 'match_game', 'kubedle', 'sudoku_game', 'pod_brothers',
-  'kube_kart', 'kube_pong', 'kube_snake', 'kube_galaga', 'kube_craft',
-  'kube_craft_3d', 'kube_doom', 'pod_crosser',
+  'kube_kart', 'kube_pong', 'kube_snake', 'kube_galaga',
+  'kube_doom', 'pod_crosser',
 
   // Embedded content
   'iframe_embed', 'mobile_browser', 'kubectl',
@@ -324,18 +323,17 @@ export function UnifiedCardAdapter({
   cardId: _cardId,
   instanceConfig,
   forceLegacy = false,
-  renderLegacy,
-}: UnifiedCardAdapterProps) {
+  renderLegacy }: UnifiedCardAdapterProps) {
   // Get config for this card type
-  const config = useMemo(() => getCardConfig(cardType), [cardType])
+  const config = getCardConfig(cardType)
 
   // Determine if we should use UnifiedCard
-  const useUnified = useMemo(() => {
+  const useUnified = (() => {
     if (forceLegacy) return false
     if (!shouldUseUnifiedCard(cardType)) return false
     if (!hasValidUnifiedConfig(cardType)) return false
     return true
-  }, [cardType, forceLegacy])
+  })()
 
   // Track data-hook registry version so that when hooks are registered
   // (after dynamic import in main.tsx), we remount UnifiedCard with a new
@@ -378,28 +376,24 @@ export function getCardMigrationStatus(cardType: string): {
   if (UNIFIED_EXCLUDED_CARDS.has(cardType)) {
     return {
       status: 'excluded',
-      reason: 'Card type not suitable for unified framework',
-    }
+      reason: 'Card type not suitable for unified framework' }
   }
 
   if (UNIFIED_READY_CARDS.has(cardType)) {
     return {
       status: 'unified',
-      reason: 'Card is rendering via UnifiedCard',
-    }
+      reason: 'Card is rendering via UnifiedCard' }
   }
 
   if (hasValidUnifiedConfig(cardType)) {
     return {
       status: 'ready',
-      reason: 'Config complete, ready for validation',
-    }
+      reason: 'Config complete, ready for validation' }
   }
 
   return {
     status: 'pending',
-    reason: 'Config incomplete or missing',
-  }
+    reason: 'Config incomplete or missing' }
 }
 
 /**
@@ -415,8 +409,7 @@ export function getCardsByMigrationStatus(): {
     unified: Array.from(UNIFIED_READY_CARDS),
     ready: [] as string[],
     pending: [] as string[],
-    excluded: Array.from(UNIFIED_EXCLUDED_CARDS),
-  }
+    excluded: Array.from(UNIFIED_EXCLUDED_CARDS) }
 
   // Import all card types from config registry
   // This would need to be done dynamically in practice

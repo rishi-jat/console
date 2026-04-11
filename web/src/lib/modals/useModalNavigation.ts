@@ -30,15 +30,17 @@ export function useModalNavigation({
   onBack,
   enableEscape = true,
   enableBackspace = true,
-  disableBodyScroll = true,
-}: UseModalNavigationOptions): UseModalNavigationResult {
+  disableBodyScroll = true }: UseModalNavigationOptions): UseModalNavigationResult {
   // Handle keyboard events
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
-      // Escape should always work, even in input fields
+      // Escape should always work, even in input fields.
+      // stopImmediatePropagation prevents parent modals from also closing
+      // when a nested modal handles Escape first.
       if (e.key === 'Escape') {
         if (enableEscape) {
           e.preventDefault()
+          e.stopImmediatePropagation()
           onClose()
         }
         return
@@ -92,8 +94,7 @@ export function useModalNavigation({
   }, [isOpen, disableBodyScroll])
 
   return {
-    handleKeyDown,
-  }
+    handleKeyDown }
 }
 
 /**
@@ -106,7 +107,7 @@ export function useModalNavigation({
  * ```
  */
 export function useModalBackdropClose(
-  ref: React.RefObject<HTMLElement>,
+  ref: React.RefObject<HTMLElement | null>,
   isOpen: boolean,
   onClose: () => void
 ) {
@@ -131,7 +132,7 @@ export function useModalBackdropClose(
  * Focuses first focusable element on open.
  */
 export function useModalFocusTrap(
-  ref: React.RefObject<HTMLElement>,
+  ref: React.RefObject<HTMLElement | null>,
   isOpen: boolean
 ) {
   useEffect(() => {
@@ -176,9 +177,9 @@ export function useModalFocusTrap(
  */
 export interface UseModalOptions extends UseModalNavigationOptions {
   /** Ref to modal container for focus trap */
-  modalRef?: React.RefObject<HTMLElement>
+  modalRef?: React.RefObject<HTMLElement | null>
   /** Ref to backdrop for click-to-close */
-  backdropRef?: React.RefObject<HTMLElement>
+  backdropRef?: React.RefObject<HTMLElement | null>
   /** Enable focus trap */
   enableFocusTrap?: boolean
   /** Enable backdrop click to close */
@@ -195,8 +196,7 @@ export function useModal({
   modalRef,
   backdropRef,
   enableFocusTrap = false,
-  enableBackdropClose = true,
-}: UseModalOptions) {
+  enableBackdropClose = true }: UseModalOptions) {
   // Keyboard navigation
   useModalNavigation({
     isOpen,
@@ -204,8 +204,7 @@ export function useModal({
     onBack,
     enableEscape,
     enableBackspace,
-    disableBodyScroll,
-  })
+    disableBodyScroll })
 
   // Backdrop close
   if (backdropRef && enableBackdropClose) {

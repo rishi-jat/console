@@ -7,15 +7,14 @@ import {
   XCircle,
   AlertTriangle,
   Layers,
+  Plus,
   Server,
   Database,
   Gauge,
-  Plus,
   Minus,
   GripVertical,
   Loader2,
-  Check,
-} from 'lucide-react'
+  Check } from 'lucide-react'
 import { ClusterBadge } from '../ui/ClusterBadge'
 import { Skeleton } from '../ui/Skeleton'
 import { CardSearchInput, CardControlsRow, CardPaginationFooter } from '../../lib/cards/CardComponents'
@@ -30,6 +29,7 @@ import { useTranslation } from 'react-i18next'
 import { isAgentUnavailable } from '../../hooks/useLocalAgent'
 import { LOCAL_AGENT_HTTP_URL, MCP_HOOK_TIMEOUT_MS } from '../../lib/constants'
 import { clusterCacheRef } from '../../hooks/mcp/shared'
+import { WorkloadImportDialog } from './WorkloadImportDialog'
 
 // Workload types
 type WorkloadType = 'Deployment' | 'StatefulSet' | 'DaemonSet' | 'Job' | 'CronJob'
@@ -78,8 +78,7 @@ const DEMO_WORKLOADS: Workload[] = [
       { cluster: 'us-west-2', status: 'Running', replicas: 3, readyReplicas: 3, lastUpdated: new Date().toISOString() },
       { cluster: 'eu-central-1', status: 'Running', replicas: 3, readyReplicas: 3, lastUpdated: new Date().toISOString() },
     ],
-    createdAt: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString(),
-  },
+    createdAt: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString() },
   {
     name: 'api-gateway',
     namespace: 'production',
@@ -94,8 +93,7 @@ const DEMO_WORKLOADS: Workload[] = [
       { cluster: 'us-east-1', status: 'Running', replicas: 3, readyReplicas: 3, lastUpdated: new Date().toISOString() },
       { cluster: 'us-west-2', status: 'Degraded', replicas: 2, readyReplicas: 0, lastUpdated: new Date().toISOString() },
     ],
-    createdAt: new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString(),
-  },
+    createdAt: new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString() },
   {
     name: 'postgres-primary',
     namespace: 'databases',
@@ -109,8 +107,7 @@ const DEMO_WORKLOADS: Workload[] = [
     deployments: [
       { cluster: 'us-east-1', status: 'Running', replicas: 1, readyReplicas: 1, lastUpdated: new Date().toISOString() },
     ],
-    createdAt: new Date(Date.now() - 60 * 24 * 60 * 60 * 1000).toISOString(),
-  },
+    createdAt: new Date(Date.now() - 60 * 24 * 60 * 60 * 1000).toISOString() },
   {
     name: 'fluentd',
     namespace: 'logging',
@@ -126,8 +123,7 @@ const DEMO_WORKLOADS: Workload[] = [
       { cluster: 'us-west-2', status: 'Running', replicas: 4, readyReplicas: 4, lastUpdated: new Date().toISOString() },
       { cluster: 'eu-central-1', status: 'Running', replicas: 3, readyReplicas: 3, lastUpdated: new Date().toISOString() },
     ],
-    createdAt: new Date(Date.now() - 45 * 24 * 60 * 60 * 1000).toISOString(),
-  },
+    createdAt: new Date(Date.now() - 45 * 24 * 60 * 60 * 1000).toISOString() },
   {
     name: 'ml-training',
     namespace: 'ml-workloads',
@@ -141,8 +137,7 @@ const DEMO_WORKLOADS: Workload[] = [
     deployments: [
       { cluster: 'gpu-cluster-1', status: 'Pending', replicas: 1, readyReplicas: 0, lastUpdated: new Date().toISOString() },
     ],
-    createdAt: new Date(Date.now() - 1 * 60 * 60 * 1000).toISOString(),
-  },
+    createdAt: new Date(Date.now() - 1 * 60 * 60 * 1000).toISOString() },
   {
     name: 'payment-service',
     namespace: 'payments',
@@ -156,8 +151,7 @@ const DEMO_WORKLOADS: Workload[] = [
     deployments: [
       { cluster: 'us-east-1', status: 'Failed', replicas: 2, readyReplicas: 0, lastUpdated: new Date().toISOString() },
     ],
-    createdAt: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString(),
-  },
+    createdAt: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString() },
 ]
 
 const DEMO_STATS = {
@@ -167,8 +161,7 @@ const DEMO_STATS = {
   degradedCount: 3,
   pendingCount: 2,
   failedCount: 1,
-  totalClusters: 5,
-}
+  totalClusters: 5 }
 
 const StatusIcon = ({ status }: { status: WorkloadStatus }) => {
   switch (status) {
@@ -206,8 +199,7 @@ const statusColors: Record<WorkloadStatus, string> = {
   Degraded: 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-400',
   Pending: 'bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400',
   Failed: 'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400',
-  Unknown: 'bg-gray-100 text-gray-800 dark:bg-gray-900/30 dark:text-muted-foreground',
-}
+  Unknown: 'bg-gray-100 text-gray-800 dark:bg-gray-900/30 dark:text-muted-foreground' }
 
 /** Scale a workload via the agent's /scale endpoint (fallback when backend is unavailable). */
 async function scaleViaAgent(
@@ -230,8 +222,7 @@ async function scaleViaAgent(
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
       signal: ctrl.signal,
-      body: JSON.stringify({ cluster: context, namespace, name, replicas }),
-    })
+      body: JSON.stringify({ cluster: context, namespace, name, replicas }) })
     if (!res.ok) throw new Error(`Agent ${res.status}`)
 
     const data: { success?: boolean; message?: string; error?: string } = await res.json()
@@ -275,7 +266,7 @@ function DraggableWorkloadItem({ workload, isSelected, onSelect, onScaled }: Dra
     if (!isScaling) setDesiredReplicas(workload.replicas)
   }, [workload.replicas, isScaling])
 
-  const handleApplyScale = useCallback(async () => {
+  const handleApplyScale = async () => {
     if (desiredReplicas === workload.replicas || isScaling) return
     setIsScaling(true)
     setScaleError(null)
@@ -287,8 +278,7 @@ function DraggableWorkloadItem({ workload, isSelected, onSelect, onScaled }: Dra
         workloadName: workload.name,
         namespace: workload.namespace,
         targetClusters: workload.targetClusters,
-        replicas: desiredReplicas,
-      })
+        replicas: desiredReplicas })
       setScaleSuccess(true)
       onScaled?.()
       setTimeout(() => setScaleSuccess(false), SCALE_SUCCESS_RESET_MS)
@@ -332,7 +322,7 @@ function DraggableWorkloadItem({ workload, isSelected, onSelect, onScaled }: Dra
     } finally {
       setIsScaling(false)
     }
-  }, [desiredReplicas, workload, isScaling, scaleWorkload, onScaled])
+  }
   // Source cluster is the first cluster in the list (where we'll copy from)
   const sourceCluster = workload.targetClusters[0] || 'unknown'
 
@@ -345,10 +335,7 @@ function DraggableWorkloadItem({ workload, isSelected, onSelect, onScaled }: Dra
         namespace: workload.namespace,
         type: workload.type,
         sourceCluster,
-        currentClusters: workload.targetClusters,
-      },
-    },
-  })
+        currentClusters: workload.targetClusters } } })
 
   // When dragging, fade the original — the DragOverlay renders the floating preview as a portal
   const style: React.CSSProperties = isDragging
@@ -545,6 +532,12 @@ export function WorkloadDeployment(_props: WorkloadDeploymentProps) {
   const [typeFilter, setTypeFilter] = useState<WorkloadType | 'All'>('All')
   const [statusFilter, setStatusFilter] = useState<WorkloadStatus | 'All'>('All')
   const [selectedWorkload, setSelectedWorkload] = useState<Workload | null>(null)
+  const [showImportDialog, setShowImportDialog] = useState(false)
+  const [importedWorkloads, setImportedWorkloads] = useState<Workload[]>([])
+
+  const handleImportWorkloads = useCallback((newWorkloads: Workload[]) => {
+    setImportedWorkloads(prev => [...prev, ...newWorkloads])
+  }, [])
 
   // Manual cluster filter -- Workload has targetClusters[] not a single cluster field,
   // so we can't use useCardData's built-in clusterField filtering.
@@ -564,8 +557,7 @@ export function WorkloadDeployment(_props: WorkloadDeploymentProps) {
     isFailed,
     consecutiveFailures,
     isDemoData: isDemoFallback || isDemo,
-    errorMessage: isFailed ? 'Failed to load workloads' : undefined,
-  })
+    errorMessage: isFailed ? 'Failed to load workloads' : undefined })
   const [localClusterFilter, setLocalClusterFilterState] = useState<string[]>(() => {
     try {
       const stored = localStorage.getItem(CLUSTER_FILTER_STORAGE_KEY)
@@ -575,24 +567,24 @@ export function WorkloadDeployment(_props: WorkloadDeploymentProps) {
   const [showClusterFilter, setShowClusterFilter] = useState(false)
   const clusterFilterRef = useRef<HTMLDivElement>(null)
 
-  const persistClusterFilter = useCallback((clusters: string[]) => {
+  const persistClusterFilter = (clusters: string[]) => {
     setLocalClusterFilterState(clusters)
     if (clusters.length === 0) {
       localStorage.removeItem(CLUSTER_FILTER_STORAGE_KEY)
     } else {
       localStorage.setItem(CLUSTER_FILTER_STORAGE_KEY, JSON.stringify(clusters))
     }
-  }, [])
+  }
 
-  const toggleClusterFilter = useCallback((name: string) => {
+  const toggleClusterFilter = (name: string) => {
     persistClusterFilter(
       localClusterFilter.includes(name)
         ? localClusterFilter.filter(c => c !== name)
         : [...localClusterFilter, name],
     )
-  }, [localClusterFilter, persistClusterFilter])
+  }
 
-  const clearClusterFilter = useCallback(() => persistClusterFilter([]), [persistClusterFilter])
+  const clearClusterFilter = () => persistClusterFilter([])
 
   // Close dropdown on outside click
   useEffect(() => {
@@ -607,17 +599,17 @@ export function WorkloadDeployment(_props: WorkloadDeploymentProps) {
 
   // In demo mode, derive available clusters from demo workloads' targetClusters
   // In live mode, use real clusters from the API
-  const availableClusters = useMemo(() => {
+  const availableClusters = (() => {
     if (isDemo) {
       // Extract unique cluster names from demo workloads
       const demoClusterNames = new Set(DEMO_WORKLOADS.flatMap(w => w.targetClusters))
       return Array.from(demoClusterNames).map(name => ({ name, reachable: true }))
     }
     return deduplicatedClusters.filter(c => c.reachable !== false)
-  }, [deduplicatedClusters, isDemo])
+  })()
   const workloads: Workload[] = useMemo(() => {
-    if (isDemo) return DEMO_WORKLOADS
-    if (!realWorkloads || realWorkloads.length === 0) return []
+    if (isDemo) return [...DEMO_WORKLOADS, ...importedWorkloads]
+    if (!realWorkloads || realWorkloads.length === 0) return [...importedWorkloads]
     // Transform API workloads to card format
     const mapped = realWorkloads.map((w: ApiWorkload) => {
       const clusters = w.targetClusters || (w.cluster ? [w.cluster] : [])
@@ -627,15 +619,13 @@ export function WorkloadDeployment(_props: WorkloadDeploymentProps) {
             status: d.status as WorkloadStatus,
             replicas: d.replicas,
             readyReplicas: d.readyReplicas,
-            lastUpdated: d.lastUpdated,
-          }))
+            lastUpdated: d.lastUpdated }))
         : clusters.map(c => ({
             cluster: c,
             status: w.status as WorkloadStatus,
             replicas: w.replicas,
             readyReplicas: w.readyReplicas,
-            lastUpdated: w.createdAt,
-          }))
+            lastUpdated: w.createdAt }))
       return {
         name: w.name,
         namespace: w.namespace,
@@ -647,8 +637,7 @@ export function WorkloadDeployment(_props: WorkloadDeploymentProps) {
         labels: w.labels || {},
         targetClusters: clusters,
         deployments,
-        createdAt: w.createdAt,
-      }
+        createdAt: w.createdAt }
     })
 
     // Deduplicate: group by namespace/name, merge clusters
@@ -666,11 +655,11 @@ export function WorkloadDeployment(_props: WorkloadDeploymentProps) {
         grouped.set(key, { ...w })
       }
     }
-    return Array.from(grouped.values())
-  }, [realWorkloads, isDemo])
+    return [...Array.from(grouped.values()), ...importedWorkloads]
+  }, [realWorkloads, isDemo, importedWorkloads])
 
   // Calculate stats from actual workloads
-  const stats = useMemo(() => {
+  const stats = (() => {
     if (isDemo) return DEMO_STATS
     return {
       totalWorkloads: realWorkloads?.length ?? workloads.length,
@@ -679,12 +668,11 @@ export function WorkloadDeployment(_props: WorkloadDeploymentProps) {
       degradedCount: workloads.filter(w => w.status === 'Degraded').length,
       pendingCount: workloads.filter(w => w.status === 'Pending').length,
       failedCount: workloads.filter(w => w.status === 'Failed').length,
-      totalClusters: new Set(workloads.flatMap(w => w.targetClusters)).size,
-    }
-  }, [workloads, realWorkloads, isDemo])
+      totalClusters: new Set(workloads.flatMap(w => w.targetClusters)).size }
+  })()
 
   // Pre-filter by type, status, and cluster before passing to useCardData
-  const preFiltered = useMemo(() => {
+  const preFiltered = (() => {
     let result = workloads
     if (typeFilter !== 'All') {
       result = result.filter(w => w.type === typeFilter)
@@ -702,7 +690,7 @@ export function WorkloadDeployment(_props: WorkloadDeploymentProps) {
       )
     }
     return result
-  }, [workloads, typeFilter, statusFilter, localClusterFilter, availableClusters])
+  })()
 
   // useCardData handles search, sort, and pagination
   const {
@@ -715,34 +703,27 @@ export function WorkloadDeployment(_props: WorkloadDeploymentProps) {
     setItemsPerPage,
     filters: {
       search,
-      setSearch,
-    },
+      setSearch },
     sorting: {
       sortBy,
       setSortBy,
       sortDirection,
-      setSortDirection,
-    },
+      setSortDirection },
     containerRef,
-    containerStyle,
-  } = useCardData<Workload, SortByOption>(preFiltered, {
+    containerStyle } = useCardData<Workload, SortByOption>(preFiltered, {
     filter: {
       searchFields: ['name', 'namespace', 'image'] as (keyof Workload)[],
       customPredicate: (w, query) =>
         w.targetClusters.some(c => c.toLowerCase().includes(query)),
-      storageKey: 'workload-deployment',
-    },
+      storageKey: 'workload-deployment' },
     sort: {
       defaultField: 'status',
       defaultDirection: 'asc',
       comparators: {
         status: commonComparators.statusOrder<Workload>('status', workloadStatusOrder),
         name: commonComparators.string<Workload>('name'),
-        type: commonComparators.string<Workload>('type'),
-      },
-    },
-    defaultLimit: 5,
-  })
+        type: commonComparators.string<Workload>('type') } },
+    defaultLimit: 5 })
 
   const workloadTypes: (WorkloadType | 'All')[] = ['All', 'Deployment', 'StatefulSet', 'DaemonSet', 'Job', 'CronJob']
   const workloadStatuses: (WorkloadStatus | 'All')[] = ['All', 'Running', 'Degraded', 'Pending', 'Failed']
@@ -777,8 +758,7 @@ export function WorkloadDeployment(_props: WorkloadDeploymentProps) {
         <CardControlsRow
           clusterIndicator={{
             selectedCount: localClusterFilter.length,
-            totalCount: availableClusters.length,
-          }}
+            totalCount: availableClusters.length }}
           clusterFilter={{
             availableClusters,
             selectedClusters: localClusterFilter,
@@ -787,8 +767,7 @@ export function WorkloadDeployment(_props: WorkloadDeploymentProps) {
             isOpen: showClusterFilter,
             setIsOpen: setShowClusterFilter,
             containerRef: clusterFilterRef,
-            minClusters: 1,
-          }}
+            minClusters: 1 }}
           cardControls={{
             limit: itemsPerPage,
             onLimitChange: setItemsPerPage,
@@ -796,18 +775,26 @@ export function WorkloadDeployment(_props: WorkloadDeploymentProps) {
             sortOptions: SORT_OPTIONS,
             onSortChange: (v) => setSortBy(v as SortByOption),
             sortDirection,
-            onSortDirectionChange: setSortDirection,
-          }}
+            onSortDirectionChange: setSortDirection }}
         />
       </div>
 
-      {/* Search */}
-      <div className="px-3 mb-2">
+      {/* Search + Add — button matches input: same py-1.5, same rounded-md, same text-xs */}
+      <div className="px-3 mb-2 flex gap-2">
         <CardSearchInput
           value={search}
           onChange={setSearch}
           placeholder="Search workloads..."
+          className="!mb-0 flex-1"
         />
+        <button
+          onClick={() => setShowImportDialog(true)}
+          className="self-start px-3 py-1.5 text-xs font-medium rounded-md bg-purple-500/20 hover:bg-purple-500/30 text-purple-400 transition-colors flex items-center gap-1.5 shrink-0 whitespace-nowrap"
+          aria-label="Add workload"
+        >
+          <Plus className="h-3.5 w-3.5" />
+          Add
+        </button>
       </div>
 
       {/* Stats bar */}
@@ -901,6 +888,13 @@ export function WorkloadDeployment(_props: WorkloadDeploymentProps) {
         itemsPerPage={typeof itemsPerPage === 'number' ? itemsPerPage : preFiltered.length}
         onPageChange={goToPage}
         needsPagination={needsPagination}
+      />
+
+      {/* Import Dialog */}
+      <WorkloadImportDialog
+        isOpen={showImportDialog}
+        onClose={() => setShowImportDialog(false)}
+        onImport={handleImportWorkloads}
       />
     </div>
   )

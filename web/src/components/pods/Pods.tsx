@@ -1,4 +1,4 @@
-import { useCallback, useMemo } from 'react'
+import { useMemo } from 'react'
 import { ChevronRight } from 'lucide-react'
 import { useClusters } from '../../hooks/useMCP'
 import { useCachedPodIssues } from '../../hooks/useCachedData'
@@ -12,6 +12,7 @@ import { Skeleton } from '../ui/Skeleton'
 import { StatBlockValue } from '../ui/StatsOverview'
 import { DashboardPage } from '../../lib/dashboards/DashboardPage'
 import { getDefaultCards } from '../../config/dashboards'
+import { RotatingTip } from '../ui/RotatingTip'
 import { TechnicalAcronym, STATUS_TOOLTIPS } from '../shared/TechnicalAcronym'
 import { PortalTooltip } from '../cards/llmd/shared/PortalTooltip'
 
@@ -27,7 +28,7 @@ export function Pods() {
 
   // Derive lastUpdated from cache timestamp
   const lastUpdated = podIssuesLastRefresh ? new Date(podIssuesLastRefresh) : null
-  const handleRefresh = useCallback(() => { refetchPodIssues(); refetchClusters() }, [refetchPodIssues, refetchClusters])
+  const handleRefresh = () => { refetchPodIssues(); refetchClusters() }
   const { drillToPod, drillToAllPods, drillToAllClusters } = useDrillDownActions()
   const { getStatValue: getUniversalStatValue } = useUniversalStats()
 
@@ -35,8 +36,7 @@ export function Pods() {
     selectedClusters: globalSelectedClusters,
     isAllClustersSelected,
     customFilter,
-    filterByCluster,
-  } = useGlobalFilters()
+    filterByCluster } = useGlobalFilters()
 
   // Combined loading/refreshing states
   const isLoading = podIssuesLoading || clustersLoading
@@ -46,17 +46,17 @@ export function Pods() {
   const showSkeletons = (podIssues.length === 0 && isLoading) || isModeSwitching
 
   // Handler for keyboard navigation on pod issue cards
-  const handlePodIssueKeyDown = useCallback((e: React.KeyboardEvent, cluster: string | undefined, namespace: string, name: string) => {
+  const handlePodIssueKeyDown = (e: React.KeyboardEvent, cluster: string | undefined, namespace: string, name: string) => {
     if (e.key === 'Enter' || e.key === ' ') {
       e.preventDefault() // Prevent default for both Enter and Space to match button behavior
       if (cluster) {
         drillToPod(cluster, namespace, name)
       }
     }
-  }, [drillToPod])
+  }
 
   // Filter pod issues by global cluster selection
-  const filteredPodIssues = useMemo(() => {
+  const filteredPodIssues = (() => {
     // Apply cluster filtering using the built-in helper
     let filtered = filterByCluster(podIssues)
 
@@ -72,7 +72,7 @@ export function Pods() {
     }
 
     return filtered
-  }, [podIssues, filterByCluster, customFilter])
+  })()
 
   // Calculate stats
   const stats = useMemo(() => {
@@ -88,12 +88,11 @@ export function Pods() {
       issues: issueCount,
       pending: pendingCount,
       restarts: restartCount,
-      clusters: clusterCount,
-    }
+      clusters: clusterCount }
   }, [clusters, filteredPodIssues, isAllClustersSelected, globalSelectedClusters])
 
   // Dashboard-specific stats value getter
-  const getDashboardStatValue = useCallback((blockId: string): StatBlockValue => {
+  const getDashboardStatValue = (blockId: string): StatBlockValue => {
     switch (blockId) {
       case 'total_pods':
         return { value: stats.totalPods, sublabel: 'total pods', onClick: () => drillToAllPods(), isClickable: stats.totalPods > 0 }
@@ -110,19 +109,17 @@ export function Pods() {
       default:
         return { value: '-', sublabel: '' }
     }
-  }, [stats, drillToAllPods, drillToAllClusters])
+  }
 
   // Merged getter: dashboard-specific values first, then universal fallback
-  const getStatValue = useCallback(
-    (blockId: string) => createMergedStatValueGetter(getDashboardStatValue, getUniversalStatValue)(blockId),
-    [getDashboardStatValue, getUniversalStatValue]
-  )
+  const getStatValue = (blockId: string) => createMergedStatValueGetter(getDashboardStatValue, getUniversalStatValue)(blockId)
 
   return (
     <DashboardPage
       title="Pods"
       subtitle="Monitor pod health and issues across clusters"
       icon="Box"
+      rightExtra={<RotatingTip page="pods" />}
       storageKey={PODS_CARDS_KEY}
       defaultCards={DEFAULT_POD_CARDS}
       statsType="pods"
@@ -134,8 +131,7 @@ export function Pods() {
       hasData={stats.totalPods > 0}
       emptyState={{
         title: 'Pods Dashboard',
-        description: 'Add cards to monitor pod health, issues, and resource usage across your clusters.',
-      }}
+        description: 'Add cards to monitor pod health, issues, and resource usage across your clusters.' }}
     >
       {/* Pod Issues List */}
       {showSkeletons ? (

@@ -5,7 +5,7 @@
  * calls startMission() per cluster. Animated checklist with progress.
  */
 
-import { useEffect, useRef, useCallback, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   Rocket,
@@ -15,13 +15,15 @@ import {
   SkipForward,
   RotateCcw,
   PartyPopper,
-  Loader2,
-} from 'lucide-react'
+  Loader2 } from 'lucide-react'
 import { cn } from '../../lib/cn'
 import { Button } from '../ui/Button'
 import { useMissions } from '../../hooks/useMissions'
 import { loadMissionPrompt } from '../cards/multi-tenancy/missionLoader'
 import type { MissionControlState, PhaseProgress, PhaseStatus } from './types'
+
+/** Terminal statuses that indicate a project is no longer in-flight */
+const TERMINAL_STATUSES: readonly string[] = ['completed', 'failed', 'skipped']
 
 interface LaunchSequenceProps {
   state: MissionControlState
@@ -36,21 +38,48 @@ const STATUS_ICONS: Record<string, React.ReactNode> = {
   running: <Loader2 className="w-4 h-4 animate-spin text-amber-400" />,
   completed: <Check className="w-4 h-4 text-green-400" />,
   failed: <X className="w-4 h-4 text-red-400" />,
-  skipped: <SkipForward className="w-4 h-4 text-muted-foreground" />,
+  skipped: <SkipForward className="w-4 h-4 text-muted-foreground" /> }
+
+/**
+ * Build a content-based signature for phases so reinitialization triggers
+ * when phase membership changes, not just when the phase count changes (#5508).
+ */
+function computePhaseSignature(phases: MissionControlState['phases']): string {
+  return phases
+    .map((p) => `${p.phase}:${p.name}:${(p.projectNames || []).join(',')}`)
+    .join('|')
+}
+
+/**
+ * Recompute phase-level status from its project statuses.
+ * Used by both the mission-monitor effect and the error catch path (#5507).
+ */
+function derivePhaseStatus(phase: PhaseProgress): PhaseStatus {
+  const allDone = phase.projects.length > 0 && phase.projects.every(
+    (p) => TERMINAL_STATUSES.includes(p.status)
+  )
+  if (!allDone) return phase.status
+  const anyFailed = phase.projects.some((p) => p.status === 'failed')
+  return anyFailed ? 'failed' : 'completed'
 }
 
 export function LaunchSequence({
   state,
   onUpdateProgress,
   onComplete,
-  onClose,
-}: LaunchSequenceProps) {
+  onClose }: LaunchSequenceProps) {
   const { startMission, missions } = useMissions()
   const [isStarted, setIsStarted] = useState(false)
   const progressRef = useRef<PhaseProgress[]>(state.launchProgress)
   const startedMissions = useRef(new Set<string>())
 
-  // Initialize progress from phases
+  /** Content-based signature for phase membership (#5508) */
+  const phaseSignature = useMemo(
+    () => computePhaseSignature(state.phases),
+    [state.phases]
+  )
+
+  // Initialize progress from phases — keyed on content signature, not just length (#5508)
   useEffect(() => {
     if (state.launchProgress.length > 0) {
       progressRef.current = state.launchProgress
@@ -61,32 +90,28 @@ export function LaunchSequence({
     const initial: PhaseProgress[] = state.phases.map((phase) => ({
       phase: phase.phase,
       status: 'pending' as PhaseStatus,
-      projects: phase.projectNames.map((name) => ({
+      projects: (phase.projectNames || []).map((name) => ({
         name,
-        status: 'pending' as const,
-      })),
-    }))
+        status: 'pending' as const })) }))
     progressRef.current = initial
+    startedMissions.current = new Set<string>()
+    setIsStarted(false)
     onUpdateProgress(initial)
-  }, [state.phases.length])
+  }, [phaseSignature])
 
-  const updateProgress = useCallback(
-    (updater: (prev: PhaseProgress[]) => PhaseProgress[]) => {
+  const updateProgress = (updater: (prev: PhaseProgress[]) => PhaseProgress[]) => {
       const next = updater(progressRef.current)
       progressRef.current = next
       onUpdateProgress(next)
-    },
-    [onUpdateProgress]
-  )
+    }
 
   // Launch a single project's mission
-  const launchProject = useCallback(
-    async (projectName: string, phaseNum: number) => {
+  const launchProject = async (projectName: string, phaseNum: number) => {
       const project = state.projects.find((p) => p.name === projectName)
       if (!project) return
 
       const assignment = state.assignments.find((a) =>
-        a.projectNames.includes(projectName)
+        (a.projectNames || []).includes(projectName)
       )
       const clusterName = assignment?.clusterName ?? 'default'
 
@@ -99,8 +124,7 @@ export function LaunchSequence({
                 status: 'running',
                 projects: p.projects.map((proj) =>
                   proj.name === projectName ? { ...proj, status: 'running' as const } : proj
-                ),
-              }
+                ) }
             : p
         )
       )
@@ -122,8 +146,7 @@ export function LaunchSequence({
           type: 'deploy',
           cluster: clusterName,
           initialPrompt: prompt + clusterContext,
-          dryRun: state.isDryRun,
-        })
+          dryRun: state.isDryRun })
 
         // Update with missionId
         updateProgress((prev) =>
@@ -133,30 +156,26 @@ export function LaunchSequence({
                   ...p,
                   projects: p.projects.map((proj) =>
                     proj.name === projectName ? { ...proj, missionId } : proj
-                  ),
-                }
+                  ) }
               : p
           )
         )
       } catch (err) {
+        // Mark project as failed AND recompute phase-level status (#5507)
         updateProgress((prev) =>
-          prev.map((p) =>
-            p.phase === phaseNum
-              ? {
-                  ...p,
-                  projects: p.projects.map((proj) =>
-                    proj.name === projectName
-                      ? { ...proj, status: 'failed' as const, error: String(err) }
-                      : proj
-                  ),
-                }
-              : p
-          )
+          prev.map((p) => {
+            if (p.phase !== phaseNum) return p
+            const updatedProjects = p.projects.map((proj) =>
+              proj.name === projectName
+                ? { ...proj, status: 'failed' as const, error: String(err) }
+                : proj
+            )
+            const updatedPhase = { ...p, projects: updatedProjects }
+            return { ...updatedPhase, status: derivePhaseStatus(updatedPhase) }
+          })
         )
       }
-    },
-    [state.projects, state.assignments, startMission, updateProgress]
-  )
+    }
 
   // Monitor mission statuses and update progress
   useEffect(() => {
@@ -179,37 +198,45 @@ export function LaunchSequence({
           return { ...proj, status: 'failed' as const, error: 'Mission failed' }
         }
         return proj
-      }),
-    }))
+      }) }))
 
     if (changed) {
-      // Update phase-level status
-      const updated = next.map((phase) => {
-        const allDone = phase.projects.every(
-          (p) => (['completed', 'failed', 'skipped'] as string[]).includes(p.status)
-        )
-        const anyFailed = phase.projects.some((p) => p.status === 'failed')
-        return {
-          ...phase,
-          status: allDone
-            ? anyFailed
-              ? ('failed' as PhaseStatus)
-              : ('completed' as PhaseStatus)
-            : phase.status,
-        }
-      })
+      // Update phase-level status using shared helper
+      const updated = next.map((phase) => ({
+        ...phase,
+        status: derivePhaseStatus(phase) }))
       progressRef.current = updated
       onUpdateProgress(updated)
 
       // Check if all phases complete
-      if (updated.every((p) => p.status === 'completed' || p.status === 'failed' || p.status === 'skipped')) {
+      if (updated.length > 0 && updated.every((p) => TERMINAL_STATUSES.includes(p.status))) {
         onComplete()
       }
     }
   }, [missions, onUpdateProgress, onComplete])
 
+  /**
+   * Wait for a specific phase to reach a terminal status.
+   * Used by phased mode to gate sequential phase execution (#5506).
+   */
+  const waitForPhaseCompletion = useCallback((phaseNum: number): Promise<PhaseStatus> => {
+    return new Promise((resolve) => {
+      /** Poll interval in ms — checks progressRef for phase terminal state */
+      const PHASE_POLL_INTERVAL_MS = 500
+      const check = () => {
+        const phase = progressRef.current.find((p) => p.phase === phaseNum)
+        if (phase && TERMINAL_STATUSES.includes(phase.status)) {
+          resolve(phase.status)
+          return
+        }
+        setTimeout(check, PHASE_POLL_INTERVAL_MS)
+      }
+      check()
+    })
+  }, [])
+
   // Execute the launch sequence
-  const startLaunch = useCallback(async () => {
+  const startLaunch = async () => {
     if (isStarted) return
     setIsStarted(true)
 
@@ -217,8 +244,8 @@ export function LaunchSequence({
 
     if (isYolo) {
       // Launch everything at once
-      for (const phase of state.phases) {
-        for (const projectName of phase.projectNames) {
+      for (const phase of (state.phases || [])) {
+        for (const projectName of (phase.projectNames || [])) {
           if (!startedMissions.current.has(projectName)) {
             startedMissions.current.add(projectName)
             launchProject(projectName, phase.phase)
@@ -226,8 +253,8 @@ export function LaunchSequence({
         }
       }
     } else {
-      // Phased: launch phase 1, wait, then phase 2, etc.
-      for (const phase of state.phases) {
+      // Phased: launch phase N, wait for completion, then phase N+1 (#5506)
+      for (const phase of (state.phases || [])) {
         updateProgress((prev) =>
           prev.map((p) =>
             p.phase === phase.phase ? { ...p, status: 'running' } : p
@@ -235,31 +262,31 @@ export function LaunchSequence({
         )
 
         // Launch all projects in this phase
-        for (const projectName of phase.projectNames) {
+        for (const projectName of (phase.projectNames || [])) {
           if (!startedMissions.current.has(projectName)) {
             startedMissions.current.add(projectName)
             await launchProject(projectName, phase.phase)
           }
         }
 
-        // For phased mode, we don't wait here — the useEffect monitors mission completions
-        // and advances automatically
+        // Wait for this phase to reach a terminal state before starting the next (#5506)
+        await waitForPhaseCompletion(phase.phase)
       }
     }
-  }, [isStarted, state.phases, state.deployMode, launchProject, updateProgress])
+  }
 
-  // Auto-start on mount
+  // Auto-start on mount — keyed on content signature (#5508)
   useEffect(() => {
     if (!isStarted && state.phases.length > 0) {
       startLaunch()
     }
-  }, [state.phases.length])
+  }, [phaseSignature])
 
   const progress = state.launchProgress.length > 0 ? state.launchProgress : progressRef.current
-  const allComplete = progress.every(
+  const allComplete = progress.length > 0 && progress.every(
     (p) => p.status === 'completed' || p.status === 'failed' || p.status === 'skipped'
   )
-  const allSuccess = progress.every((p) => p.status === 'completed')
+  const allSuccess = progress.length > 0 && progress.every((p) => p.status === 'completed')
 
   return (
     <div className="max-w-3xl mx-auto p-6 space-y-6">

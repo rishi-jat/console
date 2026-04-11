@@ -42,6 +42,13 @@ const (
 	// missions from staying in "Running/Processing" state indefinitely when the
 	// AI provider hangs or never responds (#2375).
 	missionExecutionTimeout = 5 * time.Minute
+
+	// missionHeartbeatInterval is how often the backend sends a heartbeat
+	// progress event during mission execution.  This prevents the frontend's
+	// stream-inactivity timer (90s) from firing during legitimate long-running
+	// tool calls (e.g., `drasi init`, `helm install`) that produce no output
+	// for extended periods.
+	missionHeartbeatInterval = 30 * time.Second
 )
 
 // Version is set by ldflags during build
@@ -173,6 +180,8 @@ func NewServer(cfg Config) (*Server, error) {
 	agentToken := os.Getenv("KC_AGENT_TOKEN")
 	if agentToken != "" {
 		slog.Info("Agent token authentication enabled")
+	} else {
+		slog.Warn("KC_AGENT_TOKEN is not set — all requests will be accepted without authentication. Set KC_AGENT_TOKEN to enable token validation.")
 	}
 
 	now := time.Now()
@@ -364,6 +373,7 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/kubeconfig/import", s.handleKubeconfigImportHTTP)
 	mux.HandleFunc("/kubeconfig/add", s.handleKubeconfigAddHTTP)
 	mux.HandleFunc("/kubeconfig/test", s.handleKubeconfigTestHTTP)
+	mux.HandleFunc("/kubeconfig/remove", s.handleKubeconfigRemoveHTTP)
 
 	// Settings endpoints for API key management
 	mux.HandleFunc("/settings/keys", s.handleSettingsKeys)
@@ -436,6 +446,7 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/auto-update/config", s.handleAutoUpdateConfig)
 	mux.HandleFunc("/auto-update/status", s.handleAutoUpdateStatus)
 	mux.HandleFunc("/auto-update/trigger", s.handleAutoUpdateTrigger)
+	mux.HandleFunc("/auto-update/cancel", s.handleAutoUpdateCancel)
 
 	// Prometheus query proxy - queries Prometheus in user clusters via K8s API server proxy
 	mux.HandleFunc("/prometheus/query", s.handlePrometheusQuery)
@@ -446,11 +457,14 @@ func (s *Server) Start() error {
 	// WebSocket endpoint
 	mux.HandleFunc("/ws", s.handleWebSocket)
 
-	// CORS preflight - includes Private Network Access header for browser security
+	// CORS preflight - uses isAllowedOrigin() instead of wildcard to restrict access
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
+		origin := r.Header.Get("Origin")
+		if s.isAllowedOrigin(origin) {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+		}
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 		w.Header().Set("Access-Control-Allow-Private-Network", "true")
 		if r.Method == "OPTIONS" {
 			w.WriteHeader(http.StatusOK)
@@ -577,6 +591,11 @@ func (s *Server) handleProviderCheck(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Authorization")
 		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	if !s.validateToken(r) {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
 

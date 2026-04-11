@@ -1,6 +1,6 @@
-import { useMemo, useState } from 'react'
+import { useState, useMemo } from 'react'
 import { GitCompare, ChevronRight } from 'lucide-react'
-import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts'
+import ReactECharts from 'echarts-for-react'
 import { useMultiClusterInsights } from '../../../hooks/useMultiClusterInsights'
 import { useCardLoadingState } from '../CardDataContext'
 import { InsightSourceBadge } from './InsightSourceBadge'
@@ -20,8 +20,7 @@ const CLUSTER_B_COLOR = '#f59e0b'
 const SIGNIFICANCE_COLORS: Record<string, string> = {
   high: 'border-red-500/30 bg-red-500/5',
   medium: 'border-yellow-500/30 bg-yellow-500/5',
-  low: 'border-border bg-secondary/30',
-}
+  low: 'border-border bg-secondary/30' }
 
 export function ClusterDeltaDetector() {
   const { insightsByCategory, isLoading, isDemoData } = useMultiClusterInsights()
@@ -29,22 +28,20 @@ export function ClusterDeltaDetector() {
   const deltaInsightsRaw = insightsByCategory['cluster-delta'] || []
   const {
     sorted: deltaInsights,
-    sortBy, setSortBy, sortDirection, setSortDirection, limit, setLimit,
-  } = useInsightSort(deltaInsightsRaw)
+    sortBy, setSortBy, sortDirection, setSortDirection, limit, setLimit } = useInsightSort(deltaInsightsRaw)
 
   const hasData = deltaInsightsRaw.length > 0
   useCardLoadingState({
     isLoading: isLoading && !hasData,
     hasAnyData: hasData,
-    isDemoData,
-  })
+    isDemoData })
 
   // Use first insight's clusters as default selection
   const [selectedInsight, setSelectedInsight] = useState(0)
   const insight = deltaInsights[selectedInsight] || deltaInsights[0]
   const [modalInsight, setModalInsight] = useState<MultiClusterInsight | null>(null)
 
-  const numericDeltas = useMemo(() => {
+  const numericDeltas = (() => {
     if (!insight?.deltas) return []
     return (insight.deltas || [])
       .filter(d => typeof d.clusterA.value === 'number' && typeof d.clusterB.value === 'number')
@@ -52,16 +49,59 @@ export function ClusterDeltaDetector() {
         dimension: d.dimension,
         [d.clusterA.name]: d.clusterA.value as number,
         [d.clusterB.name]: d.clusterB.value as number,
-        significance: d.significance,
-      }))
-  }, [insight])
+        significance: d.significance }))
+  })()
 
-  const nonNumericDeltas = useMemo(() => {
+  const nonNumericDeltas = (() => {
     if (!insight?.deltas) return []
     return (insight.deltas || []).filter(
       d => typeof d.clusterA.value === 'string' || typeof d.clusterB.value === 'string',
     )
-  }, [insight])
+  })()
+
+  const clusterPair = insight ? [...new Set(insight.affectedClusters)].slice(0, 2) : []
+
+  const chartOption = useMemo(() => {
+    if (numericDeltas.length === 0 || clusterPair.length !== 2) return {}
+    return {
+      backgroundColor: 'transparent',
+      grid: { left: 30, right: 10, top: 5, bottom: 20 },
+      xAxis: {
+        type: 'category' as const,
+        data: numericDeltas.map(d => d.dimension),
+        axisLabel: { fontSize: 9, color: CHART_TICK_COLOR },
+        axisTick: { show: false },
+        axisLine: { show: false },
+      },
+      yAxis: {
+        type: 'value' as const,
+        axisLabel: { fontSize: 9, color: CHART_TICK_COLOR },
+        axisTick: { show: false },
+        axisLine: { show: false },
+        splitLine: { lineStyle: { color: CHART_GRID_STROKE, type: 'dashed' as const } },
+      },
+      tooltip: {
+        trigger: 'axis' as const,
+        backgroundColor: (CHART_TOOLTIP_CONTENT_STYLE as Record<string, unknown>).backgroundColor as string,
+        borderColor: (CHART_TOOLTIP_CONTENT_STYLE as Record<string, unknown>).borderColor as string,
+        textStyle: { color: '#e0e0e0', fontSize: Number(CHART_TOOLTIP_FONT_SIZE_COMPACT.replace('px', '')) },
+      },
+      series: [
+        {
+          name: clusterPair[0],
+          type: 'bar',
+          data: numericDeltas.map(d => (d as Record<string, unknown>)[clusterPair[0]]),
+          itemStyle: { color: CLUSTER_A_COLOR, borderRadius: [4, 4, 0, 0] },
+        },
+        {
+          name: clusterPair[1],
+          type: 'bar',
+          data: numericDeltas.map(d => (d as Record<string, unknown>)[clusterPair[1]]),
+          itemStyle: { color: CLUSTER_B_COLOR, borderRadius: [4, 4, 0, 0] },
+        },
+      ],
+    }
+  }, [numericDeltas, clusterPair])
 
   if (!isLoading && deltaInsightsRaw.length === 0) {
     return (
@@ -73,8 +113,6 @@ export function ClusterDeltaDetector() {
     )
   }
 
-  const clusterPair = insight ? [...new Set(insight.affectedClusters)].slice(0, 2) : []
-
   return (
     <div className="space-y-3 p-1">
       <CardControlsRow
@@ -85,8 +123,7 @@ export function ClusterDeltaDetector() {
           sortOptions: INSIGHT_SORT_OPTIONS,
           onSortChange: (v) => setSortBy(v as InsightSortField),
           sortDirection,
-          onSortDirectionChange: setSortDirection,
-        }}
+          onSortDirectionChange: setSortDirection }}
       />
 
       {/* Workload selector */}
@@ -138,18 +175,12 @@ export function ClusterDeltaDetector() {
           {/* Numeric deltas as bar chart */}
           {numericDeltas.length > 0 && clusterPair.length === 2 && (
             <div className="h-32">
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={numericDeltas} margin={{ top: 5, right: 10, left: 0, bottom: 5 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke={CHART_GRID_STROKE} />
-                  <XAxis dataKey="dimension" tick={{ fontSize: 9, fill: CHART_TICK_COLOR }} />
-                  <YAxis tick={{ fontSize: 9, fill: CHART_TICK_COLOR }} />
-                  <Tooltip
-                    contentStyle={{ ...CHART_TOOLTIP_CONTENT_STYLE, fontSize: CHART_TOOLTIP_FONT_SIZE_COMPACT }}
-                  />
-                  <Bar dataKey={clusterPair[0]} fill={CLUSTER_A_COLOR} radius={[4, 4, 0, 0]} />
-                  <Bar dataKey={clusterPair[1]} fill={CLUSTER_B_COLOR} radius={[4, 4, 0, 0]} />
-                </BarChart>
-              </ResponsiveContainer>
+              <ReactECharts
+                option={chartOption}
+                style={{ height: 128, width: '100%' }}
+                notMerge={true}
+                opts={{ renderer: 'svg' }}
+              />
             </div>
           )}
 

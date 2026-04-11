@@ -1,5 +1,6 @@
-import { useState, useCallback, useMemo } from 'react'
+import { useState, useMemo, useEffect } from 'react'
 import { useTranslation } from 'react-i18next'
+import { useClusters } from '../../hooks/useMCP'
 
 interface MaintenanceWindow {
   id: string
@@ -13,7 +14,11 @@ interface MaintenanceWindow {
 
 const STORAGE_KEY = 'kubestellar-maintenance-windows'
 
+/** Interval for auto-refreshing status badges (30 seconds) */
+const STATUS_REFRESH_INTERVAL_MS = 30_000
+
 function loadWindows(): MaintenanceWindow[] {
+  if (typeof window === 'undefined') return []
   try {
     return JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]')
   } catch {
@@ -22,23 +27,43 @@ function loadWindows(): MaintenanceWindow[] {
 }
 
 function saveWindows(windows: MaintenanceWindow[]) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(windows))
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(windows))
+  } catch {
+    // Silently ignore quota errors or private browsing restrictions
+  }
 }
 
 export function MaintenanceWindows() {
   const { t } = useTranslation()
+  const { clusters } = useClusters()
   const [windows, setWindows] = useState<MaintenanceWindow[]>(loadWindows)
   const [showForm, setShowForm] = useState(false)
   const [timeError, setTimeError] = useState('')
+  /** Tick counter incremented by setInterval to force status recalculation */
+  const [, setTick] = useState(0)
   const [formData, setFormData] = useState({
     cluster: '',
     description: '',
     startTime: '',
     endTime: '',
-    type: 'maintenance' as MaintenanceWindow['type'],
-  })
+    type: 'maintenance' as MaintenanceWindow['type'] })
 
-  const updateStatus = useCallback(() => {
+  // Auto-refresh status badges so scheduled→active→completed transitions
+  // are reflected even when the user is idle (#4848)
+  useEffect(() => {
+    if (windows.length === 0) return
+    const interval = setInterval(() => setTick(prev => prev + 1), STATUS_REFRESH_INTERVAL_MS)
+    return () => clearInterval(interval)
+  }, [windows.length])
+
+  /** Available cluster names from connected clusters */
+  const clusterNames = useMemo(() =>
+    (clusters || []).map(c => c.name).filter(Boolean).sort(),
+    [clusters]
+  )
+
+  const updateStatus = () => {
     const now = new Date()
     return windows.map(w => {
       const start = new Date(w.startTime)
@@ -47,13 +72,11 @@ export function MaintenanceWindows() {
       if (now > end) return { ...w, status: 'completed' as const }
       return { ...w, status: 'scheduled' as const }
     })
-  }, [windows])
+  }
 
-  const displayWindows = useMemo(() => {
-    return updateStatus().sort((a, b) => new Date(a.startTime).getTime() - new Date(b.startTime).getTime())
-  }, [updateStatus])
+  const displayWindows = updateStatus().sort((a, b) => new Date(a.startTime).getTime() - new Date(b.startTime).getTime())
 
-  const handleAdd = useCallback(() => {
+  const handleAdd = () => {
     if (!formData.cluster || !formData.startTime || !formData.endTime) return
     if (new Date(formData.endTime) <= new Date(formData.startTime)) {
       setTimeError('End time must be after start time')
@@ -63,33 +86,30 @@ export function MaintenanceWindows() {
     const newWindow: MaintenanceWindow = {
       id: `mw-${Date.now()}`,
       ...formData,
-      status: 'scheduled',
-    }
+      status: 'scheduled' }
     const updated = [...windows, newWindow]
     setWindows(updated)
     saveWindows(updated)
     setShowForm(false)
     setFormData({ cluster: '', description: '', startTime: '', endTime: '', type: 'maintenance' })
-  }, [formData, windows])
+  }
 
-  const handleDelete = useCallback((id: string) => {
+  const handleDelete = (id: string) => {
     const updated = windows.filter(w => w.id !== id)
     setWindows(updated)
     saveWindows(updated)
-  }, [windows])
+  }
 
   const typeColors: Record<string, string> = {
     upgrade: 'bg-blue-500/10 text-blue-400',
     maintenance: 'bg-purple-500/10 text-purple-400',
     patching: 'bg-orange-500/10 text-orange-400',
-    custom: 'bg-cyan-500/10 text-cyan-400',
-  }
+    custom: 'bg-cyan-500/10 text-cyan-400' }
 
   const statusColors: Record<string, string> = {
     scheduled: 'bg-blue-500/10 text-blue-400',
     active: 'bg-green-500/10 text-green-400 animate-pulse',
-    completed: 'bg-muted/50 text-muted-foreground',
-  }
+    completed: 'bg-muted/50 text-muted-foreground' }
 
   return (
     <div className="space-y-2 p-1">
@@ -105,13 +125,26 @@ export function MaintenanceWindows() {
 
       {showForm && (
         <div className="space-y-2 p-2 rounded-lg bg-muted/30 border border-border/50">
-          <input
-            type="text"
-            placeholder="Cluster name"
-            value={formData.cluster}
-            onChange={e => setFormData(f => ({ ...f, cluster: e.target.value }))}
-            className="w-full px-2 py-1 text-xs rounded bg-background border border-border/50 focus:outline-none focus:ring-1 focus:ring-primary"
-          />
+          {clusterNames.length > 0 ? (
+            <select
+              value={formData.cluster}
+              onChange={e => setFormData(f => ({ ...f, cluster: e.target.value }))}
+              className="w-full px-2 py-1 text-xs rounded bg-background border border-border/50 focus:outline-none focus:ring-1 focus:ring-primary"
+            >
+              <option value="">{t('common.selectCluster')}</option>
+              {clusterNames.map(name => (
+                <option key={name} value={name}>{name}</option>
+              ))}
+            </select>
+          ) : (
+            <input
+              type="text"
+              placeholder="Cluster name"
+              value={formData.cluster}
+              onChange={e => setFormData(f => ({ ...f, cluster: e.target.value }))}
+              className="w-full px-2 py-1 text-xs rounded bg-background border border-border/50 focus:outline-none focus:ring-1 focus:ring-primary"
+            />
+          )}
           <input
             type="text"
             placeholder="Description"

@@ -495,6 +495,9 @@ func (b *Bridge) CallDeployTool(ctx context.Context, name string, args map[strin
 
 func (b *Bridge) parseClustersResult(result *CallToolResult) ([]ClusterInfo, error) {
 	if result.IsError {
+		if len(result.Content) == 0 {
+			return nil, fmt.Errorf("tool returned error with empty content")
+		}
 		return nil, fmt.Errorf("tool error: %s", result.Content[0].Text)
 	}
 
@@ -503,7 +506,7 @@ func (b *Bridge) parseClustersResult(result *CallToolResult) ([]ClusterInfo, err
 	for _, content := range result.Content {
 		if content.Type == "text" {
 			if err := json.Unmarshal([]byte(content.Text), &clusters); err != nil {
-				// Try to extract from formatted text
+				slog.Warn("[MCP] failed to parse clusters JSON — returning empty result", "error", err)
 				return b.parseClustersFromText(content.Text), nil
 			}
 		}
@@ -519,6 +522,9 @@ func (b *Bridge) parseClustersFromText(text string) []ClusterInfo {
 
 func (b *Bridge) parseHealthResult(result *CallToolResult) (*ClusterHealth, error) {
 	if result.IsError {
+		if len(result.Content) == 0 {
+			return nil, fmt.Errorf("tool returned error with empty content")
+		}
 		return nil, fmt.Errorf("tool error: %s", result.Content[0].Text)
 	}
 
@@ -526,8 +532,9 @@ func (b *Bridge) parseHealthResult(result *CallToolResult) (*ClusterHealth, erro
 	for _, content := range result.Content {
 		if content.Type == "text" {
 			if err := json.Unmarshal([]byte(content.Text), &health); err != nil {
-				// Parse from text format
-				health.Healthy = true // Default assumption
+				// JSON parse failed — treat as unhealthy rather than false positive
+				health.Healthy = false
+				health.ErrorMessage = fmt.Sprintf("failed to parse health response: %v", err)
 				return &health, nil
 			}
 		}
@@ -537,6 +544,9 @@ func (b *Bridge) parseHealthResult(result *CallToolResult) (*ClusterHealth, erro
 
 func (b *Bridge) parsePodsResult(result *CallToolResult) ([]PodInfo, error) {
 	if result.IsError {
+		if len(result.Content) == 0 {
+			return nil, fmt.Errorf("tool returned error with empty content")
+		}
 		return nil, fmt.Errorf("tool error: %s", result.Content[0].Text)
 	}
 
@@ -544,6 +554,7 @@ func (b *Bridge) parsePodsResult(result *CallToolResult) ([]PodInfo, error) {
 	for _, content := range result.Content {
 		if content.Type == "text" {
 			if err := json.Unmarshal([]byte(content.Text), &pods); err != nil {
+				slog.Warn("[MCP] failed to parse pods JSON — returning empty result", "error", err)
 				return []PodInfo{}, nil
 			}
 		}
@@ -553,6 +564,9 @@ func (b *Bridge) parsePodsResult(result *CallToolResult) ([]PodInfo, error) {
 
 func (b *Bridge) parsePodIssuesResult(result *CallToolResult) ([]PodIssue, error) {
 	if result.IsError {
+		if len(result.Content) == 0 {
+			return nil, fmt.Errorf("tool returned error with empty content")
+		}
 		return nil, fmt.Errorf("tool error: %s", result.Content[0].Text)
 	}
 
@@ -560,6 +574,7 @@ func (b *Bridge) parsePodIssuesResult(result *CallToolResult) ([]PodIssue, error
 	for _, content := range result.Content {
 		if content.Type == "text" {
 			if err := json.Unmarshal([]byte(content.Text), &issues); err != nil {
+				slog.Warn("[MCP] failed to parse pod issues JSON — returning empty result", "error", err)
 				return []PodIssue{}, nil
 			}
 		}
@@ -569,6 +584,9 @@ func (b *Bridge) parsePodIssuesResult(result *CallToolResult) ([]PodIssue, error
 
 func (b *Bridge) parseEventsResult(result *CallToolResult) ([]Event, error) {
 	if result.IsError {
+		if len(result.Content) == 0 {
+			return nil, fmt.Errorf("tool returned error with empty content")
+		}
 		return nil, fmt.Errorf("tool error: %s", result.Content[0].Text)
 	}
 
@@ -576,6 +594,7 @@ func (b *Bridge) parseEventsResult(result *CallToolResult) ([]Event, error) {
 	for _, content := range result.Content {
 		if content.Type == "text" {
 			if err := json.Unmarshal([]byte(content.Text), &events); err != nil {
+				slog.Warn("[MCP] failed to parse events JSON — returning empty result", "error", err)
 				return []Event{}, nil
 			}
 		}

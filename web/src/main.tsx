@@ -1,4 +1,3 @@
-import React from 'react'
 import ReactDOM from 'react-dom/client'
 import { BrowserRouter } from 'react-router-dom'
 import App from './App.tsx'
@@ -96,15 +95,6 @@ document.addEventListener('visibilitychange', () => {
 // Also check on a periodic interval for long-lived tabs
 setInterval(checkForStaleHtml, STALE_CHECK_INTERVAL_MS)
 
-// Suppress recharts dimension warnings (these occur when charts render before container is sized)
-const originalWarn = console.warn
-console.warn = (...args) => {
-  if (typeof args[0] === 'string' && args[0].includes('width') && args[0].includes('height') && args[0].includes('chart should be greater than 0')) {
-    return // Suppress recharts dimension warnings
-  }
-  originalWarn.apply(console, args)
-}
-
 // Enable MSW mock service worker in demo mode (Netlify previews)
 const enableMocking = async () => {
   // Check env var OR detect Netlify domain (more reliable)
@@ -141,11 +131,9 @@ enableMocking()
 
     // ── Render FIRST — don't block on async work ──────────────────────
     ReactDOM.createRoot(document.getElementById('root')!).render(
-      <React.StrictMode>
-        <BrowserRouter>
-          <App />
-        </BrowserRouter>
-      </React.StrictMode>,
+      <BrowserRouter>
+        <App />
+      </BrowserRouter>,
     )
 
     // ── Async setup (runs in background after render) ─────────────────

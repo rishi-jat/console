@@ -1,11 +1,11 @@
-import { useState, useMemo } from 'react'
-import { CheckCircle, AlertTriangle, XCircle, Clock, ChevronRight, Server } from 'lucide-react'
+import { useState } from 'react'
+import { CheckCircle, AlertTriangle, XCircle, Clock, ChevronRight, Server, Package } from 'lucide-react'
 import { useClusters } from '../../hooks/useMCP'
 import { useCachedHelmReleases } from '../../hooks/useCachedData'
 import { useDrillDownActions } from '../../hooks/useDrillDown'
 import { Skeleton } from '../ui/Skeleton'
 import { ClusterBadge } from '../ui/ClusterBadge'
-import { CardSearchInput, CardControlsRow, CardPaginationFooter, CardAIActions } from '../../lib/cards/CardComponents'
+import { CardSearchInput, CardControlsRow, CardPaginationFooter, CardAIActions, CardEmptyState } from '../../lib/cards/CardComponents'
 import { useCardData } from '../../lib/cards/cardHooks'
 import { useCardLoadingState } from './CardDataContext'
 import { useTranslation } from 'react-i18next'
@@ -42,10 +42,7 @@ const SORT_OPTIONS_KEYS: ReadonlyArray<{ value: SortByOption; labelKey: SortTran
 
 export function HelmReleaseStatus({ config }: HelmReleaseStatusProps) {
   const { t } = useTranslation(['cards', 'common'])
-  const SORT_OPTIONS = useMemo(() =>
-    SORT_OPTIONS_KEYS.map(opt => ({ value: opt.value, label: String(t(opt.labelKey)) })),
-    [t]
-  )
+  const SORT_OPTIONS = SORT_OPTIONS_KEYS.map(opt => ({ value: opt.value, label: String(t(opt.labelKey)) }))
   const { isLoading: clustersLoading } = useClusters()
   const { drillToHelm } = useDrillDownActions()
 
@@ -55,26 +52,25 @@ export function HelmReleaseStatus({ config }: HelmReleaseStatusProps) {
   const {
     releases: allHelmReleases,
     isLoading: releasesLoading,
+    isRefreshing,
     isFailed,
     consecutiveFailures,
-    isDemoFallback: isDemoData,
-  } = useCachedHelmReleases()
+    isDemoFallback: isDemoData } = useCachedHelmReleases()
 
   // Report loading state to CardWrapper for skeleton/refresh behavior
   const { showSkeleton, showEmptyState } = useCardLoadingState({
     isLoading: clustersLoading || releasesLoading,
+    isRefreshing,
     hasAnyData: allHelmReleases.length > 0,
     isFailed,
     consecutiveFailures,
-    isDemoData,
-  })
+    isDemoData })
 
   // Transform API data to display format
-  const allReleases = useMemo(() => {
-    return allHelmReleases.map(r => {
+  const allReleases = allHelmReleases.map(r => {
       // Parse chart name and version (e.g., "prometheus-25.8.0" -> chart: "prometheus", version: "25.8.0")
-      const chartParts = r.chart.match(/^(.+)-(\d+\.\d+\.\d+.*)$/)
-      const chartName = chartParts ? chartParts[1] : r.chart
+      const chartParts = (r.chart || '').match(/^(.+)-(\d+\.\d+\.\d+.*)$/)
+      const chartName = chartParts ? chartParts[1] : r.chart || ''
       const chartVersion = chartParts ? chartParts[2] : ''
 
       return {
@@ -83,25 +79,23 @@ export function HelmReleaseStatus({ config }: HelmReleaseStatusProps) {
         chart: chartName,
         version: chartVersion,
         appVersion: r.app_version || '',
-        status: r.status.toLowerCase() as 'deployed' | 'failed' | 'pending' | 'superseded' | 'uninstalling',
+        status: (r.status?.toLowerCase() ?? 'unknown') as 'deployed' | 'failed' | 'pending' | 'superseded' | 'uninstalling',
         updated: r.updated,
-        revision: parseInt(r.revision) || 1,
-        cluster: r.cluster,
-      }
+        revision: parseInt(String(r.revision ?? '1'), 10) || 1,
+        cluster: r.cluster }
     })
-  }, [allHelmReleases])
 
   // Pre-filter by namespace before passing to useCardData
-  const namespacedReleases = useMemo(() => {
+  const namespacedReleases = (() => {
     if (!selectedNamespace) return allReleases
     return allReleases.filter(r => r.namespace === selectedNamespace)
-  }, [allReleases, selectedNamespace])
+  })()
 
   // Get unique namespaces (from full unfiltered set)
-  const namespaces = useMemo(() => {
+  const namespaces = (() => {
     const nsSet = new Set(allReleases.map(r => r.namespace))
     return Array.from(nsSet).sort()
-  }, [allReleases])
+  })()
 
   const statusOrder: Record<string, number> = { failed: 0, pending: 1, uninstalling: 2, superseded: 3, deployed: 4 }
 
@@ -124,23 +118,19 @@ export function HelmReleaseStatus({ config }: HelmReleaseStatusProps) {
       availableClusters,
       showClusterFilter,
       setShowClusterFilter,
-      clusterFilterRef,
-    },
+      clusterFilterRef },
     sorting: {
       sortBy,
       setSortBy,
       sortDirection,
-      setSortDirection,
-    },
+      setSortDirection },
     containerRef,
-    containerStyle,
-  } = useCardData<HelmReleaseDisplay, SortByOption>(namespacedReleases, {
+    containerStyle } = useCardData<HelmReleaseDisplay, SortByOption>(namespacedReleases, {
     filter: {
       searchFields: ['name', 'namespace', 'chart', 'version'] as (keyof HelmReleaseDisplay)[],
       clusterField: 'cluster' as keyof HelmReleaseDisplay,
       statusField: 'status' as keyof HelmReleaseDisplay,
-      storageKey: 'helm-release-status',
-    },
+      storageKey: 'helm-release-status' },
     sort: {
       defaultField: 'status',
       defaultDirection: 'asc',
@@ -148,11 +138,8 @@ export function HelmReleaseStatus({ config }: HelmReleaseStatusProps) {
         status: (a, b) => (statusOrder[a.status] ?? 5) - (statusOrder[b.status] ?? 5),
         name: (a, b) => a.name.localeCompare(b.name),
         chart: (a, b) => a.chart.localeCompare(b.chart),
-        updated: (a, b) => new Date(b.updated).getTime() - new Date(a.updated).getTime(),
-      },
-    },
-    defaultLimit: 5,
-  })
+        updated: (a, b) => new Date(b.updated).getTime() - new Date(a.updated).getTime() } },
+    defaultLimit: 5 })
 
   const getStatusIcon = (status: HelmReleaseDisplay['status']) => {
     switch (status) {
@@ -161,6 +148,21 @@ export function HelmReleaseStatus({ config }: HelmReleaseStatusProps) {
       case 'pending': return Clock
       default: return AlertTriangle
     }
+  }
+
+  /** Static Tailwind class maps — dynamic interpolation like `text-${color}-400`
+   * doesn't work with Tailwind JIT content scanning (#5715). */
+  const STATUS_TEXT_CLASSES: Record<string, string> = {
+    green: 'text-green-400',
+    red: 'text-red-400',
+    blue: 'text-blue-400',
+    orange: 'text-orange-400',
+  }
+  const STATUS_BADGE_CLASSES: Record<string, string> = {
+    green: 'bg-green-500/20 text-green-400',
+    red: 'bg-red-500/20 text-red-400',
+    blue: 'bg-blue-500/20 text-blue-400',
+    orange: 'bg-orange-500/20 text-orange-400',
   }
 
   const getStatusColor = (status: HelmReleaseDisplay['status']) => {
@@ -204,10 +206,11 @@ export function HelmReleaseStatus({ config }: HelmReleaseStatusProps) {
 
   if (showEmptyState) {
     return (
-      <div className="h-full flex flex-col items-center justify-center min-h-card text-muted-foreground">
-        <p className="text-sm">{t('helmReleaseStatus.noReleases')}</p>
-        <p className="text-xs mt-1">{t('helmReleaseStatus.installToTrack')}</p>
-      </div>
+      <CardEmptyState
+        icon={Package}
+        title={t('helmReleaseStatus.noReleases')}
+        message={t('helmReleaseStatus.installToTrack')}
+      />
     )
   }
 
@@ -232,8 +235,7 @@ export function HelmReleaseStatus({ config }: HelmReleaseStatusProps) {
             isOpen: showClusterFilter,
             setIsOpen: setShowClusterFilter,
             containerRef: clusterFilterRef,
-            minClusters: 1,
-          }}
+            minClusters: 1 }}
           cardControls={{
             limit: itemsPerPage,
             onLimitChange: setItemsPerPage,
@@ -241,8 +243,7 @@ export function HelmReleaseStatus({ config }: HelmReleaseStatusProps) {
             sortOptions: SORT_OPTIONS,
             onSortChange: (v) => setSortBy(v as SortByOption),
             sortDirection,
-            onSortDirectionChange: setSortDirection,
-          }}
+            onSortDirectionChange: setSortDirection }}
         />
       </div>
 
@@ -262,8 +263,11 @@ export function HelmReleaseStatus({ config }: HelmReleaseStatusProps) {
       </div>
 
       {availableClusters.length === 0 ? (
-        <div className="flex-1 flex items-center justify-center text-muted-foreground text-sm">
-          {t('helmReleaseStatus.noClusters')}
+        <div className="flex-1 flex flex-col items-center justify-center text-center p-4">
+          <div className="w-10 h-10 rounded-full bg-secondary flex items-center justify-center mb-2">
+            <Server className="w-5 h-5 text-muted-foreground" />
+          </div>
+          <p className="text-sm text-muted-foreground">{t('helmReleaseStatus.noClusters')}</p>
         </div>
       ) : (
         <>
@@ -309,7 +313,7 @@ export function HelmReleaseStatus({ config }: HelmReleaseStatusProps) {
           </div>
 
           {/* Releases list */}
-          <div ref={containerRef} className="flex-1 space-y-2 overflow-y-auto" style={containerStyle}>
+          <div ref={containerRef} className="flex-1 space-y-1.5 overflow-y-auto" style={containerStyle}>
             {releases.map((release, idx) => {
               const StatusIcon = getStatusIcon(release.status)
               const color = getStatusColor(release.status)
@@ -323,14 +327,13 @@ export function HelmReleaseStatus({ config }: HelmReleaseStatusProps) {
                     appVersion: release.appVersion,
                     status: release.status,
                     revision: release.revision,
-                    updated: release.updated,
-                  })}
-                  className={`p-3 rounded-lg ${release.status === 'failed' ? 'bg-red-500/10 border border-red-500/20' : 'bg-secondary/30'} hover:bg-secondary/50 transition-colors cursor-pointer group`}
+                    updated: release.updated })}
+                  className={`p-3 rounded-lg ${release.status === 'failed' ? 'bg-red-500/10 border border-red-500/20' : idx % 2 === 0 ? 'bg-secondary/20' : 'bg-secondary/40'} hover:bg-secondary/50 transition-colors cursor-pointer group`}
                   title={`${release.name} - ${release.chart}@${release.version} (Revision ${release.revision})`}
                 >
                   <div className="flex items-center justify-between mb-1">
                     <div className="flex items-center gap-2">
-                      <span title={`Status: ${release.status}`}><StatusIcon className={`w-4 h-4 text-${color}-400`} /></span>
+                      <span title={`Status: ${release.status}`}><StatusIcon className={`w-4 h-4 ${STATUS_TEXT_CLASSES[color]}`} /></span>
                       <span className="text-sm text-foreground font-medium group-hover:text-purple-400" title={release.name}>{release.name}</span>
                     </div>
                     <div className="flex items-center gap-2">
@@ -340,7 +343,7 @@ export function HelmReleaseStatus({ config }: HelmReleaseStatusProps) {
                           issues={[{ name: `Release ${release.status}`, message: `Helm release ${release.name} (chart: ${release.chart}@${release.version}) is in ${release.status} state` }]}
                         />
                       )}
-                      <span className={`text-xs px-1.5 py-0.5 rounded bg-${color}-500/20 text-${color}-400`} title={`Release status: ${release.status}`}>
+                      <span className={`text-xs px-1.5 py-0.5 rounded ${STATUS_BADGE_CLASSES[color]}`} title={`Release status: ${release.status}`}>
                         {release.status}
                       </span>
                       <ChevronRight className="w-4 h-4 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity" />

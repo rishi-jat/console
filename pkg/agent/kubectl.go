@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -31,7 +32,10 @@ func NewKubectlProxy(kubeconfig string) (*KubectlProxy, error) {
 		kubeconfig = os.Getenv("KUBECONFIG")
 	}
 	if kubeconfig == "" {
-		home, _ := os.UserHomeDir()
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return nil, fmt.Errorf("failed to determine home directory for kubeconfig: %w", err)
+		}
 		kubeconfig = filepath.Join(home, ".kube", "config")
 	}
 
@@ -53,7 +57,10 @@ func (k *KubectlProxy) ListContexts() ([]protocol.ClusterInfo, string) {
 		if cluster != nil {
 			server = cluster.Server
 		}
-		authMethod := detectAuthMethod(k.config.AuthInfos[ctx.AuthInfo])
+		// Guard against nil AuthInfo — the referenced user entry may not exist
+		// in the kubeconfig AuthInfos map. detectAuthMethod handles nil safely.
+		authInfo := k.config.AuthInfos[ctx.AuthInfo]
+		authMethod := detectAuthMethod(authInfo)
 		clusters = append(clusters, protocol.ClusterInfo{
 			Name: name, Context: name, Server: server,
 			User: ctx.AuthInfo, Namespace: ctx.Namespace,
@@ -510,6 +517,15 @@ func (k *KubectlProxy) AddCluster(req AddClusterRequest) error {
 		return fmt.Errorf("contextName, clusterName, serverUrl, and authType are required")
 	}
 
+	// Validate server URL format
+	parsedURL, err := url.Parse(req.ServerURL)
+	if err != nil {
+		return fmt.Errorf("invalid server URL: %w", err)
+	}
+	if parsedURL.Scheme == "" || parsedURL.Host == "" {
+		return fmt.Errorf("server URL must include a scheme and host (e.g. https://api.example.com:6443)")
+	}
+
 	// Validate auth-type-specific fields
 	switch req.AuthType {
 	case "token":
@@ -638,6 +654,10 @@ func (k *KubectlProxy) TestClusterConnection(req TestConnectionRequest) (*TestCo
 			}
 			cfg.TLSClientConfig.KeyData = keyBytes
 		}
+	case "":
+		return nil, fmt.Errorf("authType is required")
+	default:
+		return nil, fmt.Errorf("unsupported authType: %s (must be token or certificate)", req.AuthType)
 	}
 
 	if req.CAData != "" {

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import type { MetricsSnapshot, TrendDirection } from '../types/predictions'
 import { useClusters, usePodIssues, useGPUNodes } from './useMCP'
 import { getPredictionSettings } from './usePredictionSettings'
@@ -107,6 +107,14 @@ export function useMetricsHistory() {
   const { nodes: gpuNodes } = useGPUNodes()
   const lastSnapshotRef = useRef<number>(0)
 
+  // Keep volatile data in refs so the interval effect doesn't reset (#5781)
+  const clustersRef = useRef(clusters)
+  const podIssuesRef = useRef(podIssues)
+  const gpuNodesRef = useRef(gpuNodes)
+  clustersRef.current = clusters
+  podIssuesRef.current = podIssues
+  gpuNodesRef.current = gpuNodes
+
   // Subscribe to shared state updates
   useEffect(() => {
     const handleUpdate = (newSnapshots: MetricsSnapshot[]) => {
@@ -146,7 +154,8 @@ export function useMetricsHistory() {
     }
   }, [])
 
-  // Auto-capture snapshots at configured interval
+  // Auto-capture snapshots at configured interval.
+  // Reads volatile data from refs so the interval stays stable across MCP polls (#5781).
   useEffect(() => {
     const settings = getPredictionSettings()
     const interval = settings.interval * 60 * 1000 // Convert minutes to ms
@@ -158,54 +167,58 @@ export function useMetricsHistory() {
         return
       }
 
+      const currentClusters = clustersRef.current
+      const currentPodIssues = podIssuesRef.current
+      const currentGpuNodes = gpuNodesRef.current
+
       // Skip if no data available
-      if (clusters.length === 0) {
+      if (currentClusters.length === 0) {
         return
       }
 
       const snapshot: MetricsSnapshot = {
         timestamp: new Date().toISOString(),
-        clusters: clusters.map(c => ({
+        clusters: currentClusters.map(c => ({
           name: c.name,
           cpuPercent: c.cpuCores && c.cpuUsageCores ? (c.cpuUsageCores / c.cpuCores) * 100 : 0,
           memoryPercent: c.memoryGB && c.memoryUsageGB ? (c.memoryUsageGB / c.memoryGB) * 100 : 0,
           nodeCount: c.nodeCount || 0,
           healthyNodes: c.healthy ? (c.nodeCount || 0) : 0, // Use healthy status as proxy
         })),
-        podIssues: (podIssues || []).map(p => ({
+        podIssues: (currentPodIssues || []).map(p => ({
           name: p.name,
           cluster: p.cluster || '',
           restarts: p.restarts || 0,
-          status: p.status || '',
-        })),
-        gpuNodes: (gpuNodes || []).map(g => ({
+          status: p.status || '' })),
+        gpuNodes: (currentGpuNodes || []).map(g => ({
           name: g.name,
           cluster: g.cluster,
           gpuType: g.gpuType || '',
           gpuAllocated: g.gpuAllocated,
-          gpuTotal: g.gpuCount,
-        })),
-      }
+          gpuTotal: g.gpuCount })) }
 
       addSnapshot(snapshot)
       lastSnapshotRef.current = now
     }
 
-    // Capture initial snapshot if data available
-    if (clusters.length > 0 && lastSnapshotRef.current === 0) {
-      captureSnapshot()
-    }
+    // Capture initial snapshot after a short delay to allow data to load
+    const initialTimeout = setTimeout(() => {
+      if (clustersRef.current.length > 0 && lastSnapshotRef.current === 0) {
+        captureSnapshot()
+      }
+    }, 5000)
 
-    // Set up interval
+    // Set up stable interval — reads latest data from refs each tick
     const intervalId = setInterval(captureSnapshot, interval)
 
     return () => {
+      clearTimeout(initialTimeout)
       clearInterval(intervalId)
     }
-  }, [clusters, podIssues, gpuNodes])
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Manually trigger a snapshot
-  const captureNow = useCallback(() => {
+  const captureNow = () => {
     if (clusters.length === 0) return
 
     const snapshot: MetricsSnapshot = {
@@ -215,36 +228,32 @@ export function useMetricsHistory() {
         cpuPercent: c.cpuCores && c.cpuUsageCores ? (c.cpuUsageCores / c.cpuCores) * 100 : 0,
         memoryPercent: c.memoryGB && c.memoryUsageGB ? (c.memoryUsageGB / c.memoryGB) * 100 : 0,
         nodeCount: c.nodeCount || 0,
-        healthyNodes: c.healthy ? (c.nodeCount || 0) : 0,
-      })),
+        healthyNodes: c.healthy ? (c.nodeCount || 0) : 0 })),
       podIssues: podIssues.map(p => ({
         name: p.name,
         cluster: p.cluster || '',
         restarts: p.restarts || 0,
-        status: p.status || '',
-      })),
+        status: p.status || '' })),
       gpuNodes: (gpuNodes || []).map(g => ({
         name: g.name,
         cluster: g.cluster,
         gpuType: g.gpuType || '',
         gpuAllocated: g.gpuAllocated,
-        gpuTotal: g.gpuCount,
-      })),
-    }
+        gpuTotal: g.gpuCount })) }
 
     addSnapshot(snapshot)
     lastSnapshotRef.current = Date.now()
-  }, [clusters, podIssues, gpuNodes])
+  }
 
   // Clear history
-  const clearHistory = useCallback(() => {
+  const clearHistory = () => {
     snapshots = []
     notifySubscribers()
     persistSnapshots()
-  }, [])
+  }
 
   // Get trend for a specific cluster metric
-  const getClusterTrend = useCallback((
+  const getClusterTrend = (
     clusterName: string,
     metric: 'cpuPercent' | 'memoryPercent'
   ): TrendDirection => {
@@ -271,10 +280,10 @@ export function useMetricsHistory() {
     if (diff > threshold) return 'worsening'
     if (diff < -threshold) return 'improving'
     return 'stable'
-  }, [history])
+  }
 
   // Get trend for pod restarts
-  const getPodRestartTrend = useCallback((
+  const getPodRestartTrend = (
     podName: string,
     cluster: string
   ): TrendDirection => {
@@ -293,7 +302,7 @@ export function useMetricsHistory() {
     if (last > first + 1) return 'worsening'
     if (last < first) return 'improving'
     return 'stable'
-  }, [history])
+  }
 
   return {
     history,
@@ -301,8 +310,7 @@ export function useMetricsHistory() {
     clearHistory,
     getClusterTrend,
     getPodRestartTrend,
-    snapshotCount: history.length,
-  }
+    snapshotCount: history.length }
 }
 
 /**

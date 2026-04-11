@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect } from 'react'
 import { AlertCircle } from 'lucide-react'
 import { useAlerts, useAlertRules } from '../../hooks/useAlerts'
 import { useClusters } from '../../hooks/useMCP'
@@ -7,6 +7,7 @@ import { useUniversalStats, createMergedStatValueGetter } from '../../hooks/useU
 import { StatBlockValue } from '../ui/StatsOverview'
 import { DashboardPage } from '../../lib/dashboards/DashboardPage'
 import { getDefaultCards } from '../../config/dashboards'
+import { RotatingTip } from '../ui/RotatingTip'
 import { useTranslation } from 'react-i18next'
 
 const ALERTS_STORAGE_KEY = 'kubestellar-alerts-dashboard-cards'
@@ -19,7 +20,7 @@ export function Alerts() {
   const { stats, evaluateConditions } = useAlerts()
   const { rules } = useAlertRules()
   const { isRefreshing: dataRefreshing, refetch, error } = useClusters()
-  const { drillToAlert } = useDrillDownActions()
+  const { drillToAllAlerts } = useDrillDownActions()
   const { getStatValue: getUniversalStatValue } = useUniversalStats()
 
   // Local state for last updated time
@@ -30,22 +31,28 @@ export function Alerts() {
     setLastUpdated(new Date())
   }, [])
 
-  const handleRefresh = useCallback(() => {
+  const handleRefresh = () => {
     refetch()
     evaluateConditions()
     setLastUpdated(new Date())
-  }, [refetch, evaluateConditions])
+  }
 
   const enabledRulesCount = rules.filter(r => r.enabled).length
 
   // Stats value getter
-  const getDashboardStatValue = useCallback((blockId: string): StatBlockValue => {
+  const getDashboardStatValue = (blockId: string): StatBlockValue => {
     const disabledRulesCount = rules.filter(r => !r.enabled).length
+    // The stat blocks below represent *counts* of alerts, so they should
+    // open the multi-alert list drill-down (`all-alerts`) rather than the
+    // single-alert detail view. The single-alert view (#6116) was rendering
+    // an empty modal because it expected alert-specific fields that don't
+    // exist on an aggregate. Using drillToAllAlerts with a status filter
+    // shows a proper filtered list.
     const drillToFiringAlert = () => {
-      drillToAlert('all', undefined, 'Active Alerts', { status: 'firing', count: stats.firing })
+      drillToAllAlerts('firing', { count: stats.firing })
     }
     const drillToResolvedAlert = () => {
-      drillToAlert('all', undefined, 'Resolved Alerts', { status: 'resolved', count: stats.resolved })
+      drillToAllAlerts('resolved', { count: stats.resolved })
     }
 
     switch (blockId) {
@@ -62,18 +69,16 @@ export function Alerts() {
       default:
         return { value: 0 }
     }
-  }, [stats, enabledRulesCount, rules, drillToAlert])
+  }
 
-  const getStatValue = useCallback(
-    (blockId: string) => createMergedStatValueGetter(getDashboardStatValue, getUniversalStatValue)(blockId),
-    [getDashboardStatValue, getUniversalStatValue]
-  )
+  const getStatValue = (blockId: string) => createMergedStatValueGetter(getDashboardStatValue, getUniversalStatValue)(blockId)
 
   return (
     <DashboardPage
       title={t('alerts.title')}
       subtitle={t('alerts.subtitle')}
       icon="Bell"
+      rightExtra={<RotatingTip page="alerts" />}
       storageKey={ALERTS_STORAGE_KEY}
       defaultCards={DEFAULT_ALERT_CARDS}
       statsType="alerts"
@@ -85,8 +90,7 @@ export function Alerts() {
       hasData={stats.firing > 0 || enabledRulesCount > 0}
       emptyState={{
         title: t('alerts.dashboardTitle'),
-        description: 'Add cards to monitor alerts, rules, and issues across your clusters.',
-      }}
+        description: 'Add cards to monitor alerts, rules, and issues across your clusters.' }}
     >
       {/* Error Display */}
       {error && (

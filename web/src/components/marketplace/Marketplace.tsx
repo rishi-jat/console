@@ -1,4 +1,4 @@
-import { useState, useRef, useMemo } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useNavigate } from 'react-router-dom'
@@ -6,12 +6,12 @@ import {
   Store, Search, Download, Tag, RefreshCw, Loader2, AlertCircle, Package,
   Check, Trash2, LayoutGrid, Puzzle, Palette, ExternalLink, Heart,
   HandHelping, ChevronDown, ChevronUp, Star, GraduationCap, Sparkles,
-  List, Grid3X3, SortAsc, SortDesc, Coins,
-} from 'lucide-react'
+  List, Grid3X3, SortAsc, SortDesc, Coins } from 'lucide-react'
 import { useMarketplace, useAuthorProfile, MarketplaceItem, MarketplaceItemType, CNCFStats } from '../../hooks/useMarketplace'
 import { useSidebarConfig } from '../../hooks/useSidebarConfig'
 import { useToast } from '../ui/Toast'
 import { DashboardHeader } from '../shared/DashboardHeader'
+import { RotatingTip } from '../ui/RotatingTip'
 import { MarketplaceThumbnail } from './MarketplaceThumbnail'
 import { NAV_AFTER_ANIMATION_MS } from '../../lib/constants/network'
 import { suggestIconSync } from '../../lib/iconSuggester'
@@ -29,25 +29,35 @@ const BANNER_COLLAPSED_KEY = 'kc-cncf-banner-collapsed'
 const TYPE_LABELS: Record<MarketplaceItemType, { label: string; icon: typeof LayoutGrid }> = {
   dashboard: { label: 'Dashboards', icon: LayoutGrid },
   'card-preset': { label: 'Card Presets', icon: Puzzle },
-  theme: { label: 'Themes', icon: Palette },
-}
+  theme: { label: 'Themes', icon: Palette } }
 
 const DIFFICULTY_CONFIG = {
   beginner: { label: 'Beginner', color: 'text-green-400 bg-green-950', stars: 1 },
   intermediate: { label: 'Intermediate', color: 'text-yellow-400 bg-yellow-950', stars: 2 },
-  advanced: { label: 'Advanced', color: 'text-red-400 bg-red-950', stars: 3 },
-} as const
+  advanced: { label: 'Advanced', color: 'text-red-400 bg-red-950', stars: 3 } } as const
 
 const MATURITY_CONFIG = {
   graduated: { label: 'Graduated', color: 'text-green-400 bg-green-950 border-green-800' },
-  incubating: { label: 'Incubating', color: 'text-blue-400 bg-blue-950 border-blue-800' },
-} as const
+  incubating: { label: 'Incubating', color: 'text-blue-400 bg-blue-950 border-blue-800' } } as const
 
 // --- CNCF Progress Banner ---
 function CNCFProgressBanner({ stats }: { stats: CNCFStats }) {
   const [collapsed, setCollapsed] = useState(() => {
     try { return localStorage.getItem(BANNER_COLLAPSED_KEY) === 'true' } catch { return false }
   })
+
+  // Sync banner collapsed state across tabs (fix #6006).
+  // The `storage` event only fires in OTHER tabs when localStorage changes,
+  // so toggling in tab A will update tab B automatically.
+  useEffect(() => {
+    const handleStorage = (e: StorageEvent) => {
+      if (e.key !== BANNER_COLLAPSED_KEY) return
+      // If the key was removed, e.newValue is null — default to not collapsed.
+      setCollapsed(e.newValue === 'true')
+    }
+    window.addEventListener('storage', handleStorage)
+    return () => window.removeEventListener('storage', handleStorage)
+  }, [])
 
   const toggleCollapse = () => {
     const next = !collapsed
@@ -342,13 +352,25 @@ function AuthorBadge({ author, github, compact }: { author: string; github?: str
     setHovered(true)
   }
 
+  // Dismiss tooltip on scroll (fix #6007).
+  // The tooltip captures its position once on mouse enter and does not
+  // track the trigger on scroll, so it detaches visually. Dismissing on
+  // scroll matches user expectation (the cursor has left the trigger anyway).
+  // Capture phase is used to catch scrolls in any nested container.
+  useEffect(() => {
+    if (!hovered) return
+    const dismiss = () => setHovered(false)
+    window.addEventListener('scroll', dismiss, true)
+    return () => window.removeEventListener('scroll', dismiss, true)
+  }, [hovered])
+
   if (!github) {
     return <span>{author}</span>
   }
 
   const link = (
     <a
-      ref={triggerRef as React.RefObject<HTMLAnchorElement>}
+      ref={triggerRef as React.RefObject<HTMLAnchorElement | null>}
       href={`https://github.com/${github}`}
       target="_blank"
       rel="noopener noreferrer"
@@ -374,7 +396,7 @@ function AuthorBadge({ author, github, compact }: { author: string; github?: str
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: 5 }}
               transition={{ duration: 0.15 }}
-              className="fixed z-[9999] pointer-events-none"
+              className="fixed z-dropdown pointer-events-none"
               style={{ left: pos.x, top: pos.y, transform: 'translate(-50%, -100%)' }}
             >
               <div className="px-4 py-3 bg-background border border-border rounded-lg shadow-xl backdrop-blur-sm min-w-[200px]">
@@ -560,8 +582,7 @@ export function Marketplace() {
     installItem,
     removeItem,
     isInstalled,
-    refresh,
-  } = useMarketplace()
+    refresh } = useMarketplace()
   const { config: sidebarConfig, addItem, removeItem: removeSidebarItem } = useSidebarConfig()
   const { showToast } = useToast()
 
@@ -588,7 +609,7 @@ export function Marketplace() {
   }
 
   // Sort items
-  const sortedItems = useMemo(() => {
+  const sortedItems = (() => {
     const sorted = [...items].sort((a, b) => {
       let cmp = 0
       switch (sortField) {
@@ -604,10 +625,10 @@ export function Marketplace() {
       return sortOrder === 'asc' ? cmp : -cmp
     })
     return sorted
-  }, [items, sortField, sortOrder])
+  })()
 
   // Group items by CNCF category when help-wanted is active
-  const groupedItems = useMemo(() => {
+  const groupedItems = (() => {
     if (!showHelpWanted) return null
     const groups: Record<string, MarketplaceItem[]> = {}
     for (const item of sortedItems) {
@@ -616,7 +637,7 @@ export function Marketplace() {
       groups[cat].push(item)
     }
     return Object.entries(groups).sort(([a], [b]) => a.localeCompare(b))
-  }, [sortedItems, showHelpWanted])
+  })()
 
   const handleInstall = async (item: MarketplaceItem) => {
     try {
@@ -643,8 +664,7 @@ export function Marketplace() {
             icon: suggestIconSync(item.name),
             href,
             type: 'link',
-            description: item.description,
-          }, 'primary')
+            description: item.description }, 'primary')
         }
         showToast(`Installed "${item.name}" — redirecting to dashboard...`, 'success')
         setTimeout(() => navigate(href), NAV_AFTER_ANIMATION_MS)
@@ -680,6 +700,7 @@ export function Marketplace() {
         icon={<Store className="w-5 h-5" />}
         isFetching={isLoading}
         onRefresh={refresh}
+        rightExtra={<RotatingTip page="marketplace" />}
       />
 
       {/* CNCF Progress Banner */}

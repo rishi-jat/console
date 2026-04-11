@@ -5,7 +5,7 @@
  * populates the right panel with details. Overlays toggle resource views.
  */
 
-import { useId, useMemo, useState, useCallback, useEffect, useRef, type MouseEvent as ReactMouseEvent } from 'react'
+import { useId, useMemo, useState, useEffect, useRef, type MouseEvent as ReactMouseEvent } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   Zap,
@@ -23,8 +23,7 @@ import {
   Play,
   Download,
   Tags,
-  Loader2,
-} from 'lucide-react'
+  Loader2 } from 'lucide-react'
 import { cn } from '../../lib/cn'
 
 import { BlueprintDefs } from './svg/BlueprintDefs'
@@ -40,8 +39,7 @@ import type {
   BlueprintLayout,
   LayoutRect,
   ProjectPosition,
-  DependencyEdge,
-} from './types'
+  DependencyEdge } from './types'
 import { useClusters } from '../../hooks/mcp/clusters'
 import { detectCloudProvider } from '../ui/CloudProviderIcon'
 import { fetchMissionContent } from '../missions/browser/missionCache'
@@ -123,8 +121,7 @@ function computeLayout(state: MissionControlState): BlueprintLayout {
       x: PADDING + col * (cellW + 12),
       y: PADDING + row * (cellH + 12),
       width: cellW,
-      height: cellH,
-    }
+      height: cellH }
     clusterRects.set(name, rect)
 
     const projects = clusterProjects.get(name) ?? []
@@ -146,8 +143,7 @@ function computeLayout(state: MissionControlState): BlueprintLayout {
         projectName: pName,
         cx: rect.x + innerPadX + projSpaceX * (pCol + 0.5),
         cy: rect.y + innerPadTop + projSpaceY * (pRow + 0.5),
-        clusterName: name,
-      })
+        clusterName: name })
     })
   })
 
@@ -177,8 +173,7 @@ function computeLayout(state: MissionControlState): BlueprintLayout {
     keycloak: { 'open-policy-agent': 'auth policy', 'cert-manager': 'HTTPS certs' },
     metallb: { contour: 'ingress LB' },
     'external-secrets': { 'external-secrets-operator': 'operator' },
-    crossplane: { helm: 'provider-helm' },
-  }
+    crossplane: { helm: 'provider-helm' } }
 
   // Reverse lookup: projectName → positions (supports multi-cluster)
   const projectPosByName = new Map<string, ProjectPosition[]>()
@@ -188,18 +183,29 @@ function computeLayout(state: MissionControlState): BlueprintLayout {
     projectPosByName.set(pos.projectName, list)
   }
 
-  // Find best position pair for two projects (prefer same-cluster)
-  // Find all same-cluster pairs for two projects, plus one cross-cluster fallback
+  // Find all position pairs for two projects — both intra-cluster (same cluster)
+  // and cross-cluster (different clusters) so edges are visible across the fleet
   function findEdgePairs(a: string, b: string): { from: ProjectPosition; to: ProjectPosition; cross: boolean }[] {
     const posA = projectPosByName.get(a)
     const posB = projectPosByName.get(b)
     if (!posA?.length || !posB?.length) return []
     const pairs: { from: ProjectPosition; to: ProjectPosition; cross: boolean }[] = []
+    // Intra-cluster pairs (same cluster)
     for (const fa of posA) {
       for (const fb of posB) {
         if (fa.clusterName === fb.clusterName) pairs.push({ from: fa, to: fb, cross: false })
       }
     }
+    // Cross-cluster pairs — for each instance of project A that has no intra-cluster
+    // partner, connect to the nearest instance of project B on another cluster
+    for (const fa of posA) {
+      const hasIntraCluster = pairs.some(p => !p.cross && p.from.clusterName === fa.clusterName)
+      if (!hasIntraCluster) {
+        const crossTarget = posB.find(fb => fb.clusterName !== fa.clusterName)
+        if (crossTarget) pairs.push({ from: fa, to: crossTarget, cross: true })
+      }
+    }
+    // If no pairs at all, fall back to one cross-cluster edge
     if (pairs.length === 0) pairs.push({ from: posA[0], to: posB[0], cross: true })
     return pairs
   }
@@ -222,8 +228,7 @@ function computeLayout(state: MissionControlState): BlueprintLayout {
             crossCluster: pair.cross,
             label,
             fromPos: pair.from,
-            toPos: pair.to,
-          })
+            toPos: pair.to })
         }
       }
     }
@@ -246,8 +251,7 @@ function computeLayout(state: MissionControlState): BlueprintLayout {
             crossCluster: pair.cross,
             label,
             fromPos: pair.from,
-            toPos: pair.to,
-          })
+            toPos: pair.to })
         }
       }
     }
@@ -257,8 +261,7 @@ function computeLayout(state: MissionControlState): BlueprintLayout {
     clusterRects,
     projectPositions,
     dependencyEdges,
-    viewBox: { width: VB_W, height: VB_H },
-  }
+    viewBox: { width: VB_W, height: VB_H } }
 }
 
 // ---------------------------------------------------------------------------
@@ -374,24 +377,37 @@ function exportFullReport(
   const html = `<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>Flight Plan: ${state.title || 'Mission Control'}</title>
 <style>
-  body { font-family: system-ui, -apple-system, sans-serif; max-width: 900px; margin: 0 auto; padding: 32px; color: #1e293b; line-height: 1.5; }
-  h1 { font-size: 24px; border-bottom: 2px solid #6366f1; padding-bottom: 8px; }
-  h2 { font-size: 18px; margin-top: 28px; color: #4338ca; }
-  h3 { font-size: 14px; margin-top: 20px; color: #64748b; text-transform: uppercase; letter-spacing: 0.05em; }
-  table { width: 100%; border-collapse: collapse; margin: 8px 0 16px; font-size: 13px; }
-  th, td { border: 1px solid #e2e8f0; padding: 8px 12px; text-align: left; }
+  /* Spacing tokens — 4px grid for consistency */
+  :root {
+    --space-xs: 2px;   /* extra-small: badge margin, tiny padding */
+    --space-sm: 4px;   /* small: inline code padding, gap */
+    --space-md: 8px;   /* medium: cell padding, heading bottom, table margin */
+    --space-lg: 12px;  /* large: description padding, meta padding */
+    --space-xl: 16px;  /* extra-large: section margin, body print padding */
+    --space-2xl: 20px; /* 2x-large: h3 top margin */
+    --space-3xl: 28px; /* 3x-large: h2 top margin */
+    --space-4xl: 32px; /* 4x-large: body padding, footer top margin */
+    --radius-sm: 4px;  /* border-radius for badges and code */
+    --radius-md: 8px;  /* border-radius for containers */
+  }
+  body { font-family: system-ui, -apple-system, sans-serif; max-width: 900px; margin: 0 auto; padding: var(--space-4xl); color: #1e293b; line-height: 1.5; }
+  h1 { font-size: 24px; border-bottom: 2px solid #6366f1; padding-bottom: var(--space-md); }
+  h2 { font-size: 18px; margin-top: var(--space-3xl); color: #4338ca; }
+  h3 { font-size: 14px; margin-top: var(--space-2xl); color: #64748b; text-transform: uppercase; letter-spacing: 0.05em; }
+  table { width: 100%; border-collapse: collapse; margin: var(--space-md) 0 var(--space-xl); font-size: 13px; }
+  th, td { border: 1px solid #e2e8f0; padding: var(--space-md) var(--space-lg); text-align: left; }
   th { background: #f1f5f9; font-weight: 600; font-size: 11px; text-transform: uppercase; }
-  .installed { display: inline-block; background: #d1fae5; color: #065f46; padding: 2px 8px; border-radius: 4px; font-size: 11px; margin: 2px; }
-  .deploy { display: inline-block; background: #fef3c7; color: #92400e; padding: 2px 8px; border-radius: 4px; font-size: 11px; margin: 2px; }
-  .protected { display: inline-block; background: #d1fae5; color: #065f46; padding: 2px 8px; border-radius: 4px; font-size: 11px; margin: 2px; }
-  .remove { display: inline-block; background: #fef3c7; color: #92400e; padding: 2px 8px; border-radius: 4px; font-size: 11px; margin: 2px; }
-  code { background: #f1f5f9; padding: 4px 8px; border-radius: 4px; font-size: 12px; }
+  .installed { display: inline-block; background: #d1fae5; color: #065f46; padding: var(--space-xs) var(--space-md); border-radius: var(--radius-sm); font-size: 11px; margin: var(--space-xs); }
+  .deploy { display: inline-block; background: #fef3c7; color: #92400e; padding: var(--space-xs) var(--space-md); border-radius: var(--radius-sm); font-size: 11px; margin: var(--space-xs); }
+  .protected { display: inline-block; background: #d1fae5; color: #065f46; padding: var(--space-xs) var(--space-md); border-radius: var(--radius-sm); font-size: 11px; margin: var(--space-xs); }
+  .remove { display: inline-block; background: #fef3c7; color: #92400e; padding: var(--space-xs) var(--space-md); border-radius: var(--radius-sm); font-size: 11px; margin: var(--space-xs); }
+  code { background: #f1f5f9; padding: var(--space-sm) var(--space-md); border-radius: var(--radius-sm); font-size: 12px; }
   .meta { color: #64748b; font-size: 13px; }
-  .svg-container { margin: 16px 0; border: 1px solid #e2e8f0; border-radius: 8px; overflow: hidden; }
+  .svg-container { margin: var(--space-xl) 0; border: 1px solid #e2e8f0; border-radius: var(--radius-md); overflow: hidden; }
   .svg-container svg { width: 100%; height: auto; }
   .section { page-break-inside: avoid; }
-  .description { background: #f8fafc; border-left: 4px solid #6366f1; padding: 12px 16px; margin: 12px 0; font-size: 13px; }
-  @media print { body { padding: 16px; } .no-print { display: none; } }
+  .description { background: #f8fafc; border-left: var(--space-sm) solid #6366f1; padding: var(--space-lg) var(--space-xl); margin: var(--space-lg) 0; font-size: 13px; }
+  @media print { body { padding: var(--space-xl); } .no-print { display: none; } }
 </style></head><body>
 
 <h1>Flight Plan: ${state.title || 'Untitled Mission'}</h1>
@@ -456,7 +472,7 @@ ${toRemove.length > 0 ? `
 ` : '<p>All projects are already installed — nothing to roll back.</p>'}
 </div>
 
-<p class="meta" style="margin-top:32px; border-top:1px solid #e2e8f0; padding-top:12px;">
+<p class="meta" style="margin-top:var(--space-4xl); border-top:1px solid #e2e8f0; padding-top:var(--space-lg);">
   KubeStellar Console · Mission Control Report · Use browser Print (Cmd+P / Ctrl+P) to save as PDF
 </p>
 
@@ -478,15 +494,13 @@ const STATUS_COLORS: Record<string, string> = {
   pending: 'text-slate-400',
   running: 'text-amber-400',
   completed: 'text-green-400',
-  failed: 'text-red-400',
-}
+  failed: 'text-red-400' }
 
 const STATUS_LABELS: Record<string, string> = {
   pending: 'READY TO DEPLOY',
   running: 'DEPLOYING',
   completed: 'INSTALLED',
-  failed: 'FAILED',
-}
+  failed: 'FAILED' }
 
 // ---------------------------------------------------------------------------
 // Component
@@ -497,8 +511,7 @@ export function FlightPlanBlueprint({
   onOverlayChange,
   onDeployModeChange,
   onMoveProject,
-  installedProjects = new Set(),
-}: FlightPlanBlueprintProps) {
+  installedProjects = new Set() }: FlightPlanBlueprintProps) {
   const svgId = useId().replace(/:/g, '')
   const { clusters } = useClusters()
 
@@ -536,7 +549,7 @@ export function FlightPlanBlueprint({
     return { ...state, assignments }
   }, [state, clusters])
 
-  const layout = useMemo(() => computeLayout(healthyState), [healthyState])
+  const layout = computeLayout(healthyState)
   const [infoPanel, setInfoPanel] = useState<InfoPanelData | null>(null)
   const [stickyPanel, setStickyPanel] = useState<InfoPanelData | null>(
     () => ({ kind: 'deployMode' as const, mode: state.deployMode, phases: state.phases })
@@ -652,7 +665,7 @@ export function FlightPlanBlueprint({
   const isPanningRef = useRef(false)
   const panStartRef = useRef({ x: 0, y: 0, scrollLeft: 0, scrollTop: 0 })
 
-  const handlePanStart = useCallback((e: ReactMouseEvent) => {
+  const handlePanStart = (e: ReactMouseEvent) => {
     if (zoom <= 1) return
     const container = svgContainerRef.current
     if (!container) return
@@ -661,11 +674,10 @@ export function FlightPlanBlueprint({
       x: e.clientX,
       y: e.clientY,
       scrollLeft: container.scrollLeft,
-      scrollTop: container.scrollTop,
-    }
+      scrollTop: container.scrollTop }
     document.body.style.cursor = 'grabbing'
     document.body.style.userSelect = 'none'
-  }, [zoom])
+  }
 
   useEffect(() => {
     const handlePanMove = (e: MouseEvent) => {
@@ -695,14 +707,14 @@ export function FlightPlanBlueprint({
   const startXRef = useRef(0)
   const startWidthRef = useRef(INFO_PANEL_DEFAULT)
 
-  const handleResizeStart = useCallback((e: ReactMouseEvent) => {
+  const handleResizeStart = (e: ReactMouseEvent) => {
     e.preventDefault()
     isResizingRef.current = true
     startXRef.current = e.clientX
     startWidthRef.current = infoPanelWidth
     document.body.style.cursor = 'col-resize'
     document.body.style.userSelect = 'none'
-  }, [infoPanelWidth])
+  }
 
   useEffect(() => {
     const handleMouseMove = (e: globalThis.MouseEvent) => {
@@ -731,11 +743,9 @@ export function FlightPlanBlueprint({
     }
   }, [])
 
-  const projectMap = useMemo(() => {
-    return new Map(state.projects.map((p) => [p.name, p]))
-  }, [state.projects])
+  const projectMap = new Map(state.projects.map((p) => [p.name, p]))
 
-  const handleProjectHover = useCallback((info: ProjectHoverInfo | null) => {
+  const handleProjectHover = (info: ProjectHoverInfo | null) => {
     if (info) {
       const data: InfoPanelData = { kind: 'project', info }
       setInfoPanel(data)
@@ -743,9 +753,9 @@ export function FlightPlanBlueprint({
     } else {
       setInfoPanel(null)
     }
-  }, [])
+  }
 
-  const handleClusterHover = useCallback((info: ClusterHoverInfo | null) => {
+  const handleClusterHover = (info: ClusterHoverInfo | null) => {
     if (dragProject) return
     if (info) {
       const data: InfoPanelData = { kind: 'cluster', info }
@@ -754,10 +764,10 @@ export function FlightPlanBlueprint({
     } else {
       setInfoPanel(null)
     }
-  }, [dragProject])
+  }
 
   /** Open mission preview modal for a project (fetches from KB) */
-  const handleShowMissionPreview = useCallback((proj: PayloadProject) => {
+  const handleShowMissionPreview = (proj: PayloadProject) => {
     const kbPath = resolveKbPath(proj)
     const baseMission: MissionExport = {
       version: 'kc-mission-v1',
@@ -766,8 +776,7 @@ export function FlightPlanBlueprint({
       type: 'deploy',
       tags: [proj.category],
       steps: [],
-      metadata: { source: kbPath ?? 'mission-control' },
-    }
+      metadata: { source: kbPath ?? 'mission-control' } }
     if (!kbPath) {
       setPreviewMission(baseMission)
       return
@@ -777,7 +786,7 @@ export function FlightPlanBlueprint({
       .then(({ mission: m }) => setPreviewMission(m))
       .catch(() => setPreviewMission(baseMission))
       .finally(() => setPreviewLoading(false))
-  }, [])
+  }
 
   // The visible panel: active hover wins, otherwise fall back to sticky (last hovered)
   const visiblePanel = infoPanel ?? stickyPanel
@@ -1207,7 +1216,7 @@ export function FlightPlanBlueprint({
       {/* Mission preview modal */}
       {(previewMission || previewLoading) && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
+          className="fixed inset-0 z-modal flex items-center justify-center bg-black/60 backdrop-blur-sm"
           onClick={(e) => { if (e.target === e.currentTarget) { setPreviewMission(null); setPreviewRaw(false) } }}
           onKeyDownCapture={(e) => {
             if (e.key === 'Escape') {
@@ -1288,8 +1297,7 @@ function ProjectInfoPanel({ info, edges }: { info: ProjectHoverInfo; edges?: Dep
         type: 'custom',
         tags: [],
         steps: [],
-        metadata: { source: candidates[idx] },
-      }
+        metadata: { source: candidates[idx] } }
       fetchMissionContent(indexMission)
         .then(({ mission: m }) => {
           if (m.steps && m.steps.length > 0) { setMission(m); setLoadingSteps(false) }
@@ -1501,27 +1509,21 @@ const DEPENDENCY_NOTES: Record<string, Record<string, string>> = {
   'cert-manager': {
     istio: 'cert-manager provides TLS certificates that Istio uses for mTLS between services',
     'external-secrets': 'cert-manager can issue certs stored/synced via External Secrets Operator',
-    keycloak: 'cert-manager provides TLS certificates for Keycloak HTTPS endpoints',
-  },
+    keycloak: 'cert-manager provides TLS certificates for Keycloak HTTPS endpoints' },
   helm: {
-    '*': 'Helm must be available on the cluster before any Helm-based installations',
-  },
+    '*': 'Helm must be available on the cluster before any Helm-based installations' },
   prometheus: {
     falco: 'Falco exports metrics to Prometheus for runtime security alerting',
     cilium: 'Cilium Hubble metrics are scraped by Prometheus for network observability',
     'trivy-operator': 'Trivy vulnerability scan results are exported as Prometheus metrics',
     kyverno: 'Kyverno policy violation metrics feed into Prometheus dashboards',
-    keycloak: 'Keycloak exposes JMX/metrics endpoints for Prometheus scraping',
-  },
+    keycloak: 'Keycloak exposes JMX/metrics endpoints for Prometheus scraping' },
   falco: {
     kyverno: 'Falco detects runtime threats; Kyverno enforces admission policies — complementary defense layers',
-    'open-policy-agent': 'Falco handles runtime detection while OPA handles admission-time policy enforcement',
-  },
+    'open-policy-agent': 'Falco handles runtime detection while OPA handles admission-time policy enforcement' },
   cilium: {
     'open-policy-agent': 'Cilium network policies can complement OPA admission policies for defense in depth',
-    kyverno: 'Cilium handles L3/L4/L7 network policy; Kyverno handles Kubernetes admission policy',
-  },
-}
+    kyverno: 'Cilium handles L3/L4/L7 network policy; Kyverno handles Kubernetes admission policy' } }
 
 function getDependencyNotes(projects: PayloadProject[]): string[] {
   const notes: string[] = []
@@ -1609,9 +1611,9 @@ function DeployModeInfoPanel({ mode, phases, projects, onShowProject, installedP
   onShowProject?: (project: PayloadProject) => void
   installedProjects?: Set<string>
 }) {
-  const depNotes = useMemo(() => getDependencyNotes(projects), [projects])
+  const depNotes = getDependencyNotes(projects)
   // Use AI-provided phases, or auto-generate from dependencies
-  const effectivePhases = useMemo(() => phases.length > 0 ? phases : generateDefaultPhases(projects), [phases, projects])
+  const effectivePhases = phases.length > 0 ? phases : generateDefaultPhases(projects)
   const totalEstSec = effectivePhases.reduce((sum, p) => sum + (p.estimatedSeconds ?? 180), 0)
   const aiMinLow = Math.ceil(totalEstSec / 60)
   const aiMinHigh = Math.ceil(totalEstSec * 1.5 / 60)

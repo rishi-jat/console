@@ -5,20 +5,83 @@ import {
   Calendar,
   Plus,
   Trash2,
-  Loader2,
-} from 'lucide-react'
+  Loader2 } from 'lucide-react'
 import { BaseModal, ConfirmDialog } from '../../lib/modals'
 import {
   useNamespaces,
   createOrUpdateResourceQuota,
-  COMMON_RESOURCE_TYPES,
-} from '../../hooks/useMCP'
+  deleteResourceQuota,
+  COMMON_RESOURCE_TYPES } from '../../hooks/useMCP'
 import type { GPUNode } from '../../hooks/useMCP'
 import type { GPUReservation, CreateGPUReservationInput, UpdateGPUReservationInput } from '../../hooks/useGPUReservations'
 import { cn } from '../../lib/cn'
 
 // GPU resource keys used to identify GPU quotas
 const GPU_KEYS = ['nvidia.com/gpu', 'amd.com/gpu', 'gpu.intel.com/i915']
+
+/** Maximum length of the sanitized title segment in a generated quota name. */
+const QUOTA_NAME_TITLE_MAX_LEN = 40
+
+/** Default reservation duration in hours when the field is left blank. */
+const DEFAULT_RESERVATION_DURATION_HOURS = 24
+
+/**
+ * Normalize any accepted start-date representation to the `YYYY-MM-DD`
+ * format required by `<input type="date">`. Accepts either a bare date
+ * (`2024-01-15`) or a full RFC 3339 timestamp (`2024-01-15T09:00:00Z`)
+ * and returns just the date portion. Empty input returns an empty string.
+ */
+function toDateInputValue(value: string | undefined | null): string {
+  if (!value) return ''
+  // Both `YYYY-MM-DD` and `YYYY-MM-DDT...` share the same date prefix.
+  return value.split('T')[0]
+}
+
+/**
+ * Convert a `<input type="date">` value (`YYYY-MM-DD`) to an RFC 3339
+ * timestamp representing local midnight with an explicit timezone offset
+ * (`YYYY-MM-DDT00:00:00±HH:MM`). If the input is already an RFC 3339
+ * timestamp, it is returned as-is.
+ *
+ * The local-offset form (rather than `Z`) prevents an off-by-one-day
+ * display in calendar views: downstream code parses `start_date` with
+ * `new Date(...)` and normalizes via `setHours(0, 0, 0, 0)`, which
+ * shifts a hard-coded UTC midnight back a day for any user west of UTC
+ * (e.g. Jan 15 00:00 UTC → Jan 14 in PST). Encoding the user's local
+ * offset keeps the calendar day stable across the wire.
+ */
+function toRFC3339StartDate(value: string): string {
+  if (!value) return ''
+  if (value.includes('T')) return value
+
+  // Date.getTimezoneOffset returns minutes WEST of UTC (positive for the
+  // Americas, negative for Europe/Asia), so flip the sign to get the
+  // signed offset that goes into the RFC 3339 string.
+  const offsetMinutesWestOfUTC = new Date().getTimezoneOffset()
+  const totalOffsetMinutes = -offsetMinutesWestOfUTC
+  const offsetSign = totalOffsetMinutes >= 0 ? '+' : '-'
+  const absoluteOffsetMinutes = Math.abs(totalOffsetMinutes)
+  const minutesPerHour = 60
+  const offsetHours = String(Math.floor(absoluteOffsetMinutes / minutesPerHour)).padStart(2, '0')
+  const offsetMinutes = String(absoluteOffsetMinutes % minutesPerHour).padStart(2, '0')
+
+  return `${value}T00:00:00${offsetSign}${offsetHours}:${offsetMinutes}`
+}
+
+/**
+ * Derive the Kubernetes ResourceQuota name from a reservation title.
+ * Exported as a local helper so both the current-title quota name and
+ * the ORIGINAL-title quota name (used for cleanup on rename) are
+ * computed identically.
+ */
+function deriveQuotaName(title: string): string {
+  if (!title) return ''
+  return `gpu-${title
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, QUOTA_NAME_TITLE_MAX_LEN)}`
+}
 
 // GPU cluster info for dropdown
 export interface GPUClusterInfo {
@@ -41,8 +104,7 @@ export function ReservationFormModal({
   onSave,
   onActivate,
   onSaved,
-  onError,
-}: {
+  onError }: {
   isOpen: boolean
   onClose: () => void
   editingReservation: GPUReservation | null
@@ -65,7 +127,9 @@ export function ReservationFormModal({
   const [description, setDescription] = useState(editingReservation?.description || '')
   const [gpuCount, setGpuCount] = useState(editingReservation ? String(editingReservation.gpu_count) : '')
   const [gpuPreference, setGpuPreference] = useState(editingReservation?.gpu_type || '')
-  const [startDate, setStartDate] = useState(editingReservation?.start_date || prefillDate || new Date().toISOString().split('T')[0])
+  const [startDate, setStartDate] = useState(
+    toDateInputValue(editingReservation?.start_date) || prefillDate || new Date().toISOString().split('T')[0],
+  )
   const [durationHours, setDurationHours] = useState(editingReservation ? String(editingReservation.duration_hours) : '')
   const [notes, setNotes] = useState(editingReservation?.notes || '')
   const enforceQuota = true
@@ -74,14 +138,54 @@ export function ReservationFormModal({
   const [error, setError] = useState<string | null>(null)
   const [showDiscardConfirm, setShowDiscardConfirm] = useState(false)
 
+  // Snapshot of the initial form state used for dirty detection. Captured
+  // once when the modal is first rendered for this editing target so the
+  // unsaved-changes dialog compares against the ORIGINAL values (not the
+  // current values, which would always look "clean").
+  const initialSnapshot = useMemo(
+    () => ({
+      cluster: editingReservation?.cluster || '',
+      namespace: editingReservation?.namespace || '',
+      title: editingReservation?.title || '',
+      description: editingReservation?.description || '',
+      gpuCount: editingReservation ? String(editingReservation.gpu_count) : '',
+      gpuPreference: editingReservation?.gpu_type || '',
+      startDate: toDateInputValue(editingReservation?.start_date) || prefillDate || new Date().toISOString().split('T')[0],
+      durationHours: editingReservation ? String(editingReservation.duration_hours) : '',
+      notes: editingReservation?.notes || '' }),
+    // Re-snapshot only when the modal is opened for a different reservation
+    // or with a different prefill date.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [editingReservation?.id, prefillDate],
+  )
+
   const forceClose = () => {
     setShowDiscardConfirm(false)
     onClose()
   }
 
+  // Returns true if ANY user-editable field has diverged from the initial
+  // snapshot. Previously this only inspected title/description, so edits
+  // to cluster, namespace, GPU count/type, dates, duration, notes, or
+  // extra resources could be discarded without confirmation.
+  const isDirty = (): boolean => {
+    if (cluster !== initialSnapshot.cluster) return true
+    if (namespace !== initialSnapshot.namespace) return true
+    if (title !== initialSnapshot.title) return true
+    if (description !== initialSnapshot.description) return true
+    if (gpuCount !== initialSnapshot.gpuCount) return true
+    if (gpuPreference !== initialSnapshot.gpuPreference) return true
+    if (startDate !== initialSnapshot.startDate) return true
+    if (durationHours !== initialSnapshot.durationHours) return true
+    if (notes !== initialSnapshot.notes) return true
+    // extraResources always starts empty for both create and edit flows —
+    // any entry means the user added a row.
+    if (extraResources.length > 0) return true
+    return false
+  }
+
   const handleClose = () => {
-    const hasChanges = title.trim() !== '' || description.trim() !== ''
-    if (hasChanges) {
+    if (isDirty()) {
       setShowDiscardConfirm(true)
       return
     }
@@ -91,21 +195,19 @@ export function ReservationFormModal({
   const { namespaces: rawNamespaces } = useNamespaces(cluster || undefined, forceLive)
 
   // Filter out system namespaces from the dropdown
-  const FILTERED_NS_PREFIXES = useMemo(() => ['openshift-', 'kube-'], [])
-  const FILTERED_NS_EXACT = useMemo(() => ['default', 'kube-system', 'kube-public', 'kube-node-lease'], [])
-  const clusterNamespaces = useMemo(() =>
-    rawNamespaces.filter(ns =>
+  const FILTERED_NS_PREFIXES = ['openshift-', 'kube-']
+  const FILTERED_NS_EXACT = ['default', 'kube-system', 'kube-public', 'kube-node-lease']
+  const clusterNamespaces = rawNamespaces.filter(ns =>
       !FILTERED_NS_PREFIXES.some(prefix => ns.startsWith(prefix)) &&
       !FILTERED_NS_EXACT.includes(ns)
-    ),
-  [rawNamespaces, FILTERED_NS_PREFIXES, FILTERED_NS_EXACT])
+    )
 
   // Get the selected cluster's GPU info
   const selectedClusterInfo = gpuClusters.find(c => c.name === cluster)
   const maxGPUs = selectedClusterInfo?.availableGPUs ?? 0
 
   // Auto-detect GPU resource key from cluster's GPU types
-  const gpuResourceKey = useMemo(() => {
+  const gpuResourceKey = (() => {
     if (!cluster) return 'limits.nvidia.com/gpu'
     const clusterNodes = allNodes.filter(n => n.cluster === cluster)
     const hasAMD = clusterNodes.some(n => n.gpuType.toLowerCase().includes('amd') || n.manufacturer?.toLowerCase().includes('amd'))
@@ -113,10 +215,10 @@ export function ReservationFormModal({
     if (hasAMD) return 'limits.amd.com/gpu'
     if (hasIntel) return 'gpu.intel.com/i915'
     return 'limits.nvidia.com/gpu'
-  }, [cluster, allNodes])
+  })()
 
   // GPU types available on selected cluster with per-type counts
-  const clusterGPUTypes = useMemo(() => {
+  const clusterGPUTypes = (() => {
     if (!cluster) return [] as Array<{ type: string; total: number; available: number }>
     const typeMap: Record<string, { total: number; allocated: number }> = {}
     for (const n of allNodes.filter(n => n.cluster === cluster)) {
@@ -127,17 +229,25 @@ export function ReservationFormModal({
     return Object.entries(typeMap).map(([type, d]) => ({
       type,
       total: d.total,
-      available: d.total - d.allocated,
-    }))
-  }, [cluster, allNodes])
+      available: d.total - d.allocated }))
+  })()
 
   // Auto-generate quota name from title
-  const quotaName = title
-    ? `gpu-${title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40)}`
-    : ''
+  const quotaName = deriveQuotaName(title)
+  // Quota name computed from the ORIGINAL title, used to clean up a
+  // stale ResourceQuota if the user renamed the reservation.
+  const originalQuotaName = deriveQuotaName(editingReservation?.title || '')
 
   const handleSave = async () => {
     const count = parseInt(gpuCount)
+    // For edits, capacity validation must account for the GPUs the current
+    // reservation already holds: max allowed = availableGPUs + originalCount.
+    // Without this, an edit could request more GPUs than the cluster has.
+    const originalCount = editingReservation?.gpu_count ?? 0
+    const sameClusterAsOriginal = editingReservation ? cluster === editingReservation.cluster : true
+    const capacityCeiling = editingReservation && sameClusterAsOriginal
+      ? maxGPUs + originalCount
+      : maxGPUs
     const validationError = !cluster
       ? t('gpuReservations.form.errors.selectCluster')
       : !namespace
@@ -146,8 +256,8 @@ export function ReservationFormModal({
       ? t('gpuReservations.form.errors.titleRequired')
       : !count || count < 1
       ? t('gpuReservations.form.errors.gpuCountMin')
-      : count > maxGPUs && !editingReservation
-      ? t('gpuReservations.form.errors.gpuCountMax', { max: maxGPUs, cluster })
+      : count > capacityCeiling
+      ? t('gpuReservations.form.errors.gpuCountMax', { max: capacityCeiling, cluster })
       : null
     setError(validationError)
     if (validationError) return
@@ -155,6 +265,9 @@ export function ReservationFormModal({
     setIsSaving(true)
     try {
       let reservationId: string | void
+      // Backend requires RFC 3339; <input type="date"> only emits YYYY-MM-DD,
+      // so normalize to midnight UTC before sending.
+      const rfc3339StartDate = toRFC3339StartDate(startDate)
       if (editingReservation) {
         // Partial update
         const input: UpdateGPUReservationInput = {
@@ -164,13 +277,12 @@ export function ReservationFormModal({
           namespace,
           gpu_count: count,
           gpu_type: gpuPreference || clusterGPUTypes[0]?.type || '',
-          start_date: startDate,
-          duration_hours: parseInt(durationHours) || 24,
+          start_date: rfc3339StartDate,
+          duration_hours: parseInt(durationHours) || DEFAULT_RESERVATION_DURATION_HOURS,
           notes,
           quota_enforced: enforceQuota,
           quota_name: enforceQuota ? quotaName : '',
-          max_cluster_gpus: selectedClusterInfo?.totalGPUs,
-        }
+          max_cluster_gpus: selectedClusterInfo?.totalGPUs }
         reservationId = await onSave(input)
       } else {
         // Create
@@ -181,13 +293,12 @@ export function ReservationFormModal({
           namespace,
           gpu_count: count,
           gpu_type: gpuPreference || clusterGPUTypes[0]?.type || '',
-          start_date: startDate,
-          duration_hours: parseInt(durationHours) || 24,
+          start_date: rfc3339StartDate,
+          duration_hours: parseInt(durationHours) || DEFAULT_RESERVATION_DURATION_HOURS,
           notes,
           quota_enforced: enforceQuota,
           quota_name: enforceQuota ? quotaName : '',
-          max_cluster_gpus: selectedClusterInfo?.totalGPUs,
-        }
+          max_cluster_gpus: selectedClusterInfo?.totalGPUs }
         reservationId = await onSave(input)
       }
 
@@ -195,10 +306,30 @@ export function ReservationFormModal({
       if (enforceQuota) {
         try {
           const hard: Record<string, string> = {
-            [gpuResourceKey]: String(count),
-          }
+            [gpuResourceKey]: String(count) }
           for (const r of extraResources) {
             if (r.key && r.value) hard[r.key] = r.value
+          }
+          // If the reservation was renamed, the quota name (which is
+          // derived from the title) will be different. Delete the old
+          // quota first so it does not linger orphaned in the namespace.
+          if (
+            editingReservation &&
+            originalQuotaName &&
+            originalQuotaName !== quotaName &&
+            editingReservation.cluster &&
+            editingReservation.namespace
+          ) {
+            try {
+              await deleteResourceQuota(
+                editingReservation.cluster,
+                editingReservation.namespace,
+                originalQuotaName,
+              )
+            } catch {
+              // Non-fatal: old quota may already be gone (e.g. 404).
+              // Proceed with creating the renamed quota regardless.
+            }
           }
           await createOrUpdateResourceQuota({ cluster, namespace, name: quotaName, hard, ensure_namespace: isNewNamespace })
           // Quota enforced successfully — activate the reservation

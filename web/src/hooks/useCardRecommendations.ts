@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { usePodIssues, useDeploymentIssues, useWarningEvents, useGPUNodes, useClusters, useSecurityIssues } from './useMCP'
 import { useAIMode } from './useAIMode'
 import { RECOMMENDATION_INTERVAL_MS } from '../lib/constants/network'
@@ -127,7 +127,7 @@ export function useCardRecommendations(currentCardTypes: string[]) {
 
     // Check for security issues
     const highSeveritySecurityIssues = (securityIssues || []).filter(i => i.severity === 'high')
-    if ((securityIssues || []).length > 0) {
+    if ((securityIssues || []).length > 0 && !currentCardTypes.includes('security_issues')) {
       newRecommendations.push({
         id: 'rec-security',
         cardType: 'security_issues',
@@ -164,9 +164,14 @@ export function useCardRecommendations(currentCardTypes: string[]) {
     securityIssues,
   ])
 
-  // Re-analyze when data changes
+  // Re-analyze when data changes — use ref to prevent loops from
+  // hook data returning new array references on every render
+  const recInitRef = useRef(false)
   useEffect(() => {
-    analyzeAndRecommend()
+    if (!recInitRef.current) {
+      recInitRef.current = true
+      analyzeAndRecommend()
+    }
   }, [analyzeAndRecommend])
 
   // Re-analyze periodically

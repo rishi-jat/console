@@ -104,8 +104,7 @@ const DEMO_POSTURE: CompliancePosture = {
   expiredCertificates: 1,
   totalNamespaces: 12,
   totalClusters: 3,
-  reachableClusters: 3,
-}
+  reachableClusters: 3 }
 
 // ── Per-cluster data fetching ─────────────────────────────────────────────
 
@@ -123,8 +122,7 @@ async function fetchClusterCompliance(cluster: string): Promise<ClusterComplianc
     roles: 0,
     roleBindings: 0,
     clusterAdminBindings: 0,
-    namespaces: 0,
-  }
+    namespaces: 0 }
 
   // Fetch secrets summary (count by type)
   try {
@@ -218,14 +216,12 @@ export function useDataCompliance() {
   const [isLoading, setIsLoading] = useState(!cachedSnapshot)
   const [isRefreshing, setIsRefreshing] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [failedClusters, setFailedClusters] = useState<string[]>([])
   const [isUsingDemoData, setIsUsingDemoData] = useState(!cachedSnapshot)
   const fetchInProgress = useRef(false)
   const initialLoadDone = useRef(!!cachedSnapshot)
 
-  const clusters = useMemo(() =>
-    allClusters.filter(c => c.reachable === true),
-    [allClusters]
-  )
+  const clusters = allClusters.filter(c => c.reachable === true)
 
   const refetch = useCallback(async (silent = false) => {
     if (clusters.length === 0) {
@@ -257,20 +253,24 @@ export function useDataCompliance() {
         expiredCertificates: certStatus.expired,
         totalNamespaces: 0,
         totalClusters: allClusters.length,
-        reachableClusters: clusters.length,
-      }
+        reachableClusters: clusters.length }
 
+      const clusterFailures: string[] = []
       const tasks = clusters.map(cluster => async () => {
-        const data = await fetchClusterCompliance(cluster.name)
-        aggregated.totalSecrets += data.secrets.total
-        aggregated.opaqueSecrets += data.secrets.opaque
-        aggregated.tlsSecrets += data.secrets.tls
-        aggregated.saTokenSecrets += data.secrets.saToken
-        aggregated.dockerSecrets += data.secrets.docker
-        aggregated.rbacPolicies += data.roles
-        aggregated.roleBindings += data.roleBindings
-        aggregated.clusterAdminBindings += data.clusterAdminBindings
-        aggregated.totalNamespaces += data.namespaces
+        try {
+          const data = await fetchClusterCompliance(cluster.name)
+          aggregated.totalSecrets += data.secrets.total
+          aggregated.opaqueSecrets += data.secrets.opaque
+          aggregated.tlsSecrets += data.secrets.tls
+          aggregated.saTokenSecrets += data.secrets.saToken
+          aggregated.dockerSecrets += data.secrets.docker
+          aggregated.rbacPolicies += data.roles
+          aggregated.roleBindings += data.roleBindings
+          aggregated.clusterAdminBindings += data.clusterAdminBindings
+          aggregated.totalNamespaces += data.namespaces
+        } catch {
+          clusterFailures.push(cluster.name)
+        }
       })
 
       await settledWithConcurrency(tasks)
@@ -278,7 +278,12 @@ export function useDataCompliance() {
       setPosture(aggregated)
       saveToCache(aggregated)
       setIsUsingDemoData(false)
-      setError(null)
+      setFailedClusters(clusterFailures)
+      if (clusterFailures.length > 0) {
+        setError(`Data from ${clusterFailures.length}/${clusters.length} clusters unavailable`)
+      } else {
+        setError(null)
+      }
       initialLoadDone.current = true
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to fetch compliance data')
@@ -296,6 +301,7 @@ export function useDataCompliance() {
       setIsLoading(false)
       setIsUsingDemoData(true)
       setError(null)
+      setFailedClusters([])
       initialLoadDone.current = true
       return
     }
@@ -315,6 +321,7 @@ export function useDataCompliance() {
       setIsLoading(true)
       setIsUsingDemoData(true)
       setError(null)
+      setFailedClusters([])
       initialLoadDone.current = false
     })
 
@@ -367,7 +374,7 @@ export function useDataCompliance() {
     isLoading,
     isRefreshing,
     error,
+    failedClusters,
     isDemoData: isUsingDemoData,
-    refetch: () => refetch(false),
-  }
+    refetch: () => refetch(false) }
 }

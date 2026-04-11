@@ -17,10 +17,11 @@ vi.mock('../BaseModal', () => ({
   },
 }))
 
-// Mock Button component
+// Mock Button component — must handle `loading` prop to render spinner (#5757)
 vi.mock('../../../components/ui/Button', () => ({
-  Button: ({ children, onClick, disabled, ...props }: Record<string, unknown>) => (
+  Button: ({ children, onClick, disabled, loading, ...props }: Record<string, unknown>) => (
     <button onClick={onClick as () => void} disabled={disabled as boolean} {...props}>
+      {loading ? <span className="animate-spin" data-testid="loading-spinner" /> : null}
       {children as React.ReactNode}
     </button>
   ),
@@ -79,12 +80,13 @@ describe('ConfirmDialog', () => {
   })
 
   it('renders with danger variant by default', () => {
-    // Danger variant uses red color classes
+    render(<ConfirmDialog {...defaultProps} />)
     const confirmBtn = screen.getByText('Confirm').closest('button')
     expect(confirmBtn?.className).toContain('red')
   })
 
   it('renders with warning variant', () => {
+    render(
       <ConfirmDialog {...defaultProps} variant="warning" />
     )
     const confirmBtn = screen.getByText('Confirm').closest('button')
@@ -92,6 +94,7 @@ describe('ConfirmDialog', () => {
   })
 
   it('renders with info variant', () => {
+    render(
       <ConfirmDialog {...defaultProps} variant="info" />
     )
     const confirmBtn = screen.getByText('Confirm').closest('button')

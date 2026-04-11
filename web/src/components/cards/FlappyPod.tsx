@@ -5,6 +5,12 @@ import { useCardExpanded } from './CardWrapper'
 import { useReportCardDataState } from './CardDataContext'
 import { emitGameStarted, emitGameEnded } from '../../lib/analytics'
 import { useGameKeys } from '../../hooks/useGameKeys'
+import { safeGet, safeSet } from '../../lib/safeLocalStorage'
+
+/** localStorage key for Flappy Pod high score */
+const HIGH_SCORE_KEY = 'flappy-pod-high'
+/** Default high score string when none has been persisted yet */
+const DEFAULT_HIGH_SCORE = '0'
 
 // Game constants
 const GRAVITY = 0.5
@@ -34,11 +40,7 @@ export function FlappyPod(_props: CardComponentProps) {
   const [gameOver, setGameOver] = useState(false)
   const [score, setScore] = useState(0)
   const [highScore, setHighScore] = useState(() => {
-    try {
-      return parseInt(localStorage.getItem('flappy-pod-high') || '0')
-    } catch {
-      return 0
-    }
+    return parseInt(safeGet(HIGH_SCORE_KEY) || DEFAULT_HIGH_SCORE)
   })
 
   // Game state refs (for animation loop)
@@ -51,13 +53,13 @@ export function FlappyPod(_props: CardComponentProps) {
   const gameHeight = isExpanded ? 500 : 350
 
   // Jump action
-  const jump = useCallback(() => {
+  const jump = () => {
     if (!isPlaying || gameOver) return
     velocityRef.current = JUMP_FORCE
-  }, [isPlaying, gameOver])
+  }
 
   // Start game
-  const startGame = useCallback(() => {
+  const startGame = () => {
     podYRef.current = gameHeight / 2
     velocityRef.current = 0
     pipesRef.current = []
@@ -66,7 +68,7 @@ export function FlappyPod(_props: CardComponentProps) {
     setGameOver(false)
     setIsPlaying(true)
     emitGameStarted('flappy_pod')
-  }, [gameHeight])
+  }
 
   // End game
   const endGame = useCallback(() => {
@@ -76,7 +78,7 @@ export function FlappyPod(_props: CardComponentProps) {
 
     if (scoreRef.current > highScore) {
       setHighScore(scoreRef.current)
-      localStorage.setItem('flappy-pod-high', String(scoreRef.current))
+      safeSet(HIGH_SCORE_KEY, String(scoreRef.current))
     }
   }, [highScore])
 
@@ -95,8 +97,7 @@ export function FlappyPod(_props: CardComponentProps) {
       pipesRef.current.push({
         x: gameWidth,
         gapY,
-        passed: false,
-      })
+        passed: false })
     }, PIPE_SPAWN_INTERVAL)
 
     return () => {
@@ -210,7 +211,7 @@ export function FlappyPod(_props: CardComponentProps) {
   }, [isPlaying, gameOver, gameWidth, gameHeight, endGame])
 
   // Keyboard and click controls — scoped to visible game container (KeepAlive-safe)
-  const handleFlappyKeyDown = useCallback((e: KeyboardEvent) => {
+  const handleFlappyKeyDown = (e: KeyboardEvent) => {
     if (e.key === ' ' || e.key === 'ArrowUp') {
       e.preventDefault()
       if (!isPlaying && !gameOver) {
@@ -219,16 +220,16 @@ export function FlappyPod(_props: CardComponentProps) {
         jump()
       }
     }
-  }, [isPlaying, gameOver, startGame, jump])
+  }
   useGameKeys(gameContainerRef, { onKeyDown: handleFlappyKeyDown })
 
-  const handleClick = useCallback(() => {
+  const handleClick = () => {
     if (!isPlaying && !gameOver) {
       startGame()
     } else if (isPlaying) {
       jump()
     }
-  }, [isPlaying, gameOver, startGame, jump])
+  }
 
   return (
     <div ref={gameContainerRef} className="h-full flex flex-col p-2 select-none">

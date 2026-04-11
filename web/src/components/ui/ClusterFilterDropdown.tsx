@@ -13,7 +13,7 @@ interface ClusterFilterDropdownProps {
   setShowClusterFilter: (show: boolean) => void
   toggleClusterFilter: (cluster: string) => void
   clearClusterFilter: () => void
-  clusterFilterRef: React.RefObject<HTMLDivElement>
+  clusterFilterRef: React.RefObject<HTMLDivElement | null>
   /** Minimum clusters before showing the filter (default: 1) */
   minClusters?: number
 }
@@ -139,15 +139,18 @@ export function ClusterFilterDropdown({
                 {t('clusterFilter.allClusters')}
               </Button>
               {availableClusters.map(cluster => {
+                // Pass `cluster.healthy` through as-is (don't default to true)
+                // so clusters with no health signal surface as `unknown`
+                // rather than silently appearing healthy (#5923, #5942).
                 const clusterState: ClusterState = cluster.healthy !== undefined || cluster.reachable !== undefined
                   ? getClusterState(
-                      cluster.healthy ?? true,
+                      cluster.healthy,
                       cluster.reachable,
                       cluster.nodeCount,
                       undefined,
                       cluster.errorType
                     )
-                  : 'healthy'
+                  : 'unknown'
 
                 const isUnreachable = cluster.reachable === false
                 const stateLabel = clusterState === 'healthy' ? '' :

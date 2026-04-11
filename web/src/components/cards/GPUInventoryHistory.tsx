@@ -1,18 +1,8 @@
-import { useMemo, useState, useRef, useCallback, useEffect } from 'react'
+import { useMemo, useState, useRef, useEffect } from 'react'
 import {
   Cpu, TrendingUp, TrendingDown, Minus, Clock, Server,
-  BarChart3, Table2, ChevronDown, ArrowUpDown,
-} from 'lucide-react'
-import {
-  AreaChart,
-  Area,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  ResponsiveContainer,
-  Legend,
-} from 'recharts'
+  BarChart3, Table2, ChevronDown, ArrowUpDown } from 'lucide-react'
+import ReactECharts from 'echarts-for-react'
 import { useMetricsHistory } from '../../hooks/useMetricsHistory'
 import { useCachedGPUNodes } from '../../hooks/useCachedData'
 import { useDemoMode } from '../../hooks/useDemoMode'
@@ -27,9 +17,7 @@ import {
   CHART_GRID_STROKE,
   CHART_AXIS_STROKE,
   CHART_TOOLTIP_CONTENT_STYLE,
-  CHART_TICK_COLOR,
-  CHART_LEGEND_WRAPPER_STYLE,
-} from '../../lib/constants'
+  CHART_TICK_COLOR } from '../../lib/constants'
 
 // ---------------------------------------------------------------------------
 // Constants — no magic numbers
@@ -152,8 +140,7 @@ function generateDemoData(): GPUHistoryDataPoint[] {
       timestamp: ts,
       allocated,
       total: DEMO_BASE_TOTAL,
-      free: DEMO_BASE_TOTAL - allocated,
-    }
+      free: DEMO_BASE_TOTAL - allocated }
     // Distribute allocated across demo GPU types
     let remaining = allocated
     for (let t = 0; t < DEMO_GPU_TYPE_COUNT; t++) {
@@ -183,8 +170,7 @@ function generateDemoTableRows(): NodeTableRow[] {
       allocated,
       total,
       free: total - allocated,
-      utilizationPct: total > 0 ? Math.round((allocated / total) * PERCENT_MULTIPLIER) : 0,
-    })
+      utilizationPct: total > 0 ? Math.round((allocated / total) * PERCENT_MULTIPLIER) : 0 })
   }
   return rows
 }
@@ -207,6 +193,143 @@ function getTypeColor(index: number): string {
 // Component
 // ---------------------------------------------------------------------------
 
+/** Extracted chart sub-component to keep the main component readable */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function GPUInventoryChart({ displayChartData, chartMode, chartGPUTypes, t }: {
+  displayChartData: GPUHistoryDataPoint[]
+  chartMode: ChartMode
+  chartGPUTypes: string[]
+  t: any
+}) {
+  const chartOption = useMemo(() => {
+    const timeData = (displayChartData || []).map(d => d.time)
+
+    const buildSeries = () => {
+      if (chartMode === 'by-type' && chartGPUTypes.length > 0) {
+        const typeSeries = (chartGPUTypes || []).map((typeName, idx) => ({
+          name: typeName,
+          type: 'line' as const,
+          stack: 'total',
+          step: 'end' as const,
+          data: (displayChartData || []).map(d => (d[typeName] as number) || 0),
+          lineStyle: { color: getTypeColor(idx), width: 2 },
+          itemStyle: { color: getTypeColor(idx) },
+          areaStyle: {
+            color: { type: 'linear', x: 0, y: 0, x2: 0, y2: 1,
+              colorStops: [{ offset: 0, color: getTypeColor(idx) + '99' }, { offset: 1, color: getTypeColor(idx) + '1A' }] },
+          },
+          showSymbol: false,
+        }))
+        typeSeries.push({
+          name: 'free',
+          type: 'line' as const,
+          stack: 'total',
+          step: 'end' as const,
+          data: (displayChartData || []).map(d => d.free),
+          lineStyle: { color: FREE_AREA_COLOR, width: 2 },
+          itemStyle: { color: FREE_AREA_COLOR },
+          areaStyle: {
+            color: { type: 'linear', x: 0, y: 0, x2: 0, y2: 1,
+              colorStops: [{ offset: 0, color: FREE_AREA_COLOR + '99' }, { offset: 1, color: FREE_AREA_COLOR + '1A' }] },
+          },
+          showSymbol: false,
+        })
+        return typeSeries
+      }
+
+      return [
+        {
+          name: 'allocated',
+          type: 'line' as const,
+          stack: 'total',
+          step: 'end' as const,
+          data: (displayChartData || []).map(d => d.allocated),
+          lineStyle: { color: '#9333ea', width: 2 },
+          itemStyle: { color: '#9333ea' },
+          areaStyle: {
+            color: { type: 'linear', x: 0, y: 0, x2: 0, y2: 1,
+              colorStops: [{ offset: 0, color: 'rgba(147,51,234,0.6)' }, { offset: 1, color: 'rgba(147,51,234,0.1)' }] },
+          },
+          showSymbol: false,
+        },
+        {
+          name: 'free',
+          type: 'line' as const,
+          stack: 'total',
+          step: 'end' as const,
+          data: (displayChartData || []).map(d => d.free),
+          lineStyle: { color: FREE_AREA_COLOR, width: 2 },
+          itemStyle: { color: FREE_AREA_COLOR },
+          areaStyle: {
+            color: { type: 'linear', x: 0, y: 0, x2: 0, y2: 1,
+              colorStops: [{ offset: 0, color: FREE_AREA_COLOR + '99' }, { offset: 1, color: FREE_AREA_COLOR + '1A' }] },
+          },
+          showSymbol: false,
+        },
+      ]
+    }
+
+    const series = buildSeries()
+    const legendNames = series.map(s => {
+      if (s.name === 'allocated') return t('cards:gpuInventoryHistory.inUse', 'In Use')
+      if (s.name === 'free') return t('cards:gpuInventoryHistory.free', 'Free')
+      return s.name
+    })
+
+    return {
+      backgroundColor: 'transparent',
+      grid: { left: 40, right: 5, top: 5, bottom: 35 },
+      xAxis: {
+        type: 'category' as const,
+        data: timeData,
+        axisLabel: { color: CHART_TICK_COLOR, fontSize: 10 },
+        axisLine: { lineStyle: { color: CHART_AXIS_STROKE } },
+        axisTick: { show: false },
+      },
+      yAxis: {
+        type: 'value' as const,
+        minInterval: 1,
+        axisLabel: { color: CHART_TICK_COLOR, fontSize: 10 },
+        axisLine: { show: false },
+        axisTick: { show: false },
+        splitLine: { lineStyle: { color: CHART_GRID_STROKE, type: 'dashed' as const } },
+      },
+      tooltip: {
+        trigger: 'axis' as const,
+        backgroundColor: (CHART_TOOLTIP_CONTENT_STYLE as Record<string, unknown>).backgroundColor as string,
+        borderColor: (CHART_TOOLTIP_CONTENT_STYLE as Record<string, unknown>).borderColor as string,
+        textStyle: { color: CHART_TICK_COLOR, fontSize: 12 },
+        formatter: (params: Array<{ seriesName: string; value: number; color: string }>) => {
+          let html = ''
+          for (const p of (params || [])) {
+            let label = p.seriesName
+            if (label === 'allocated') label = t('cards:gpuInventoryHistory.inUse', 'In Use')
+            else if (label === 'free') label = t('cards:gpuInventoryHistory.free', 'Free')
+            html += `<div><span style="color:${p.color}">\u25CF</span> ${label}: ${p.value} GPUs</div>`
+          }
+          return html
+        },
+      },
+      legend: {
+        data: legendNames,
+        bottom: 0,
+        textStyle: { color: '#888', fontSize: 10 },
+        icon: 'rect',
+      },
+      series,
+    }
+  }, [displayChartData, chartMode, chartGPUTypes, t])
+
+  return (
+    <ReactECharts
+      option={chartOption}
+      style={{ height: CHART_HEIGHT_STANDARD, width: '100%' }}
+      notMerge={true}
+      opts={{ renderer: 'svg' }}
+    />
+  )
+}
+
 export function GPUInventoryHistory() {
   const { t } = useTranslation(['cards', 'common'])
   const { history } = useMetricsHistory()
@@ -216,8 +339,7 @@ export function GPUInventoryHistory() {
     isRefreshing,
     isDemoFallback,
     isFailed,
-    consecutiveFailures,
-  } = useCachedGPUNodes()
+    consecutiveFailures } = useCachedGPUNodes()
   const { isDemoMode } = useDemoMode()
   const { selectedClusters, isAllClustersSelected } = useGlobalFilters()
 
@@ -244,8 +366,7 @@ export function GPUInventoryHistory() {
     hasAnyData: hasData || (history || []).length > 0,
     isDemoData: showDemo,
     isFailed,
-    consecutiveFailures,
-  })
+    consecutiveFailures })
 
   // ── Close dropdowns on outside click or Escape ─────────────────────
   useEffect(() => {
@@ -299,17 +420,16 @@ export function GPUInventoryHistory() {
     return Array.from(nodes).sort()
   }, [gpuNodes, history])
 
-  const toggleClusterFilter = useCallback((clusterName: string) => {
+  const toggleClusterFilter = (clusterName: string) => {
     setLocalClusterFilter(prev =>
       prev.includes(clusterName)
         ? prev.filter(c => c !== clusterName)
         : [...prev, clusterName]
     )
-  }, [])
+  }
 
   // ── Filter helper applied to snapshot gpuNodes ─────────────────────
-  const filterGPUNodes = useCallback(
-    (nodes: Array<{ name: string; cluster: string; gpuType?: string; gpuAllocated: number; gpuTotal: number }>) => {
+  const filterGPUNodes = (nodes: Array<{ name: string; cluster: string; gpuType?: string; gpuAllocated: number; gpuTotal: number }>) => {
       let filtered = nodes || []
 
       // Global cluster filter
@@ -333,9 +453,7 @@ export function GPUInventoryHistory() {
         filtered = filtered.filter(g => g.name === selectedNode)
       }
       return filtered
-    },
-    [isAllClustersSelected, selectedClusters, localClusterFilter, selectedGPUType, selectedNode],
-  )
+    }
 
   // ── Chart data ─────────────────────────────────────────────────────
   const chartData = useMemo<GPUHistoryDataPoint[]>(() => {
@@ -354,8 +472,7 @@ export function GPUInventoryHistory() {
         timestamp: date.getTime(),
         allocated,
         total,
-        free: Math.max(total - allocated, 0),
-      }
+        free: Math.max(total - allocated, 0) }
 
       // Per-GPU-type breakdown for stacked chart
       if (chartMode === 'by-type') {
@@ -388,13 +505,13 @@ export function GPUInventoryHistory() {
   }, [chartData, chartMode])
 
   /** Sorted list of GPU types for chart series (overflow aggregated into "Other") */
-  const chartGPUTypes = useMemo(() => {
+  const chartGPUTypes = (() => {
     if (allGPUTypeKeys.length <= MAX_CHART_SERIES) return allGPUTypeKeys
     return [...allGPUTypeKeys.slice(0, MAX_CHART_SERIES - 1), 'Other']
-  }, [allGPUTypeKeys])
+  })()
 
   /** Chart data with overflow types aggregated into "Other" */
-  const displayChartData = useMemo(() => {
+  const displayChartData = (() => {
     if (allGPUTypeKeys.length <= MAX_CHART_SERIES) return chartData
     const overflowTypes = new Set(allGPUTypeKeys.slice(MAX_CHART_SERIES - 1))
     return (chartData || []).map(dp => {
@@ -409,18 +526,17 @@ export function GPUInventoryHistory() {
       if (otherTotal > 0) next['Other'] = otherTotal
       return next
     })
-  }, [chartData, allGPUTypeKeys])
+  })()
 
   // ── Current totals ─────────────────────────────────────────────────
-  const currentTotals = useMemo(() => {
+  const currentTotals = (() => {
     if ((chartData || []).length === 0) return { allocated: 0, total: 0, free: 0 }
     const latest = chartData[chartData.length - 1]
     return {
       allocated: latest.allocated,
       total: latest.total,
-      free: latest.free,
-    }
-  }, [chartData])
+      free: latest.free }
+  })()
 
   // ── Trend ──────────────────────────────────────────────────────────
   const trend = useMemo<'up' | 'down' | 'stable'>(() => {
@@ -491,7 +607,7 @@ export function GPUInventoryHistory() {
 
   // ── Snapshot interval (computed from history timestamps) ────────────
   /** Median interval between consecutive snapshots in minutes, used to display churn metrics in real time units */
-  const snapshotIntervalMin = useMemo(() => {
+  const snapshotIntervalMin = (() => {
     if ((history || []).length < MIN_CHURN_SNAPSHOTS) return DEFAULT_SNAPSHOT_INTERVAL_MIN
     const intervals: number[] = []
     for (let i = 1; i < (history || []).length; i++) {
@@ -502,17 +618,17 @@ export function GPUInventoryHistory() {
     intervals.sort((a, b) => a - b)
     const mid = Math.floor(intervals.length / 2)
     return Math.round(intervals.length % 2 === 0 ? (intervals[mid - 1] + intervals[mid]) / 2 : intervals[mid])
-  }, [history])
+  })()
 
   /** Format a duration given in snapshot intervals as a human-readable time string (e.g. "~30 min" or "~2.5 hrs") */
-  const formatIntervalDuration = useCallback((intervals: number): string => {
+  const formatIntervalDuration = (intervals: number): string => {
     const totalMin = intervals * snapshotIntervalMin
     if (totalMin < MINUTES_PER_HOUR) return `~${Math.round(totalMin)} min`
     return `~${(totalMin / MINUTES_PER_HOUR).toFixed(1)} hrs`
-  }, [snapshotIntervalMin])
+  }
 
   // ── Table data (per-node, per-type breakdown from latest snapshot) ──
-  const tableRows = useMemo<NodeTableRow[]>(() => {
+  const tableRows = (() => {
     if (showDemo) return generateDemoTableRows()
 
     const latestSnapshot = (history || []).length > 0 ? (history || [])[(history || []).length - 1] : null
@@ -529,20 +645,19 @@ export function GPUInventoryHistory() {
         allocated,
         total,
         free: Math.max(total - allocated, 0),
-        utilizationPct: total > 0 ? Math.round((allocated / total) * PERCENT_MULTIPLIER) : 0,
-      }
+        utilizationPct: total > 0 ? Math.round((allocated / total) * PERCENT_MULTIPLIER) : 0 }
     })
-  }, [history, showDemo, filterGPUNodes])
+  })()
 
   const totalTablePages = Math.max(1, Math.ceil((tableRows || []).length / TABLE_PAGE_SIZE))
 
   // Clamp page to valid range when filters shrink the row count
   const effectivePage = Math.min(tablePage, totalTablePages - 1)
 
-  const paginatedRows = useMemo(() => {
+  const paginatedRows = (() => {
     const start = effectivePage * TABLE_PAGE_SIZE
     return (tableRows || []).slice(start, start + TABLE_PAGE_SIZE)
-  }, [tableRows, effectivePage])
+  })()
 
   const usagePercent = currentTotals.total > 0
     ? Math.round((currentTotals.allocated / currentTotals.total) * PERCENT_MULTIPLIER)
@@ -615,7 +730,7 @@ export function GPUInventoryHistory() {
                 <ChevronDown className="w-3 h-3" />
               </button>
               {showTypeDropdown && (
-                <div className="absolute right-0 top-full mt-1 z-50 min-w-[160px] rounded-md border border-border bg-popover shadow-lg py-1">
+                <div className="absolute right-0 top-full mt-1 z-dropdown min-w-[160px] rounded-md border border-border bg-popover shadow-lg py-1">
                   <button
                     onClick={() => { setSelectedGPUType('all'); setShowTypeDropdown(false) }}
                     className={cn('w-full text-left px-3 py-1.5 text-xs hover:bg-secondary/80 transition-colors',
@@ -658,7 +773,7 @@ export function GPUInventoryHistory() {
                 <ChevronDown className="w-3 h-3" />
               </button>
               {showNodeDropdown && (
-                <div className="absolute right-0 top-full mt-1 z-50 min-w-[160px] max-h-[200px] overflow-y-auto rounded-md border border-border bg-popover shadow-lg py-1">
+                <div className="absolute right-0 top-full mt-1 z-dropdown min-w-[160px] max-h-[200px] overflow-y-auto rounded-md border border-border bg-popover shadow-lg py-1">
                   <button
                     onClick={() => { setSelectedNode('all'); setShowNodeDropdown(false) }}
                     className={cn('w-full text-left px-3 py-1.5 text-xs hover:bg-secondary/80 transition-colors',
@@ -796,106 +911,12 @@ export function GPUInventoryHistory() {
                 role="img"
                 aria-label={`GPU inventory history chart: ${currentTotals.allocated} of ${currentTotals.total} GPUs in use (${usagePercent}% utilization), trend: ${trend}`}
               >
-                <ResponsiveContainer width="100%" height={CHART_HEIGHT_STANDARD}>
-                  <AreaChart data={displayChartData} margin={{ top: 5, right: 5, left: 0, bottom: 5 }} reverseStackOrder>
-                    <defs>
-                      <linearGradient id="gpuHistAllocated" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="5%" stopColor="#9333ea" stopOpacity={0.6} />
-                        <stop offset="95%" stopColor="#9333ea" stopOpacity={0.1} />
-                      </linearGradient>
-                      <linearGradient id="gpuHistFree" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="5%" stopColor={FREE_AREA_COLOR} stopOpacity={0.6} />
-                        <stop offset="95%" stopColor={FREE_AREA_COLOR} stopOpacity={0.1} />
-                      </linearGradient>
-                      {/* Dynamic gradients for per-type series */}
-                      {chartMode === 'by-type' && (chartGPUTypes || []).map((typeName, idx) => (
-                        <linearGradient key={typeName} id={`gpuHist_${idx}`} x1="0" y1="0" x2="0" y2="1">
-                          <stop offset="5%" stopColor={getTypeColor(idx)} stopOpacity={0.6} />
-                          <stop offset="95%" stopColor={getTypeColor(idx)} stopOpacity={0.1} />
-                        </linearGradient>
-                      ))}
-                    </defs>
-                    <CartesianGrid strokeDasharray="3 3" stroke={CHART_GRID_STROKE} />
-                    <XAxis
-                      dataKey="time"
-                      tick={{ fill: CHART_TICK_COLOR, fontSize: 10 }}
-                      axisLine={{ stroke: CHART_AXIS_STROKE }}
-                      tickLine={false}
-                    />
-                    <YAxis
-                      tick={{ fill: CHART_TICK_COLOR, fontSize: 10 }}
-                      axisLine={false}
-                      tickLine={false}
-                      allowDecimals={false}
-                    />
-                    <Tooltip
-                      contentStyle={CHART_TOOLTIP_CONTENT_STYLE}
-                      labelStyle={{ color: CHART_TICK_COLOR }}
-                      formatter={(value, name) => {
-                        if (name === 'allocated') return [`${value} GPUs`, t('cards:gpuInventoryHistory.inUse', 'In Use')]
-                        if (name === 'free') return [`${value} GPUs`, t('cards:gpuInventoryHistory.free', 'Free')]
-                        return [`${value} GPUs`, String(name)]
-                      }}
-                    />
-                    <Legend
-                      wrapperStyle={CHART_LEGEND_WRAPPER_STYLE}
-                      iconType="rect"
-                      formatter={(value: string) => {
-                        if (value === 'allocated') return t('cards:gpuInventoryHistory.inUse', 'In Use')
-                        if (value === 'free') return t('cards:gpuInventoryHistory.free', 'Free')
-                        return value
-                      }}
-                    />
-
-                    {/* Render per-type areas or aggregate */}
-                    {chartMode === 'by-type' && chartGPUTypes.length > 0 ? (
-                      <>
-                        {(chartGPUTypes || []).map((typeName, idx) => (
-                          <Area
-                            key={typeName}
-                            type="stepAfter"
-                            dataKey={typeName}
-                            stackId="1"
-                            stroke={getTypeColor(idx)}
-                            strokeWidth={2}
-                            fill={`url(#gpuHist_${idx})`}
-                            name={typeName}
-                          />
-                        ))}
-                        <Area
-                          type="stepAfter"
-                          dataKey="free"
-                          stackId="1"
-                          stroke={FREE_AREA_COLOR}
-                          strokeWidth={2}
-                          fill="url(#gpuHistFree)"
-                          name="free"
-                        />
-                      </>
-                    ) : (
-                      <>
-                        <Area
-                          type="stepAfter"
-                          dataKey="allocated"
-                          stackId="1"
-                          stroke="#9333ea"
-                          strokeWidth={2}
-                          fill="url(#gpuHistAllocated)"
-                          name="allocated"
-                        />
-                        <Area
-                          type="stepAfter"
-                          dataKey="free"
-                          stackId="1"
-                          stroke={FREE_AREA_COLOR}
-                          strokeWidth={2}
-                          fill="url(#gpuHistFree)"
-                          name="free"
-                        />
-                      </>
-                    )}
-                  </AreaChart>
-                </ResponsiveContainer>
+                <GPUInventoryChart
+                  displayChartData={displayChartData}
+                  chartMode={chartMode}
+                  chartGPUTypes={chartGPUTypes}
+                  t={t}
+                />
               </div>
             )}
           </>

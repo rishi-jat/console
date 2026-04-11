@@ -1,7 +1,8 @@
-import { useState, useMemo } from 'react'
-import { X, CheckCircle, AlertTriangle, WifiOff, Pencil, ChevronRight, ChevronDown, Layers, Server, Network, HardDrive, Box, FolderOpen, Loader2, Cpu, MemoryStick, Database, Wand2, Stethoscope, Wrench, Bot, ExternalLink } from 'lucide-react'
+import { useState } from 'react'
+import { X, CheckCircle, AlertTriangle, WifiOff, Pencil, Trash2, ChevronRight, ChevronDown, Layers, Server, Network, HardDrive, Box, FolderOpen, Loader2, Cpu, MemoryStick, Database, Wand2, Stethoscope, Wrench, Bot, ExternalLink } from 'lucide-react'
 import { BaseModal } from '../../lib/modals'
 import { useClusterHealth, usePodIssues, useDeploymentIssues, useGPUNodes, useNodes, useNamespaceStats, useDeployments, useClusters } from '../../hooks/useMCP'
+import { isClusterUnreachable, isClusterHealthy } from './utils'
 import { useDrillDownActions } from '../../hooks/useDrillDown'
 import { useMissions } from '../../hooks/useMissions'
 import { emitClusterAction } from '../../lib/analytics'
@@ -14,6 +15,7 @@ import { CloudProviderIcon, detectCloudProvider as detectCloudProviderShared, ge
 import { useTranslation } from 'react-i18next'
 import { StatusBadge } from '../ui/StatusBadge'
 import { Button } from '../ui/Button'
+import { ClusterStatusDetails } from './ClusterStatusDetails'
 
 // Cloud provider types
 type CloudProvider = 'eks' | 'gke' | 'aks' | 'openshift' | 'oci' | 'alibaba' | 'digitalocean' | 'rancher' | 'coreweave' | 'kind' | 'minikube' | 'k3s' | 'unknown'
@@ -88,9 +90,14 @@ interface ClusterDetailModalProps {
   clusterUser?: string  // Optional kubeconfig user for provider detection
   onClose: () => void
   onRename?: (clusterName: string) => void
+  /**
+   * Invoked when the user clicks "Remove cluster" on an unreachable cluster (#5901).
+   * Only rendered when the cluster is unreachable and backed by a kubeconfig context.
+   */
+  onRemove?: (clusterName: string) => void
 }
 
-export function ClusterDetailModal({ clusterName, clusterUser, onClose, onRename }: ClusterDetailModalProps) {
+export function ClusterDetailModal({ clusterName, clusterUser, onClose, onRename, onRemove }: ClusterDetailModalProps) {
   const { t } = useTranslation()
   const { health, isLoading } = useClusterHealth(clusterName)
   const { deduplicatedClusters, clusters: rawClusters } = useClusters()
@@ -105,7 +112,7 @@ export function ClusterDetailModal({ clusterName, clusterUser, onClose, onRename
 
   // Get cached cluster info for distribution detection (lastUpdated via parent refresh cycle)
   // First try deduplicated clusters, then raw clusters, also check aliases
-  const clusterInfo = useMemo(() => {
+  const clusterInfo = (() => {
     // Direct match in deduplicated clusters
     let found = deduplicatedClusters.find(c => c.name === clusterName)
     if (found) return found
@@ -114,10 +121,10 @@ export function ClusterDetailModal({ clusterName, clusterUser, onClose, onRename
     if (found) return found
     // Fallback to raw clusters
     return rawClusters.find(c => c.name === clusterName)
-  }, [deduplicatedClusters, rawClusters, clusterName])
+  })()
 
   // Build a map of raw cluster names to deduplicated primary names for GPU deduplication
-  const clusterNameMap = useMemo(() => {
+  const clusterNameMap = (() => {
     const map: Record<string, string> = {}
     deduplicatedClusters.forEach(c => {
       map[c.name] = c.name // Primary maps to itself
@@ -126,10 +133,10 @@ export function ClusterDetailModal({ clusterName, clusterUser, onClose, onRename
       })
     })
     return map
-  }, [deduplicatedClusters])
+  })()
 
   // Deduplicate GPU nodes by name to avoid counting same physical node twice
-  const deduplicatedGpuNodes = useMemo(() => {
+  const deduplicatedGpuNodes = (() => {
     const seenNodes = new Map<string, typeof gpuNodes[0]>()
     gpuNodes.forEach(node => {
       const nodeKey = node.name
@@ -140,7 +147,7 @@ export function ClusterDetailModal({ clusterName, clusterUser, onClose, onRename
       }
     })
     return Array.from(seenNodes.values())
-  }, [gpuNodes, clusterNameMap])
+  })()
 
   const [showAllNamespaces, setShowAllNamespaces] = useState(false)
   const [showPodsByNamespace, setShowPodsByNamespace] = useState(false)
@@ -196,8 +203,7 @@ Please analyze this cluster and provide:
         clusterName,
         health,
         podIssuesCount: podIssues.length,
-        deploymentIssuesCount: clusterDeploymentIssues.length,
-      }
+        deploymentIssuesCount: clusterDeploymentIssues.length }
     })
     onClose()
   }
@@ -229,23 +235,18 @@ After I approve, help me execute the repairs step by step.`,
       context: {
         clusterName,
         podIssues: podIssues.slice(0, 10),
-        deploymentIssues: clusterDeploymentIssues.slice(0, 10),
-      }
+        deploymentIssues: clusterDeploymentIssues.slice(0, 10) }
     })
     onClose()
   }
 
-  // Determine cluster status - use same logic as utils.ts
-  // Only mark as unreachable when we have confirmed unreachable status, not when loading
-  const isUnreachable = health ? (
-    health.reachable === false ||
-    (health.errorType && ['timeout', 'network', 'certificate'].includes(health.errorType)) ||
-    health.nodeCount === 0
-  ) : false
-  const isHealthy = !isLoading && !isUnreachable && health?.healthy !== false
+  // Determine cluster status using the SAME shared helpers as the list view
+  // so that health badges are always consistent (#5487).
+  const isUnreachable = clusterInfo ? isClusterUnreachable(clusterInfo) : false
+  const isHealthy = clusterInfo ? isClusterHealthy(clusterInfo) : (!isLoading && health?.healthy !== false)
 
   // Group GPUs by type for summary
-  const gpuByType = useMemo(() => {
+  const gpuByType = (() => {
     const map: Record<string, { total: number; allocated: number; nodes: typeof clusterGPUs }> = {}
     clusterGPUs.forEach(node => {
       const type = node.gpuType || 'Unknown'
@@ -257,7 +258,7 @@ After I approve, help me execute the repairs step by step.`,
       map[type].nodes.push(node)
     })
     return map
-  }, [clusterGPUs])
+  })()
 
   // Show modal immediately with loading state for data - don't block on isLoading
   return (
@@ -329,11 +330,59 @@ After I approve, help me execute the repairs step by step.`,
                 <Pencil className="w-4 h-4" />
               </button>
             )}
+            {/* Remove cluster button — only for unreachable clusters (#5901).
+                Only shown for kubeconfig-backed clusters where the `/kubeconfig/remove`
+                endpoint can actually delete the entry. */}
+            {onRemove && isUnreachable && (clusterInfo?.source === 'kubeconfig' || !clusterInfo?.source) && (
+              <button
+                onClick={() => onRemove(clusterName)}
+                className="p-1.5 rounded hover:bg-red-500/20 text-muted-foreground hover:text-red-400"
+                title={t('cluster.removeCluster')}
+                aria-label={t('cluster.removeCluster')}
+                data-testid="cluster-detail-remove-button"
+              >
+                <Trash2 className="w-4 h-4" />
+              </button>
+            )}
           </div>
           <button onClick={onClose} className="text-muted-foreground hover:text-foreground">
             <X className="w-5 h-5" />
           </button>
         </div>
+
+        {/* Status details — surfaces unreachable reason (#5925),
+            external reachability (#5926) and freshness (#5927). */}
+        {clusterInfo && (
+          <ClusterStatusDetails cluster={clusterInfo} className="mb-4" />
+        )}
+
+        {/* Remove offline cluster affordance (#5901) —
+            surfaces the `/kubeconfig/remove` endpoint (added in #5658) as a
+            discoverable primary action on the cluster detail modal. Only shown
+            when the cluster is unreachable AND is kubeconfig-backed AND the
+            parent provided a remove handler. */}
+        {onRemove && isUnreachable && (clusterInfo?.source === 'kubeconfig' || !clusterInfo?.source) && (
+          <div className="mb-6 flex items-start gap-3 p-4 rounded-lg bg-red-500/5 border border-red-500/20">
+            <WifiOff className="w-5 h-5 text-red-400 flex-shrink-0 mt-0.5" aria-hidden="true" />
+            <div className="flex-1 min-w-0">
+              <h3 className="text-sm font-medium text-foreground mb-1">
+                {t('clusterDetail.offlineRemoveTitle')}
+              </h3>
+              <p className="text-xs text-muted-foreground">
+                {t('clusterDetail.offlineRemoveDesc')}
+              </p>
+            </div>
+            <Button
+              variant="danger"
+              size="sm"
+              onClick={() => onRemove(clusterName)}
+              icon={<Trash2 className="w-3.5 h-3.5" />}
+              data-testid="cluster-detail-remove-cta"
+            >
+              {t('cluster.removeCluster')}
+            </Button>
+          </div>
+        )}
 
         {/* AI Actions */}
         <div className="mb-6 p-4 rounded-lg bg-gradient-to-r from-purple-500/10 to-blue-500/10 border border-purple-500/20">
@@ -664,8 +713,7 @@ After I approve, help me execute the repairs step by step.`,
                       status: issue.status,
                       restarts: issue.restarts,
                       issues: issue.issues,
-                      reason: issue.reason,
-                    })
+                      reason: issue.reason })
                     onClose()
                   }}
                   className="p-3 rounded-lg bg-red-500/10 border border-red-500/20 cursor-pointer hover:bg-red-500/20 transition-colors"
@@ -694,8 +742,7 @@ After I approve, help me execute the repairs step by step.`,
                       replicas: issue.replicas,
                       readyReplicas: issue.readyReplicas,
                       reason: issue.reason,
-                      message: issue.message,
-                    })
+                      message: issue.message })
                     onClose()
                   }}
                   className="p-3 rounded-lg bg-red-500/10 border border-red-500/20 cursor-pointer hover:bg-red-500/20 transition-colors"
@@ -828,8 +875,7 @@ After I approve, help me execute the repairs step by step.`,
           nodes={clusterNodes.map(n => ({
             name: n.name,
             cpuCapacity: parseInt(n.cpuCapacity) || 0,
-            cpuAllocatable: parseInt(n.cpuCapacity) || 0,
-          }))}
+            cpuAllocatable: parseInt(n.cpuCapacity) || 0 }))}
           isLoading={nodesLoading}
           onClose={() => setShowCPUDetail(false)}
         />
@@ -855,8 +901,7 @@ After I approve, help me execute the repairs step by step.`,
             return {
               name: n.name,
               memoryCapacityGB: memGB,
-              memoryAllocatableGB: memGB,
-            }
+              memoryAllocatableGB: memGB }
           })}
           isLoading={nodesLoading}
           onClose={() => setShowMemoryDetail(false)}
@@ -881,8 +926,7 @@ After I approve, help me execute the repairs step by step.`,
             }
             return {
               name: n.name,
-              ephemeralStorageGB: storageGB,
-            }
+              ephemeralStorageGB: storageGB }
           })}
           isLoading={nodesLoading}
           onClose={() => setShowStorageDetail(false)}
@@ -896,8 +940,7 @@ After I approve, help me execute the repairs step by step.`,
             name: n.name,
             gpuType: n.gpuType || 'Unknown',
             gpuCount: n.gpuCount,
-            gpuAllocated: n.gpuAllocated,
-          }))}
+            gpuAllocated: n.gpuAllocated }))}
           isLoading={isLoading}
           onClose={() => setShowGPUDetail(false)}
         />

@@ -6,6 +6,12 @@ import { useCardExpanded } from './CardWrapper'
 import { useReportCardDataState } from './CardDataContext'
 import { emitGameStarted, emitGameEnded } from '../../lib/analytics'
 import { useGameKeyTracking } from '../../hooks/useGameKeys'
+import { safeGet, safeSet } from '../../lib/safeLocalStorage'
+
+/** localStorage key for Kube Galaga high score persistence */
+const HIGH_SCORE_KEY = 'kubeGalagaHighScore'
+/** Numeric base for parseInt when reading the stored high score */
+const PARSE_INT_RADIX = 10
 
 // Game constants
 const CANVAS_WIDTH = 400
@@ -32,8 +38,7 @@ const COLORS = {
   enemy2: '#ffd93d',
   enemy3: '#6bcb77',
   enemyBullet: '#ff4444',
-  star: '#ffffff',
-}
+  star: '#ffffff' }
 
 interface Bullet {
   x: number
@@ -69,8 +74,8 @@ export function KubeGalaga() {
   const [lives, setLives] = useState(3)
   const [level, setLevel] = useState(1)
   const [highScore, setHighScore] = useState(() => {
-    const saved = localStorage.getItem('kubeGalagaHighScore')
-    return saved ? parseInt(saved, 10) : 0
+    const saved = safeGet(HIGH_SCORE_KEY)
+    return saved ? parseInt(saved, PARSE_INT_RADIX) : 0
   })
 
   const playerRef = useRef({ x: CANVAS_WIDTH / 2 - PLAYER_WIDTH / 2, y: CANVAS_HEIGHT - 50 })
@@ -85,17 +90,16 @@ export function KubeGalaga() {
   const invincibleRef = useRef(0)
 
   // Initialize stars
-  const initStars = useCallback(() => {
+  const initStars = () => {
     starsRef.current = Array.from({ length: 50 }, () => ({
       x: Math.random() * CANVAS_WIDTH,
       y: Math.random() * CANVAS_HEIGHT,
       speed: 0.5 + Math.random() * 1.5,
-      size: Math.random() > 0.7 ? 2 : 1,
-    }))
-  }, [])
+      size: Math.random() > 0.7 ? 2 : 1 }))
+  }
 
   // Initialize enemies
-  const initEnemies = useCallback((lvl: number) => {
+  const initEnemies = (lvl: number) => {
     const enemies: Enemy[] = []
     const rows = Math.min(ENEMY_ROWS + Math.floor(lvl / 3), 6)
     const cols = Math.min(ENEMY_COLS + Math.floor(lvl / 2), 10)
@@ -110,13 +114,12 @@ export function KubeGalaga() {
           diving: false,
           diveX: 0,
           diveY: 0,
-          diveAngle: 0,
-        })
+          diveAngle: 0 })
       }
     }
     enemiesRef.current = enemies
     enemyDirRef.current = 1
-  }, [])
+  }
 
   // Initialize game
   const initGame = useCallback(() => {
@@ -131,18 +134,17 @@ export function KubeGalaga() {
   }, [initStars, initEnemies])
 
   // Shoot bullet
-  const shoot = useCallback(() => {
+  const shoot = () => {
     if (shootCooldownRef.current > 0) return
     bulletsRef.current.push({
       x: playerRef.current.x + PLAYER_WIDTH / 2 - BULLET_WIDTH / 2,
       y: playerRef.current.y - BULLET_HEIGHT,
-      isEnemy: false,
-    })
+      isEnemy: false })
     shootCooldownRef.current = 15
-  }, [])
+  }
 
   // Enemy shoots
-  const enemyShoot = useCallback(() => {
+  const enemyShoot = () => {
     const aliveEnemies = enemiesRef.current.filter(e => e.alive)
     if (aliveEnemies.length === 0) return
 
@@ -152,13 +154,12 @@ export function KubeGalaga() {
       bulletsRef.current.push({
         x: shooter.x + ENEMY_WIDTH / 2 - 2,
         y: shooter.y + ENEMY_HEIGHT,
-        isEnemy: true,
-      })
+        isEnemy: true })
     }
-  }, [level])
+  }
 
   // Start enemy dive
-  const startDive = useCallback(() => {
+  const startDive = () => {
     const aliveEnemies = enemiesRef.current.filter(e => e.alive && !e.diving)
     if (aliveEnemies.length === 0) return
 
@@ -169,7 +170,7 @@ export function KubeGalaga() {
       diver.diveY = diver.y
       diver.diveAngle = 0
     }
-  }, [level])
+  }
 
   // Update game state
   const update = useCallback(() => {
@@ -299,7 +300,7 @@ export function KubeGalaga() {
             if (l <= 1) {
               if (score > highScore) {
                 setHighScore(score)
-                localStorage.setItem('kubeGalagaHighScore', score.toString())
+                safeSet(HIGH_SCORE_KEY, score.toString())
               }
               setGameState('gameover')
               emitGameEnded('kube_galaga', 'loss', score)
@@ -329,7 +330,7 @@ export function KubeGalaga() {
             if (l <= 1) {
               if (score > highScore) {
                 setHighScore(score)
-                localStorage.setItem('kubeGalagaHighScore', score.toString())
+                safeSet(HIGH_SCORE_KEY, score.toString())
               }
               setGameState('gameover')
               emitGameEnded('kube_galaga', 'loss', score)
@@ -353,7 +354,7 @@ export function KubeGalaga() {
     if (lowestEnemy > CANVAS_HEIGHT - 100) {
       if (score > highScore) {
         setHighScore(score)
-        localStorage.setItem('kubeGalagaHighScore', score.toString())
+        safeSet(HIGH_SCORE_KEY, score.toString())
       }
       setGameState('gameover')
       emitGameEnded('kube_galaga', 'loss', score)

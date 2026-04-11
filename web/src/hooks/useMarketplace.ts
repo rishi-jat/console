@@ -1,9 +1,11 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { api } from '../lib/api'
 import { addCustomTheme, removeCustomTheme } from '../lib/themes'
 import { emitMarketplaceInstall, emitMarketplaceRemove, emitMarketplaceInstallFailed } from '../lib/analytics'
 import { FETCH_EXTERNAL_TIMEOUT_MS } from '../lib/constants/network'
 import { isCardTypeRegistered } from '../components/cards/cardRegistry'
+import { STORAGE_KEY_MAIN_DASHBOARD_CARDS } from '../lib/constants/storage'
+import { getDefaultCardSize } from '../components/dashboard/dashboardUtils'
 
 const REGISTRY_URL = 'https://raw.githubusercontent.com/kubestellar/console-marketplace/main/registry.json'
 const CACHE_KEY = 'kc-marketplace-registry'
@@ -83,8 +85,7 @@ const MARKETPLACE_TO_CARD_TYPE: Record<string, string> = {
   'cncf-lima': 'lima_status',
   'cncf-openfeature': 'openfeature_status',
   'cncf-strimzi': 'strimzi_status',
-  'cncf-thanos': 'thanos_status',
-}
+  'cncf-thanos': 'thanos_status' }
 
 /**
  * Reconcile marketplace items against the local card registry.
@@ -99,8 +100,7 @@ function reconcileImplementedCards(items: MarketplaceItem[]): MarketplaceItem[] 
     return {
       ...item,
       status: 'available' as MarketplaceItemStatus,
-      tags: item.tags.filter(t => t !== 'help-wanted'),
-    }
+      tags: item.tags.filter(t => t !== 'help-wanted') }
   })
 }
 
@@ -118,6 +118,7 @@ interface InstalledEntry {
 type InstalledMap = Record<string, InstalledEntry>
 
 function loadInstalled(): InstalledMap {
+  if (typeof window === 'undefined') return {}
   try {
     return JSON.parse(localStorage.getItem(INSTALLED_KEY) || '{}')
   } catch {
@@ -176,8 +177,7 @@ export function useMarketplace() {
 
     try {
       const response = await fetch(REGISTRY_URL, {
-        signal: AbortSignal.timeout(FETCH_EXTERNAL_TIMEOUT_MS),
-      })
+        signal: AbortSignal.timeout(FETCH_EXTERNAL_TIMEOUT_MS) })
       if (!response.ok) throw new Error(`Registry fetch failed: ${response.status}`)
       const data: MarketplaceRegistry = await response.json()
       setItems(mergeRegistryItems(data))
@@ -186,8 +186,7 @@ export function useMarketplace() {
       try {
         localStorage.setItem(CACHE_KEY, JSON.stringify({
           data,
-          fetchedAt: Date.now(),
-        }))
+          fetchedAt: Date.now() }))
       } catch {
         // Cache write failed — non-critical
       }
@@ -203,37 +202,36 @@ export function useMarketplace() {
     fetchRegistry()
   }, [fetchRegistry])
 
-  const markInstalled = useCallback((itemId: string, entry: InstalledEntry) => {
+  const markInstalled = (itemId: string, entry: InstalledEntry) => {
     setInstalledItems(prev => {
       const next = { ...prev, [itemId]: entry }
       saveInstalled(next)
       return next
     })
-  }, [])
+  }
 
-  const markUninstalled = useCallback((itemId: string) => {
+  const markUninstalled = (itemId: string) => {
     setInstalledItems(prev => {
       const next = { ...prev }
       delete next[itemId]
       saveInstalled(next)
       return next
     })
-  }, [])
+  }
 
-  const isInstalled = useCallback((itemId: string): boolean => {
+  const isInstalled = (itemId: string): boolean => {
     return itemId in installedItems
-  }, [installedItems])
+  }
 
-  const getInstalledDashboardId = useCallback((itemId: string): string | undefined => {
+  const getInstalledDashboardId = (itemId: string): string | undefined => {
     return installedItems[itemId]?.dashboardId
-  }, [installedItems])
+  }
 
-  const installItem = useCallback(async (item: MarketplaceItem): Promise<InstallResult> => {
+  const installItem = async (item: MarketplaceItem): Promise<InstallResult> => {
     let response: Response
     try {
       response = await fetch(item.downloadUrl, {
-        signal: AbortSignal.timeout(FETCH_EXTERNAL_TIMEOUT_MS),
-      })
+        signal: AbortSignal.timeout(FETCH_EXTERNAL_TIMEOUT_MS) })
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'network error'
       emitMarketplaceInstallFailed(item.type, item.name, msg)
@@ -246,7 +244,27 @@ export function useMarketplace() {
     const json = await response.json()
 
     if (item.type === 'card-preset') {
-      // Dispatch event for the active dashboard to pick up
+      // Persist card directly to the main dashboard localStorage so it
+      // survives navigation. Previously this only dispatched a CustomEvent
+      // that was lost if the Dashboard component wasn't mounted (#4780).
+      const { card_type, config, title } = json as { card_type?: string; config?: Record<string, unknown>; title?: string }
+      if (card_type) {
+        const size = getDefaultCardSize(card_type)
+        const newCard = {
+          id: `mp-${Date.now()}`,
+          card_type,
+          config: config || {},
+          title,
+          position: { x: 0, y: 0, ...size } }
+        try {
+          const raw = localStorage.getItem(STORAGE_KEY_MAIN_DASHBOARD_CARDS)
+          const existing = raw ? JSON.parse(raw) : []
+          const cards = Array.isArray(existing) ? existing : []
+          cards.unshift(newCard)
+          localStorage.setItem(STORAGE_KEY_MAIN_DASHBOARD_CARDS, JSON.stringify(cards))
+        } catch { /* localStorage unavailable — card will appear on next dashboard load */ }
+      }
+      // Also dispatch event so a mounted Dashboard picks up changes immediately
       window.dispatchEvent(new CustomEvent('kc-add-card-from-marketplace', { detail: json }))
       markInstalled(item.id, { installedAt: new Date().toISOString(), type: 'card-preset' })
       emitMarketplaceInstall(item.type, item.name)
@@ -266,13 +284,12 @@ export function useMarketplace() {
     markInstalled(item.id, {
       dashboardId: data?.id,
       installedAt: new Date().toISOString(),
-      type: 'dashboard',
-    })
+      type: 'dashboard' })
     emitMarketplaceInstall(item.type, item.name)
     return { type: 'dashboard', data }
-  }, [markInstalled])
+  }
 
-  const removeItem = useCallback(async (item: MarketplaceItem) => {
+  const removeItem = async (item: MarketplaceItem) => {
     const entry = installedItems[item.id]
     if (!entry) return
 
@@ -287,36 +304,40 @@ export function useMarketplace() {
 
     markUninstalled(item.id)
     emitMarketplaceRemove(item.type)
-  }, [installedItems, markUninstalled])
-
-  // Collect all unique tags (exclude internal tags when not in help-wanted mode)
-  const allTags = Array.from(new Set(items.flatMap(i => i.tags))).sort()
-
-  // CNCF stats
-  const cncfItems = items.filter(i => i.cncfProject)
-  const cncfStats: CNCFStats = {
-    total: cncfItems.length,
-    completed: cncfItems.filter(i => (i.status || 'available') === 'available').length,
-    helpWanted: cncfItems.filter(i => i.status === 'help-wanted').length,
-    graduatedTotal: cncfItems.filter(i => i.cncfProject?.maturity === 'graduated').length,
-    incubatingTotal: cncfItems.filter(i => i.cncfProject?.maturity === 'incubating').length,
   }
 
+  // Collect all unique tags (exclude internal tags when not in help-wanted mode)
+  const allTags = useMemo(() =>
+    Array.from(new Set(items.flatMap(i => i.tags))).sort(),
+    [items])
+
+  // CNCF items derived from the full item list
+  const cncfItems = useMemo(() => items.filter(i => i.cncfProject), [items])
+
+  // CNCF stats
+  const cncfStats: CNCFStats = useMemo(() => ({
+    total: cncfItems.length,
+    completed: cncfItems.filter((i: MarketplaceItem) => (i.status || 'available') === 'available').length,
+    helpWanted: cncfItems.filter((i: MarketplaceItem) => i.status === 'help-wanted').length,
+    graduatedTotal: cncfItems.filter((i: MarketplaceItem) => i.cncfProject?.maturity === 'graduated').length,
+    incubatingTotal: cncfItems.filter((i: MarketplaceItem) => i.cncfProject?.maturity === 'incubating').length }),
+    [cncfItems])
+
   // CNCF categories (for grouping in help-wanted view)
-  const cncfCategories = Array.from(new Set(
-    cncfItems.map(i => i.cncfProject!.category)
-  )).sort()
+  const cncfCategories = useMemo(() => Array.from(new Set(
+    cncfItems.map((i: MarketplaceItem) => i.cncfProject!.category)
+  )).sort(), [cncfItems])
 
   // Type counts (for filter badges)
-  const typeCounts: Record<string, number> = {
+  const typeCounts: Record<string, number> = useMemo(() => ({
     all: items.length,
     dashboard: items.filter(i => i.type === 'dashboard').length,
     'card-preset': items.filter(i => i.type === 'card-preset').length,
-    theme: items.filter(i => i.type === 'theme').length,
-  }
+    theme: items.filter(i => i.type === 'theme').length }),
+    [items])
 
   // Filter items
-  const filteredItems = items.filter(item => {
+  const filteredItems = useMemo(() => items.filter(item => {
     const matchesSearch = !searchQuery ||
       item.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
       item.description.toLowerCase().includes(searchQuery.toLowerCase())
@@ -324,7 +345,7 @@ export function useMarketplace() {
     const matchesType = !selectedType || item.type === selectedType
     const matchesStatus = !showHelpWanted || item.status === 'help-wanted'
     return matchesSearch && matchesTag && matchesType && matchesStatus
-  })
+  }), [items, searchQuery, selectedTag, selectedType, showHelpWanted])
 
   return {
     items: filteredItems,
@@ -347,8 +368,7 @@ export function useMarketplace() {
     removeItem,
     isInstalled,
     getInstalledDashboardId,
-    refresh: () => fetchRegistry(true),
-  }
+    refresh: () => fetchRegistry(true) }
 }
 
 // --- Author Profile Hook ---
@@ -376,8 +396,7 @@ export function useAuthorProfile(handle?: string, enabled = false): AuthorProfil
     consolePRs: 0,
     marketplacePRs: 0,
     coins: 0,
-    loading: false,
-  })
+    loading: false })
   const fetchedRef = useRef<string | null>(null)
 
   useEffect(() => {
@@ -394,8 +413,7 @@ export function useAuthorProfile(handle?: string, enabled = false): AuthorProfil
             consolePRs: parsed.consolePRs,
             marketplacePRs: parsed.marketplacePRs,
             coins: total * COINS_PER_PR,
-            loading: false,
-          })
+            loading: false })
           fetchedRef.current = handle
           return
         }
@@ -432,8 +450,7 @@ export function useAuthorProfile(handle?: string, enabled = false): AuthorProfil
         consolePRs,
         marketplacePRs,
         coins: total * COINS_PER_PR,
-        loading: false,
-      }
+        loading: false }
       setProfile(result)
 
       // Cache the result

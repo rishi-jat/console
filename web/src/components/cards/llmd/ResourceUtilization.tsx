@@ -1,15 +1,12 @@
 /**
- * ResourceUtilization — Experiment comparison at selected QPS
+ * ResourceUtilization -- Experiment comparison at selected QPS
  *
  * Horizontal grouped bar chart comparing all experiment variants.
  * Shows throughput, TTFT, TPOT, and p99 latency side by side.
  * Highlight best-in-class for each metric.
  */
 import { useState, useMemo } from 'react'
-import {
-  BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer,
-  CartesianGrid, Cell,
-} from 'recharts'
+import ReactECharts from 'echarts-for-react'
 import { BarChart3, Trophy } from 'lucide-react'
 import { RefreshIndicator } from '../../ui/RefreshIndicator'
 import { useReportCardDataState } from '../CardDataContext'
@@ -18,8 +15,7 @@ import { generateBenchmarkReports } from '../../../lib/llmd/benchmarkMockData'
 import {
   groupByExperiment,
   getFilterOptions,
-  CONFIG_TYPE_COLORS,
-} from '../../../lib/llmd/benchmarkDataUtils'
+  CONFIG_TYPE_COLORS } from '../../../lib/llmd/benchmarkDataUtils'
 import { useTranslation } from 'react-i18next'
 import { StatusBadge } from '../../ui/StatusBadge'
 
@@ -41,52 +37,26 @@ interface BarEntry {
   fullVariant: string
 }
 
-function CustomTooltip({ active, payload }: {
-  active?: boolean
-  payload?: Array<{ payload: BarEntry }>
-}) {
-  if (!active || !payload?.[0]) return null
-  const p = payload[0].payload
-  return (
-    <div className="bg-background backdrop-blur-sm border border-border rounded-lg p-3 shadow-xl text-xs">
-      <div className="text-white font-medium mb-1">{p.fullVariant}</div>
-      <div className="flex items-center gap-2">
-        <span className="text-foreground">Value:</span>
-        <span className="font-mono text-white">{p.value.toLocaleString(undefined, { maximumFractionDigits: 1 })}</span>
-        {p.isBest && <Trophy size={12} className="text-yellow-400" />}
-      </div>
-      <div className="mt-1 text-muted-foreground">
-        Type: <span style={{ color: CONFIG_TYPE_COLORS[p.config as keyof typeof CONFIG_TYPE_COLORS] }}>{p.config}</span>
-      </div>
-    </div>
-  )
-}
-
 export function ResourceUtilization() {
   const { t } = useTranslation()
   const { data: liveReports, isDemoFallback, isFailed, consecutiveFailures, isLoading, isRefreshing, lastRefresh } = useCachedBenchmarkReports()
-  const effectiveReports = useMemo(
-    () => isDemoFallback ? generateBenchmarkReports() : (liveReports ?? []),
-    [isDemoFallback, liveReports]
-  )
+  const effectiveReports = isDemoFallback ? generateBenchmarkReports() : (liveReports ?? [])
   useReportCardDataState({
     isDemoData: isDemoFallback, isFailed, consecutiveFailures, isLoading, isRefreshing,
-    hasData: effectiveReports.length > 0,
-  })
+    hasData: effectiveReports.length > 0 })
 
-  const filterOpts = useMemo(() => getFilterOptions(effectiveReports), [effectiveReports])
+  const filterOpts = getFilterOptions(effectiveReports)
   const [mode, setMode] = useState<MetricMode>('throughput')
   const [category, setCategory] = useState<string>('all')
-  const groups = useMemo(() => groupByExperiment(effectiveReports, {
-    category: category !== 'all' ? category : undefined,
-  }), [effectiveReports, category])
+  const groups = groupByExperiment(effectiveReports, {
+    category: category !== 'all' ? category : undefined })
 
   // Get available QPS values and default to highest
-  const qpsValues = useMemo(() => {
+  const qpsValues = (() => {
     const vals = new Set<number>()
     groups.forEach(g => g.points.forEach(p => vals.add(p.qps)))
     return [...vals].sort((a, b) => a - b)
-  }, [groups])
+  })()
 
   const [qpsFilter, setQpsFilter] = useState<number>(0)
   const effectiveQps = qpsFilter || (qpsValues.length > 0 ? qpsValues[qpsValues.length - 1] : 0)
@@ -106,8 +76,7 @@ export function ResourceUtilization() {
         config: g.config,
         color: g.color,
         isBest: false,
-        fullVariant: `${g.category} / ${g.shortVariant}`,
-      })
+        fullVariant: `${g.category} / ${g.shortVariant}` })
     }
 
     // Mark best
@@ -125,9 +94,76 @@ export function ResourceUtilization() {
         modeInfo.higherBetter ? b.value - a.value : a.value - b.value
       ),
       bestVariant: best?.name ?? '',
-      bestValue: best?.value ?? 0,
-    }
+      bestValue: best?.value ?? 0 }
   }, [groups, effectiveQps, mode, modeInfo.higherBetter])
+
+  const chartOption = useMemo(() => {
+    if (data.length === 0) return {}
+    return {
+      backgroundColor: 'transparent',
+      grid: { left: 145, right: 20, top: 5, bottom: 20 },
+      xAxis: {
+        type: 'value' as const,
+        axisLabel: {
+          color: '#71717a',
+          fontSize: 10,
+          formatter: (v: number) => v >= 1000 ? `${(v / 1000).toFixed(1)}k` : String(Math.round(v)),
+        },
+        axisLine: { lineStyle: { color: '#71717a' } },
+        axisTick: { show: false },
+        splitLine: { lineStyle: { color: '#334155', opacity: 0.3 } },
+      },
+      yAxis: {
+        type: 'category' as const,
+        data: data.map(d => d.name),
+        axisLabel: {
+          color: (value: string) => {
+            const entry = data.find(d => d.name === value)
+            return entry?.isBest ? '#fbbf24' : '#a1a1aa'
+          },
+          fontSize: 10,
+          fontWeight: ((value: string) => {
+            const entry = data.find(d => d.name === value)
+            return entry?.isBest ? 600 : 400
+          }) as unknown as number,
+          formatter: (value: string) => {
+            const entry = data.find(d => d.name === value)
+            return entry?.isBest ? `\u2605 ${value}` : value
+          },
+        },
+        axisLine: { lineStyle: { color: '#71717a' } },
+        axisTick: { show: false },
+      },
+      tooltip: {
+        backgroundColor: 'rgba(15,23,42,0.95)',
+        borderColor: 'rgba(100,116,139,0.3)',
+        textStyle: { color: '#fff', fontSize: 12 },
+        formatter: (params: { data: { entry: BarEntry } }) => {
+          const e = params.data?.entry
+          if (!e) return ''
+          return `<div style="font-weight:500;margin-bottom:4px">${e.fullVariant}</div>` +
+            `<div>Value: <span style="font-family:monospace">${e.value.toLocaleString(undefined, { maximumFractionDigits: 1 })}</span>` +
+            `${e.isBest ? ' \u2B50' : ''}</div>` +
+            `<div style="color:#a1a1aa;margin-top:2px">Type: <span style="color:${CONFIG_TYPE_COLORS[e.config as keyof typeof CONFIG_TYPE_COLORS]}">${e.config}</span></div>`
+        },
+      },
+      series: [{
+        type: 'bar',
+        barSize: 16,
+        data: data.map(entry => ({
+          value: entry.value,
+          entry,
+          itemStyle: {
+            color: entry.color,
+            opacity: entry.isBest ? 1 : 0.7,
+            borderColor: entry.isBest ? '#fbbf24' : 'transparent',
+            borderWidth: entry.isBest ? 2 : 0,
+            borderRadius: [0, 4, 4, 0],
+          },
+        })),
+      }],
+    }
+  }, [data])
 
   return (
     <div className="p-4 h-full flex flex-col">
@@ -187,49 +223,12 @@ export function ResourceUtilization() {
       {/* Chart */}
       <div className="flex-1 min-h-0" style={{ minHeight: 200 }}>
         {data.length > 0 ? (
-          <ResponsiveContainer width="100%" height="100%">
-            <BarChart data={data} layout="vertical" margin={{ top: 5, right: 20, bottom: 5, left: 10 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#334155" strokeOpacity={0.3} horizontal={false} />
-              <XAxis
-                type="number"
-                stroke="#71717a"
-                fontSize={10}
-                tickFormatter={(v: number) => v >= 1000 ? `${(v / 1000).toFixed(1)}k` : String(Math.round(v))}
-              />
-              <YAxis
-                type="category"
-                dataKey="name"
-                stroke="#71717a"
-                fontSize={10}
-                width={140}
-                tick={(props: Record<string, unknown>) => {
-                  const x = Number(props.x ?? 0)
-                  const y = Number(props.y ?? 0)
-                  const value = String((props.payload as { value?: string })?.value ?? '')
-                  const entry = data.find(d => d.name === value)
-                  return (
-                    <g>
-                      <text x={x} y={y} dy={4} textAnchor="end" fill={entry?.isBest ? '#fbbf24' : '#a1a1aa'} fontSize={10} fontWeight={entry?.isBest ? 600 : 400}>
-                        {entry?.isBest ? '\u2605 ' : ''}{value}
-                      </text>
-                    </g>
-                  )
-                }}
-              />
-              <Tooltip content={<CustomTooltip />} cursor={{ fill: 'rgba(255,255,255,0.05)' }} />
-              <Bar dataKey="value" radius={[0, 4, 4, 0]} barSize={16}>
-                {data.map((entry, i) => (
-                  <Cell
-                    key={i}
-                    fill={entry.color}
-                    fillOpacity={entry.isBest ? 1 : 0.7}
-                    stroke={entry.isBest ? '#fbbf24' : 'none'}
-                    strokeWidth={entry.isBest ? 2 : 0}
-                  />
-                ))}
-              </Bar>
-            </BarChart>
-          </ResponsiveContainer>
+          <ReactECharts
+            option={chartOption}
+            style={{ height: '100%', width: '100%' }}
+            notMerge={true}
+            opts={{ renderer: 'svg' }}
+          />
         ) : (
           <div className="h-full flex items-center justify-center text-muted-foreground text-sm">
             No data for QPS {effectiveQps}

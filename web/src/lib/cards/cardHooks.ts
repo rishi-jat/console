@@ -81,14 +81,55 @@ export interface UseCardFiltersResult<T> {
   /** Set cluster filter dropdown visibility */
   setShowClusterFilter: (show: boolean) => void
   /** Ref for cluster filter dropdown (for click outside handling) */
-  clusterFilterRef: React.RefObject<HTMLDivElement>
+  clusterFilterRef: React.RefObject<HTMLDivElement | null>
   /** Ref for cluster filter button (portal positioning) */
-  clusterFilterBtnRef: React.RefObject<HTMLButtonElement>
+  clusterFilterBtnRef: React.RefObject<HTMLButtonElement | null>
   /** Computed fixed position for portaled cluster dropdown */
   dropdownStyle: { top: number; left: number } | null
 }
 
 const LOCAL_FILTER_STORAGE_PREFIX = 'kubestellar-card-filter:'
+
+/**
+ * localStorage prefix for the per-card "show N items" dropdown selection.
+ * Persisting this fixes #6070 — without it, the user picks "show 5" but on
+ * remount the value resets to whatever `defaultLimit` the card passed in,
+ * which (combined with cards that ignore their config prop entirely) made
+ * cards render with way more rows than the user asked for.
+ */
+const LOCAL_LIMIT_STORAGE_PREFIX = 'kubestellar-card-limit:'
+
+/** Read a persisted itemsPerPage value for a card. Returns null if missing,
+ * unparseable, or no storageKey provided. Accepts the literal string
+ * 'unlimited' as a valid value. */
+function readPersistedItemsPerPage(
+  storageKey: string | undefined,
+): number | 'unlimited' | null {
+  if (!storageKey) return null
+  try {
+    const raw = localStorage.getItem(`${LOCAL_LIMIT_STORAGE_PREFIX}${storageKey}`)
+    if (raw == null) return null
+    if (raw === 'unlimited') return 'unlimited'
+    const n = Number(raw)
+    return Number.isFinite(n) && n > 0 ? n : null
+  } catch {
+    return null
+  }
+}
+
+/** Persist an itemsPerPage value. No-op when storageKey is missing or
+ * localStorage throws (private mode, quota, SSR). */
+function writePersistedItemsPerPage(
+  storageKey: string | undefined,
+  value: number | 'unlimited',
+): void {
+  if (!storageKey) return
+  try {
+    localStorage.setItem(`${LOCAL_LIMIT_STORAGE_PREFIX}${storageKey}`, String(value))
+  } catch {
+    // Ignore — non-fatal.
+  }
+}
 
 export function useCardFilters<T>(
   items: T[],
@@ -102,8 +143,7 @@ export function useCardFilters<T>(
     filterByStatus,
     customFilter: globalCustomFilter,
     selectedClusters,
-    isAllClustersSelected,
-  } = useGlobalFilters()
+    isAllClustersSelected } = useGlobalFilters()
   const { deduplicatedClusters } = useClusters()
 
   // Local state with localStorage persistence for cluster filter
@@ -129,15 +169,14 @@ export function useCardFilters<T>(
       const rect = clusterFilterBtnRef.current.getBoundingClientRect()
       setDropdownStyle({
         top: rect.bottom + 4,
-        left: Math.max(8, rect.right - 192),
-      })
+        left: Math.max(8, rect.right - 192) })
     } else {
       setDropdownStyle(null)
     }
   }, [showClusterFilter])
 
   // Wrapper to persist to localStorage
-  const setLocalClusterFilter = useCallback((clusters: string[]) => {
+  const setLocalClusterFilter = (clusters: string[]) => {
     setLocalClusterFilterState(clusters)
     if (storageKey) {
       if (clusters.length === 0) {
@@ -146,7 +185,7 @@ export function useCardFilters<T>(
         localStorage.setItem(`${LOCAL_FILTER_STORAGE_PREFIX}${storageKey}`, JSON.stringify(clusters))
       }
     }
-  }, [storageKey])
+  }
 
   // Close dropdown when clicking outside (check both container and portaled dropdown)
   useEffect(() => {
@@ -164,22 +203,22 @@ export function useCardFilters<T>(
   }, [])
 
   // Available clusters for local filter dropdown (includes unreachable for display)
-  const availableClusters = useMemo(() => {
+  const availableClusters = (() => {
     if (isAllClustersSelected) return deduplicatedClusters
     return deduplicatedClusters.filter(c => selectedClusters.includes(c.name))
-  }, [deduplicatedClusters, selectedClusters, isAllClustersSelected])
+  })()
 
-  const toggleClusterFilter = useCallback((clusterName: string) => {
+  const toggleClusterFilter = (clusterName: string) => {
     if (localClusterFilter.includes(clusterName)) {
       setLocalClusterFilter(localClusterFilter.filter(c => c !== clusterName))
     } else {
       setLocalClusterFilter([...localClusterFilter, clusterName])
     }
-  }, [localClusterFilter, setLocalClusterFilter])
+  }
 
-  const clearClusterFilter = useCallback(() => {
+  const clearClusterFilter = () => {
     setLocalClusterFilter([])
-  }, [setLocalClusterFilter])
+  }
 
   // Apply all filters
   const filtered = useMemo(() => {
@@ -267,8 +306,7 @@ export function useCardFilters<T>(
     setShowClusterFilter,
     clusterFilterRef,
     clusterFilterBtnRef,
-    dropdownStyle,
-  }
+    dropdownStyle }
 }
 
 // ============================================================================
@@ -300,11 +338,11 @@ export function useCardSort<T, S extends string>(
   const [sortBy, setSortBy] = useState<S>(defaultField)
   const [sortDirection, setSortDirection] = useState<SortDirection>(defaultDirection ?? 'asc')
 
-  const toggleSortDirection = useCallback(() => {
+  const toggleSortDirection = () => {
     setSortDirection(prev => (prev === 'asc' ? 'desc' : 'asc'))
-  }, [])
+  }
 
-  const sorted = useMemo(() => {
+  const sorted = (() => {
     const comparator = comparators?.[sortBy]
     if (!comparator) return items
 
@@ -314,7 +352,7 @@ export function useCardSort<T, S extends string>(
     })
 
     return sortedItems
-  }, [items, sortBy, sortDirection, comparators])
+  })()
 
   return {
     sorted,
@@ -322,8 +360,7 @@ export function useCardSort<T, S extends string>(
     setSortBy,
     sortDirection,
     setSortDirection,
-    toggleSortDirection,
-  }
+    toggleSortDirection }
 }
 
 // ============================================================================
@@ -333,6 +370,8 @@ export function useCardSort<T, S extends string>(
 export interface UseCardDataResult<T, S extends string> {
   /** Final processed items (filtered, sorted, paginated) */
   items: T[]
+  /** All items after filtering and sorting, before pagination */
+  allFilteredItems: T[]
   /** Total items before pagination */
   totalItems: number
   /** Current page */
@@ -352,11 +391,41 @@ export interface UseCardDataResult<T, S extends string> {
   /** All sort controls */
   sorting: Omit<UseCardSortResult<T, S>, 'sorted'>
   /** Ref for the paginated items container (attach to keep height stable across pages) */
-  containerRef: React.RefObject<HTMLDivElement>
+  containerRef: React.RefObject<HTMLDivElement | null>
   /** Style to apply to the paginated items container for stable height */
   containerStyle: React.CSSProperties | undefined
 }
 
+/**
+ * Canonical card data hook. Consolidates filtering, sorting, and pagination
+ * for list-based cards.
+ *
+ * **Canonical destructuring pattern** (used by ~41 cards — please match this
+ * for new cards so controls render consistently, see issue #6121):
+ *
+ * ```tsx
+ * const {
+ *   paginatedItems,
+ *   currentPage,
+ *   totalPages,
+ *   itemsPerPage,
+ *   goToPage,
+ *   setItemsPerPage,
+ *   needsPagination,
+ *   filters,
+ *   sorting,
+ *   containerRef,
+ *   containerStyle,
+ * } = useCardData(items, {
+ *   filter: { searchFields: ['name'] },
+ *   sort: { defaultKey: 'name', comparators: { name: commonComparators.string(x => x.name) } },
+ *   defaultLimit: 5,
+ * })
+ * ```
+ *
+ * Prefer this shape over ad-hoc destructuring; the order above matches
+ * `<CardControlsRow>` + `<CardPaginationFooter>` prop layouts.
+ */
 export function useCardData<T, S extends string = string>(
   items: T[],
   config: CardDataConfig<T, S>
@@ -364,7 +433,20 @@ export function useCardData<T, S extends string = string>(
   // Guard against undefined config — dynamic/custom cards may pass undefined at runtime
   const safeConfig = config ?? ({} as CardDataConfig<T, S>)
   const { filter: filterConfig, sort: sortConfig, defaultLimit = 5 } = safeConfig
-  const [itemsPerPage, setItemsPerPage] = useState<number | 'unlimited'>(defaultLimit)
+  // Persist the "show N" dropdown selection per card so it survives remounts
+  // (#6070). The storageKey is the same identifier used by the cluster filter
+  // persistence above, so each card type gets its own slot.
+  const limitStorageKey = filterConfig?.storageKey
+  const [itemsPerPage, setItemsPerPageState] = useState<number | 'unlimited'>(
+    () => readPersistedItemsPerPage(limitStorageKey) ?? defaultLimit,
+  )
+  const setItemsPerPage = useCallback(
+    (limit: number | 'unlimited') => {
+      setItemsPerPageState(limit)
+      writePersistedItemsPerPage(limitStorageKey, limit)
+    },
+    [limitStorageKey],
+  )
   const [currentPage, setCurrentPage] = useState(1)
 
   // Apply filters
@@ -380,28 +462,32 @@ export function useCardData<T, S extends string = string>(
   const totalPages = Math.ceil(sorted.length / effectivePerPage) || 1
   const needsPagination = itemsPerPage !== 'unlimited' && sorted.length > effectivePerPage
 
-  // Reset page when filters change
+  // Reset page when filter inputs change (but not on data updates or sort changes).
+  // Previously included `filtered` in deps, which caused page resets on progressive
+  // data loading (e.g., per-cluster OPA checks updating statuses) (#5664).
   useEffect(() => {
     setCurrentPage(1)
-  }, [filterResult.search, filterResult.localClusterFilter, sortResult.sortBy])
+  }, [filterResult.search, filterResult.localClusterFilter])
 
-  // Ensure current page is valid
+  // Ensure current page is valid when total pages shrinks (e.g., data errors).
+  // Only depend on totalPages — including currentPage causes an infinite loop
+  // when totalPages=0 because Math.max(1,0)=1 and 1>0 is always true (#5762).
   useEffect(() => {
-    if (currentPage > totalPages) {
-      setCurrentPage(Math.max(1, totalPages))
+    if (totalPages > 0 && currentPage > totalPages) {
+      setCurrentPage(totalPages)
     }
-  }, [currentPage, totalPages])
+  }, [totalPages]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Paginate
-  const paginatedItems = useMemo(() => {
+  const paginatedItems = (() => {
     if (itemsPerPage === 'unlimited') return sorted
     const start = (currentPage - 1) * effectivePerPage
     return sorted.slice(start, start + effectivePerPage)
-  }, [sorted, currentPage, effectivePerPage, itemsPerPage])
+  })()
 
-  const goToPage = useCallback((page: number) => {
+  const goToPage = (page: number) => {
     setCurrentPage(Math.max(1, Math.min(page, totalPages)))
-  }, [totalPages])
+  }
 
   // Stable height for paginated container
   const { containerRef, containerStyle } = useStablePageHeight(effectivePerPage, sorted.length)
@@ -413,6 +499,8 @@ export function useCardData<T, S extends string = string>(
 
   return {
     items: paginatedItems,
+    /** All items after filtering and sorting, before pagination */
+    allFilteredItems: sorted,
     totalItems: sorted.length,
     currentPage,
     totalPages,
@@ -423,8 +511,7 @@ export function useCardData<T, S extends string = string>(
     filters,
     sorting,
     containerRef,
-    containerStyle,
-  }
+    containerStyle }
 }
 
 // ============================================================================
@@ -438,9 +525,28 @@ export function useCardData<T, S extends string = string>(
 const COLLAPSED_STORAGE_KEY = 'kubestellar-collapsed-cards'
 
 /**
+ * Module-level subscriber set so multiple `useCardCollapse` instances for the
+ * same `cardId` stay in sync when one of them toggles. Without this, calling
+ * the hook from both `SortableCard` (for grid layout) and `CardWrapper`
+ * (for the actual collapse UI) would leave them out of sync — collapsing the
+ * card via the chevron button would not update the grid row span (#6072).
+ */
+const collapseSubscribers = new Set<() => void>()
+
+function subscribeToCollapseChanges(listener: () => void): () => void {
+  collapseSubscribers.add(listener)
+  return () => { collapseSubscribers.delete(listener) }
+}
+
+function notifyCollapseSubscribers() {
+  collapseSubscribers.forEach((listener) => listener())
+}
+
+/**
  * Get all collapsed card IDs from localStorage
  */
 function getCollapsedCards(): Set<string> {
+  if (typeof window === 'undefined') return new Set()
   try {
     const stored = localStorage.getItem(COLLAPSED_STORAGE_KEY)
     return stored ? new Set(JSON.parse(stored)) : new Set()
@@ -450,10 +556,16 @@ function getCollapsedCards(): Set<string> {
 }
 
 /**
- * Save collapsed card IDs to localStorage
+ * Save collapsed card IDs to localStorage and notify all hook subscribers so
+ * that components reading the same card's collapse state stay in sync.
  */
 function saveCollapsedCards(collapsed: Set<string>) {
-  localStorage.setItem(COLLAPSED_STORAGE_KEY, JSON.stringify([...collapsed]))
+  try {
+    localStorage.setItem(COLLAPSED_STORAGE_KEY, JSON.stringify([...collapsed]))
+  } catch {
+    // Silently ignore quota errors or private browsing restrictions
+  }
+  notifyCollapseSubscribers()
 }
 
 export interface UseCardCollapseResult {
@@ -485,7 +597,22 @@ export function useCardCollapse(
     return collapsed.has(cardId) || defaultCollapsed
   })
 
-  const setCollapsed = useCallback((collapsed: boolean) => {
+  // Subscribe to module-level collapse changes so multiple hook instances
+  // for the same cardId stay in sync (#6072 — grid row span needs to react
+  // when the chevron button inside CardWrapper toggles collapse). Only the
+  // persisted localStorage value drives this sync — `defaultCollapsed` is
+  // intentionally not consulted here so that an explicit user expand/collapse
+  // is never overwritten by the seed default after the first toggle.
+  useEffect(() => {
+    const sync = () => {
+      const collapsed = getCollapsedCards()
+      const next = collapsed.has(cardId)
+      setIsCollapsedState((prev) => (prev === next ? prev : next))
+    }
+    return subscribeToCollapseChanges(sync)
+  }, [cardId])
+
+  const setCollapsed = (collapsed: boolean) => {
     setIsCollapsedState(collapsed)
     const collapsedCards = getCollapsedCards()
     if (collapsed) {
@@ -494,22 +621,21 @@ export function useCardCollapse(
       collapsedCards.delete(cardId)
     }
     saveCollapsedCards(collapsedCards)
-  }, [cardId])
+  }
 
-  const toggleCollapsed = useCallback(() => {
+  const toggleCollapsed = () => {
     setCollapsed(!isCollapsed)
-  }, [isCollapsed, setCollapsed])
+  }
 
-  const expand = useCallback(() => setCollapsed(false), [setCollapsed])
-  const collapse = useCallback(() => setCollapsed(true), [setCollapsed])
+  const expand = () => setCollapsed(false)
+  const collapse = () => setCollapsed(true)
 
   return {
     isCollapsed,
     toggleCollapsed,
     setCollapsed,
     expand,
-    collapse,
-  }
+    collapse }
 }
 
 /**
@@ -519,23 +645,23 @@ export function useCardCollapse(
 export function useCardCollapseAll(cardIds: string[]) {
   const [collapsedSet, setCollapsedSet] = useState<Set<string>>(() => getCollapsedCards())
 
-  const collapseAll = useCallback(() => {
+  const collapseAll = () => {
     const newSet = new Set([...collapsedSet, ...cardIds])
     setCollapsedSet(newSet)
     saveCollapsedCards(newSet)
-  }, [cardIds, collapsedSet])
+  }
 
-  const expandAll = useCallback(() => {
+  const expandAll = () => {
     const newSet = new Set([...collapsedSet].filter(id => !cardIds.includes(id)))
     setCollapsedSet(newSet)
     saveCollapsedCards(newSet)
-  }, [cardIds, collapsedSet])
+  }
 
-  const isCardCollapsed = useCallback((cardId: string) => {
+  const isCardCollapsed = (cardId: string) => {
     return collapsedSet.has(cardId)
-  }, [collapsedSet])
+  }
 
-  const toggleCard = useCallback((cardId: string) => {
+  const toggleCard = (cardId: string) => {
     const newSet = new Set(collapsedSet)
     if (newSet.has(cardId)) {
       newSet.delete(cardId)
@@ -544,7 +670,7 @@ export function useCardCollapseAll(cardIds: string[]) {
     }
     setCollapsedSet(newSet)
     saveCollapsedCards(newSet)
-  }, [collapsedSet])
+  }
 
   const allCollapsed = cardIds.every(id => collapsedSet.has(id))
   const allExpanded = cardIds.every(id => !collapsedSet.has(id))
@@ -556,8 +682,7 @@ export function useCardCollapseAll(cardIds: string[]) {
     toggleCard,
     allCollapsed,
     allExpanded,
-    collapsedCount: cardIds.filter(id => collapsedSet.has(id)).length,
-  }
+    collapsedCount: cardIds.filter(id => collapsedSet.has(id)).length }
 }
 
 // ============================================================================
@@ -591,8 +716,7 @@ export const commonComparators = {
     const aDate = new Date(a[field] as string | Date).getTime()
     const bDate = new Date(b[field] as string | Date).getTime()
     return aDate - bDate
-  },
-}
+  } }
 
 // ============================================================================
 // useCardFlash - Track significant data changes for card flash animation
@@ -648,8 +772,7 @@ export function useCardFlash(
     threshold = 0.1,
     cooldown = 5000,
     increaseType = 'info',
-    decreaseType = 'info',
-  } = options
+    decreaseType = 'info' } = options
 
   const [flashType, setFlashType] = useState<CardFlashType>('none')
   const prevValueRef = useRef<number | null>(null)
@@ -744,8 +867,7 @@ export function useSingleSelectCluster<T>(
     filterByStatus,
     customFilter: globalCustomFilter,
     selectedClusters,
-    isAllClustersSelected,
-  } = useGlobalFilters()
+    isAllClustersSelected } = useGlobalFilters()
   const { deduplicatedClusters } = useClusters()
 
   const [search, setSearch] = useState('')
@@ -857,8 +979,7 @@ export function useSingleSelectCluster<T>(
     isOutsideGlobalFilter,
     filtered,
     search,
-    setSearch,
-  }
+    setSearch }
 }
 
 // ============================================================================
@@ -880,15 +1001,17 @@ export interface UseChartFiltersResult {
   /** Available clusters for filtering (respects global filter, includes health info) */
   availableClusters: ClusterWithHealth[]
   /** Filtered cluster list based on global + local filters */
-  filteredClusters: { name: string; reachable?: boolean; cpuCores?: number; cpuRequestsCores?: number; memoryGB?: number; memoryRequestsGB?: number; podCount?: number; nodeCount?: number }[]
+  // cpuUsageCores/memoryUsageGB/metricsAvailable are needed so cards can
+  // distinguish actual metrics-server usage from allocated requests (#6105).
+  filteredClusters: { name: string; reachable?: boolean; cpuCores?: number; cpuRequestsCores?: number; memoryGB?: number; memoryRequestsGB?: number; podCount?: number; nodeCount?: number; cpuUsageCores?: number; memoryUsageGB?: number; metricsAvailable?: boolean }[]
   /** Whether cluster filter dropdown is showing */
   showClusterFilter: boolean
   /** Set cluster filter dropdown visibility */
   setShowClusterFilter: (show: boolean) => void
   /** Ref for cluster filter dropdown (for click outside handling) */
-  clusterFilterRef: React.RefObject<HTMLDivElement>
+  clusterFilterRef: React.RefObject<HTMLDivElement | null>
   /** Ref for cluster filter button (portal positioning) */
-  clusterFilterBtnRef: React.RefObject<HTMLButtonElement>
+  clusterFilterBtnRef: React.RefObject<HTMLButtonElement | null>
   /** Computed fixed position for portaled cluster dropdown */
   dropdownStyle: { top: number; left: number } | null
 }
@@ -927,8 +1050,7 @@ export function useChartFilters(
       const rect = clusterFilterBtnRef.current.getBoundingClientRect()
       setDropdownStyle({
         top: rect.bottom + 4,
-        left: Math.max(8, rect.right - 192),
-      })
+        left: Math.max(8, rect.right - 192) })
     } else {
       setDropdownStyle(null)
     }
@@ -1001,8 +1123,7 @@ export function useChartFilters(
     setShowClusterFilter,
     clusterFilterRef,
     clusterFilterBtnRef,
-    dropdownStyle,
-  }
+    dropdownStyle }
 }
 
 // ============================================================================
@@ -1152,8 +1273,7 @@ export function useCascadingSelection(
     selectedSecond,
     setSelectedSecond,
     availableFirstLevel,
-    resetSelection,
-  }
+    resetSelection }
 }
 
 // ============================================================================
@@ -1216,6 +1336,5 @@ export function useStatusFilter<S extends string>(
 
   return {
     statusFilter,
-    setStatusFilter,
-  }
+    setStatusFilter }
 }

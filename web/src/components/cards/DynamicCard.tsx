@@ -22,23 +22,40 @@ import { useTranslation } from 'react-i18next'
  * Registered as `dynamic_card` in CARD_COMPONENTS.
  * config.dynamicCardId determines which definition to render.
  */
-export function DynamicCard({ config = {} }: CardComponentProps) {
-  const dynamicCardId = (config?.dynamicCardId as string) || ''
+export function DynamicCard({ config }: CardComponentProps) {
+  const { t } = useTranslation('cards')
+  // Guard against undefined/null config to prevent crashes (#4910)
+  const safeConfig = config ?? {}
+  const dynamicCardId = (typeof safeConfig.dynamicCardId === 'string' ? safeConfig.dynamicCardId : '') || ''
   const definition = getDynamicCard(dynamicCardId)
 
   // Report demo state: dynamic cards depend on the agent for live API data
   const { shouldUseDemoData } = useCardDemoState({ requires: 'agent' })
   useReportCardDataState({ isDemoData: shouldUseDemoData, isFailed: false, consecutiveFailures: 0 })
 
+  if (!dynamicCardId) {
+    return (
+      <div className="h-full flex flex-col items-center justify-center p-4 text-center">
+        <AlertTriangle className="w-8 h-8 text-yellow-400 mb-2" />
+        <p className="text-sm text-muted-foreground">
+          {t('dynamicCard.missingConfig')}
+        </p>
+        <p className="text-xs text-muted-foreground/70 mt-1">
+          {t('dynamicCard.noDynamicCardId')}
+        </p>
+      </div>
+    )
+  }
+
   if (!definition) {
     return (
       <div className="h-full flex flex-col items-center justify-center p-4 text-center">
         <AlertTriangle className="w-8 h-8 text-yellow-400 mb-2" />
         <p className="text-sm text-muted-foreground">
-          Dynamic card "{dynamicCardId}" not found.
+          {t('dynamicCard.notFound', { id: dynamicCardId })}
         </p>
         <p className="text-xs text-muted-foreground/70 mt-1">
-          The card definition may have been deleted or not loaded yet.
+          {t('dynamicCard.notFoundHint')}
         </p>
       </div>
     )
@@ -49,12 +66,12 @@ export function DynamicCard({ config = {} }: CardComponentProps) {
       {definition.tier === 'tier1' && definition.cardDefinition ? (
         <Tier1CardRuntime definition={definition} cardDefinition={definition.cardDefinition} />
       ) : definition.tier === 'tier2' && definition.sourceCode ? (
-        <Tier2CardRuntime definition={definition} config={config} />
+        <Tier2CardRuntime definition={definition} config={safeConfig} />
       ) : (
         <div className="h-full flex flex-col items-center justify-center p-4 text-center">
           <AlertTriangle className="w-8 h-8 text-yellow-400 mb-2" />
           <p className="text-sm text-muted-foreground">
-            Invalid card definition: missing {definition.tier === 'tier1' ? 'card definition' : 'source code'}.
+            {t('dynamicCard.invalidDefinition', { missing: definition.tier === 'tier1' ? t('dynamicCard.cardDefinition') : t('dynamicCard.sourceCode') })}
           </p>
         </div>
       )}
@@ -72,18 +89,36 @@ export interface Tier1Props {
 }
 
 export function Tier1CardRuntime({ cardDefinition }: Tier1Props) {
-  const { t } = useTranslation()
+  const { t } = useTranslation(['cards', 'common'])
   const [apiData, setApiData] = useState<Record<string, unknown>[]>([])
   const [apiLoading, setApiLoading] = useState(false)
   const [apiError, setApiError] = useState<string | null>(null)
 
-  const data = cardDefinition.dataSource === 'static'
-    ? (cardDefinition.staticData || [])
-    : apiData
+  // Compute validation flags up front (before hooks) to keep hook call order stable (#4910)
+  const isInvalidConfig = !cardDefinition || typeof cardDefinition !== 'object'
+  const isMissingEndpoint = !isInvalidConfig && cardDefinition?.dataSource === 'api' && !cardDefinition?.apiEndpoint
+
+  const data = isInvalidConfig
+    ? []
+    : (cardDefinition?.dataSource === 'static'
+        ? (cardDefinition?.staticData || [])
+        : apiData)
+
+  // Report loading state to CardWrapper so header stays in sync with body (#5208)
+  const isApiSource = !isInvalidConfig && cardDefinition?.dataSource === 'api'
+  useReportCardDataState({
+    isFailed: !!apiError,
+    consecutiveFailures: apiError ? 1 : 0,
+    errorMessage: apiError ?? undefined,
+    isLoading: isApiSource ? apiLoading : false,
+    hasData: isApiSource ? apiData.length > 0 : true,
+    isDemoData: false,
+  })
 
   // Fetch API data if needed
   useEffect(() => {
-    if (cardDefinition.dataSource !== 'api' || !cardDefinition.apiEndpoint) return
+    if (isInvalidConfig || isMissingEndpoint) return
+    if (cardDefinition?.dataSource !== 'api' || !cardDefinition?.apiEndpoint) return
 
     let cancelled = false
     setApiLoading(true)
@@ -109,10 +144,11 @@ export function Tier1CardRuntime({ cardDefinition }: Tier1Props) {
       })
 
     return () => { cancelled = true }
-  }, [cardDefinition.dataSource, cardDefinition.apiEndpoint])
+  }, [isInvalidConfig, isMissingEndpoint, cardDefinition?.dataSource, cardDefinition?.apiEndpoint])
 
-  // useCardData for search/pagination
-  const searchFields = (cardDefinition.searchFields || []) as (keyof Record<string, unknown>)[]
+  // useCardData for search/pagination — guard against undefined cardDefinition
+  const searchFields = ((cardDefinition?.searchFields || []) as (keyof Record<string, unknown>)[])
+  const defaultSortField = searchFields.length > 0 ? (searchFields[0] as string) : 'name'
   const {
     items,
     totalItems,
@@ -124,17 +160,40 @@ export function Tier1CardRuntime({ cardDefinition }: Tier1Props) {
     filters,
     containerRef,
     containerStyle,
-  } = useCardData(data, {
+  } = useCardData(data ?? [], {
     filter: {
       searchFields,
     },
     sort: {
-      defaultField: searchFields[0] as string || 'name',
-      defaultDirection: 'asc',
+      defaultField: defaultSortField,
+      defaultDirection: 'asc' as const,
       comparators: {},
     },
-    defaultLimit: cardDefinition.defaultLimit || 5,
+    defaultLimit: cardDefinition?.defaultLimit ?? 5,
   })
+
+  // Validation-based early returns — placed after all hooks to respect Rules of Hooks (#4910)
+  if (isInvalidConfig) {
+    return (
+      <div className="h-full flex flex-col items-center justify-center p-4 text-center">
+        <AlertTriangle className="w-6 h-6 text-yellow-400 mb-2" />
+        <p className="text-sm text-yellow-400">{t('dynamicCard.invalidCardConfig')}</p>
+        <p className="text-xs text-muted-foreground mt-1">{t('dynamicCard.invalidCardConfigHint')}</p>
+      </div>
+    )
+  }
+
+  if (isMissingEndpoint) {
+    return (
+      <div className="h-full flex flex-col items-center justify-center p-4 text-center">
+        <AlertTriangle className="w-6 h-6 text-yellow-400 mb-2" />
+        <p className="text-sm text-yellow-400">{t('dynamicCard.missingEndpoint')}</p>
+        <p className="text-xs text-muted-foreground mt-1">
+          {t('dynamicCard.missingEndpointHint')}
+        </p>
+      </div>
+    )
+  }
 
   if (apiLoading) {
     return (
@@ -150,7 +209,7 @@ export function Tier1CardRuntime({ cardDefinition }: Tier1Props) {
     return (
       <div className="h-full flex flex-col items-center justify-center p-4 text-center">
         <AlertTriangle className="w-6 h-6 text-yellow-400 mb-2" />
-        <p className="text-sm text-yellow-400">Failed to fetch data</p>
+        <p className="text-sm text-yellow-400">{t('dynamicCard.fetchFailed')}</p>
         <p className="text-xs text-muted-foreground mt-1">{apiError}</p>
       </div>
     )
@@ -196,7 +255,7 @@ export function Tier1CardRuntime({ cardDefinition }: Tier1Props) {
             type="text"
             value={filters.search}
             onChange={(e) => filters.setSearch(e.target.value)}
-            placeholder={t('common.search')}
+            placeholder={t('common:common.search')}
             className="w-full text-xs px-2.5 py-1.5 rounded-md bg-secondary/50 border border-border text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:ring-1 focus:ring-purple-500/50"
           />
         </div>
@@ -209,7 +268,7 @@ export function Tier1CardRuntime({ cardDefinition }: Tier1Props) {
             <div className="flex flex-col items-center justify-center py-6 text-center">
               <Database className="w-6 h-6 text-muted-foreground/40 mb-2" />
               <p className="text-sm text-muted-foreground">
-                {cardDefinition.emptyMessage || 'No data available.'}
+                {cardDefinition.emptyMessage || t('dynamicCard.noDataAvailable')}
               </p>
             </div>
           ) : (
@@ -287,11 +346,24 @@ export interface Tier2Props {
   config?: Record<string, unknown>
 }
 
-export function Tier2CardRuntime({ definition, config = {} }: Tier2Props) {
+export function Tier2CardRuntime({ definition, config }: Tier2Props) {
+  const { t } = useTranslation('cards')
+  // Guard against undefined config (#4910)
+  const safeConfig = config ?? {}
   const [CardComponent, setCardComponent] = useState<CardComponent | null>(null)
   const [compiling, setCompiling] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const cleanupRef = useRef<(() => void) | undefined>()
+  const cleanupRef = useRef<(() => void) | undefined>(undefined)
+
+  // Report internal loading/error state to CardWrapper so header stays in sync (#5208)
+  useReportCardDataState({
+    isFailed: !!error,
+    consecutiveFailures: error ? 1 : 0,
+    errorMessage: error ?? undefined,
+    isLoading: compiling,
+    hasData: !!CardComponent,
+    isDemoData: false,
+  })
 
   useEffect(() => {
     let cancelled = false
@@ -300,39 +372,47 @@ export function Tier2CardRuntime({ definition, config = {} }: Tier2Props) {
       setCompiling(true)
       setError(null)
 
-      const source = definition.sourceCode
-      if (!source) {
-        setError('No source code provided.')
-        setCompiling(false)
-        return
-      }
-
-      // Check for cached compiled code
-      let code = definition.compiledCode
-      if (!code) {
-        const result = await compileCardCode(source)
-        if (cancelled) return
-        if (result.error) {
-          setError(result.error)
+      try {
+        const source = definition.sourceCode
+        if (!source) {
+          setError('No source code provided.')
           setCompiling(false)
           return
         }
-        code = result.code!
-      }
 
-      // Create component from compiled code
-      const componentResult = createCardComponent(code)
-      if (cancelled) return
+        // Check for cached compiled code
+        let code = definition.compiledCode
+        if (!code) {
+          const result = await compileCardCode(source)
+          if (cancelled) return
+          if (result.error) {
+            setError(result.error)
+            setCompiling(false)
+            return
+          }
+          code = result.code!
+        }
 
-      if (componentResult.error) {
-        setError(componentResult.error)
+        // Create component from compiled code
+        const componentResult = createCardComponent(code)
+        if (cancelled) return
+
+        if (componentResult.error) {
+          setError(componentResult.error)
+          setCompiling(false)
+          return
+        }
+
+        cleanupRef.current = componentResult.cleanup
+        setCardComponent(() => componentResult.component)
         setCompiling(false)
-        return
+      } catch (err) {
+        if (cancelled) return
+        const message = err instanceof Error ? err.message : String(err)
+        console.error(`[DynamicCard] Unexpected compile error:`, err)
+        setError(`Unexpected error: ${message}`)
+        setCompiling(false)
       }
-
-      cleanupRef.current = componentResult.cleanup
-      setCardComponent(() => componentResult.component)
-      setCompiling(false)
     }
 
     compile()
@@ -347,7 +427,7 @@ export function Tier2CardRuntime({ definition, config = {} }: Tier2Props) {
     return (
       <div className="h-full flex items-center justify-center">
         <Loader2 className="w-5 h-5 text-purple-400 animate-spin" />
-        <span className="ml-2 text-sm text-muted-foreground">Compiling card...</span>
+        <span className="ml-2 text-sm text-muted-foreground">{t('dynamicCard.compiling')}</span>
       </div>
     )
   }
@@ -356,7 +436,7 @@ export function Tier2CardRuntime({ definition, config = {} }: Tier2Props) {
     return (
       <div className="h-full flex flex-col items-center justify-center p-4 text-center">
         <AlertTriangle className="w-6 h-6 text-red-400 mb-2" />
-        <p className="text-sm text-red-400 font-medium">Compilation Error</p>
+        <p className="text-sm text-red-400 font-medium">{t('dynamicCard.compilationError')}</p>
         <p className="text-xs text-muted-foreground mt-1 max-w-sm font-mono break-words">
           {error}
         </p>
@@ -367,10 +447,10 @@ export function Tier2CardRuntime({ definition, config = {} }: Tier2Props) {
   if (!CardComponent) {
     return (
       <div className="h-full flex items-center justify-center">
-        <p className="text-sm text-muted-foreground">No component produced.</p>
+        <p className="text-sm text-muted-foreground">{t('dynamicCard.noComponent')}</p>
       </div>
     )
   }
 
-  return <CardComponent config={config} />
+  return <CardComponent config={safeConfig} />
 }

@@ -1,11 +1,18 @@
-import { useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useCachedPods } from '../../hooks/useCachedData'
 import { useCardLoadingState } from './CardDataContext'
+import { RefreshIndicator } from '../ui/RefreshIndicator'
+
+/** Namespaces that host DNS pods across distributions */
+const DNS_NAMESPACES = ['kube-system', 'openshift-dns']
+
+/** Pod name substrings that identify DNS pods */
+const DNS_POD_PATTERNS = ['coredns', 'kube-dns', 'dns-default']
 
 export function DNSHealth() {
   const { t } = useTranslation('cards')
-  const { pods, isLoading, isRefreshing, isDemoFallback, isFailed, consecutiveFailures } = useCachedPods(undefined, 'kube-system')
+  // Fetch from all namespaces so we catch DNS pods in both kube-system and openshift-dns
+  const { pods, isLoading, isRefreshing, isDemoFallback, isFailed, consecutiveFailures, lastRefresh: podsLastRefresh } = useCachedPods()
   const hasData = pods.length > 0
   const { showSkeleton } = useCardLoadingState({
     isLoading: isLoading && !hasData,
@@ -13,16 +20,16 @@ export function DNSHealth() {
     hasAnyData: hasData,
     isDemoData: isDemoFallback,
     isFailed,
-    consecutiveFailures,
-  })
+    consecutiveFailures })
 
-  const dnsPods = useMemo(() => {
-    return pods.filter(p =>
-      p.name?.includes('coredns') || p.name?.includes('kube-dns')
-    )
-  }, [pods])
+  const dnsPods = pods.filter(p => {
+      // Only consider pods in known DNS namespaces
+      if (!DNS_NAMESPACES.includes(p.namespace || '')) return false
+      const name = p.name?.toLowerCase() || ''
+      return DNS_POD_PATTERNS.some(pattern => name.includes(pattern))
+    })
 
-  const byCluster = useMemo(() => {
+  const byCluster = (() => {
     const map = new Map<string, typeof dnsPods>()
     for (const pod of dnsPods) {
       const cluster = pod.cluster || 'unknown'
@@ -30,7 +37,7 @@ export function DNSHealth() {
       map.get(cluster)!.push(pod)
     }
     return Array.from(map.entries()).sort(([a], [b]) => a.localeCompare(b))
-  }, [dnsPods])
+  })()
 
   if (showSkeleton) {
     return (
@@ -54,8 +61,18 @@ export function DNSHealth() {
 
   return (
     <div className="space-y-2 p-1">
-      <div className="flex items-center gap-2 text-xs text-muted-foreground mb-1">
-        <span>{t('dnsHealth.podsSummary', { pods: dnsPods.length, clusters: byCluster.length })}</span>
+      <div className="flex items-center justify-between gap-2 mb-1">
+        <div className="flex items-center gap-2 text-xs text-muted-foreground">
+          <span>{t('dnsHealth.podsSummary', { pods: dnsPods.length, clusters: byCluster.length })}</span>
+        </div>
+        {/* #6217 part 3: freshness indicator. */}
+        <RefreshIndicator
+          isRefreshing={isRefreshing}
+          lastUpdated={typeof podsLastRefresh === 'number' ? new Date(podsLastRefresh) : null}
+          size="sm"
+          showLabel={true}
+          staleThresholdMinutes={5}
+        />
       </div>
       {byCluster.map(([cluster, clusterPods]) => {
         const running = clusterPods.filter(p => p.status === 'Running')

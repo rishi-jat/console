@@ -17,21 +17,23 @@ import {
   WIDGET_STATS,
   WIDGET_TEMPLATES,
   type WidgetCardDefinition,
-  type WidgetTemplateDefinition,
-} from '../../lib/widgets/widgetRegistry'
+  type WidgetTemplateDefinition } from '../../lib/widgets/widgetRegistry'
 import { generateWidget, getWidgetFilename, type WidgetConfig } from '../../lib/widgets/codeGenerator'
 import { copyToClipboard } from '../../lib/clipboard'
+import { safeRevokeObjectURL } from '../../lib/download'
 
 interface WidgetExportModalProps {
   isOpen: boolean
   onClose: () => void
   cardType?: string
   mode?: 'card' | 'stat' | 'template' | 'picker'
+  /** When true, renders content inline without BaseModal wrapper (used by Console Studio) */
+  embedded?: boolean
 }
 
 type ExportTab = 'card' | 'stats' | 'templates'
 
-export function WidgetExportModal({ isOpen, onClose, cardType, mode: _mode = 'picker' }: WidgetExportModalProps) {
+export function WidgetExportModal({ isOpen, onClose, cardType, mode: _mode = 'picker', embedded = false }: WidgetExportModalProps) {
   const { t } = useTranslation('common')
   const [activeTab, setActiveTab] = useState<ExportTab>(cardType ? 'card' : 'templates')
   const [selectedCard, setSelectedCard] = useState<string | null>(cardType || null)
@@ -48,7 +50,7 @@ export function WidgetExportModal({ isOpen, onClose, cardType, mode: _mode = 'pi
   const [refreshInterval, setRefreshInterval] = useState(30)
   const [copied, setCopied] = useState(false)
   const [showCode, setShowCode] = useState(false)
-  const copiedTimerRef = useRef<ReturnType<typeof setTimeout>>()
+  const copiedTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined)
   const [isLoading, setIsLoading] = useState(false)
   const isOnPublicSite = window.location.hostname === 'console.kubestellar.io' || window.location.hostname.includes('netlify')
 
@@ -57,36 +59,33 @@ export function WidgetExportModal({ isOpen, onClose, cardType, mode: _mode = 'pi
   }, [])
 
   // Determine what we're exporting
-  const exportConfig = useMemo((): WidgetConfig | null => {
+  const exportConfig: WidgetConfig | null = (() => {
     if (activeTab === 'card' && selectedCard) {
       return {
-        type: 'card',
+        type: 'card' as const,
         cardType: selectedCard,
         apiEndpoint,
         refreshInterval: refreshInterval * 1000,
-        theme: 'dark',
-      }
+        theme: 'dark' as const }
     }
     if (activeTab === 'stats' && selectedStats.length > 0) {
       return {
-        type: 'stat',
+        type: 'stat' as const,
         statIds: selectedStats,
         apiEndpoint,
         refreshInterval: refreshInterval * 1000,
-        theme: 'dark',
-      }
+        theme: 'dark' as const }
     }
     if (activeTab === 'templates' && selectedTemplate) {
       return {
-        type: 'template',
+        type: 'template' as const,
         templateId: selectedTemplate,
         apiEndpoint,
         refreshInterval: refreshInterval * 1000,
-        theme: 'dark',
-      }
+        theme: 'dark' as const }
     }
     return null
-  }, [activeTab, selectedCard, selectedStats, selectedTemplate, apiEndpoint, refreshInterval])
+  })()
 
   // Generate widget code
   const widgetCode = useMemo(() => {
@@ -113,7 +112,7 @@ export function WidgetExportModal({ isOpen, onClose, cardType, mode: _mode = 'pi
     document.body.appendChild(a)
     a.click()
     document.body.removeChild(a)
-    URL.revokeObjectURL(url)
+    safeRevokeObjectURL(url)
     setIsLoading(false)
     emitWidgetDownloaded('uebersicht')
   }
@@ -134,15 +133,8 @@ export function WidgetExportModal({ isOpen, onClose, cardType, mode: _mode = 'pi
     )
   }
 
-  return (
-    <BaseModal isOpen={isOpen} onClose={onClose} size="lg" closeOnBackdrop={false}>
-      <BaseModal.Header
-        title={t('widgets.exportDesktopWidget')}
-        icon={Download}
-        onClose={onClose}
-      />
-      <BaseModal.Content>
-      <div className="flex flex-col max-h-[70vh]">
+  const widgetContent = (
+      <div className="flex flex-col">
         {/* Tabs */}
         <div className="flex border-b border-border mb-4">
           <button
@@ -237,7 +229,7 @@ export function WidgetExportModal({ isOpen, onClose, cardType, mode: _mode = 'pi
                   <label className="block text-xs text-muted-foreground">{t('widgets.apiEndpoint')}</label>
                   <div className="relative group">
                     <AlertTriangle className="w-3.5 h-3.5 text-yellow-400 cursor-help" />
-                    <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-64 p-2.5 rounded-lg bg-card border border-border shadow-xl text-xs text-muted-foreground opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50">
+                    <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-64 p-2.5 rounded-lg bg-card border border-border shadow-xl text-xs text-muted-foreground opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-dropdown">
                       Widgets require a locally installed or cluster-deployed Console. The API endpoint must match your deployment.
                       {isOnPublicSite && (
                         <a
@@ -365,6 +357,29 @@ export function WidgetExportModal({ isOpen, onClose, cardType, mode: _mode = 'pi
           </div>
         </div>
       </div>
+  )
+
+  // Embedded mode: render inline within Console Studio
+  if (embedded) {
+    return (
+      <div className="h-full flex flex-col overflow-hidden">
+        <div className="flex-1 overflow-y-auto p-4">
+          {widgetContent}
+        </div>
+      </div>
+    )
+  }
+
+  // Standard modal mode
+  return (
+    <BaseModal isOpen={isOpen} onClose={onClose} size="lg" closeOnBackdrop={false}>
+      <BaseModal.Header
+        title={t('widgets.exportDesktopWidget')}
+        icon={Download}
+        onClose={onClose}
+      />
+      <BaseModal.Content>
+        {widgetContent}
       </BaseModal.Content>
     </BaseModal>
   )
@@ -374,8 +389,7 @@ export function WidgetExportModal({ isOpen, onClose, cardType, mode: _mode = 'pi
 function TemplateCard({
   template,
   selected,
-  onSelect,
-}: {
+  onSelect }: {
   template: WidgetTemplateDefinition
   selected: boolean
   onSelect: () => void
@@ -417,8 +431,7 @@ function TemplateCard({
 function CardItem({
   card,
   selected,
-  onSelect,
-}: {
+  onSelect }: {
   card: WidgetCardDefinition
   selected: boolean
   onSelect: () => void
@@ -445,8 +458,7 @@ function CardItem({
 function StatItem({
   stat,
   selected,
-  onToggle,
-}: {
+  onToggle }: {
   stat: (typeof WIDGET_STATS)[keyof typeof WIDGET_STATS]
   selected: boolean
   onToggle: () => void
@@ -503,8 +515,7 @@ const ps = {
     fontFamily: 'Inter, -apple-system, sans-serif',
     fontSize: '11px',
     lineHeight: 1.4,
-    boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)',
-  } as React.CSSProperties,
+    boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)' } as React.CSSProperties,
   title: {
     fontSize: '12px',
     fontWeight: 600,
@@ -512,16 +523,14 @@ const ps = {
     marginBottom: PREV_SM,
     display: 'flex',
     alignItems: 'center',
-    gap: PREV_SM,
-  } as React.CSSProperties,
+    gap: PREV_SM } as React.CSSProperties,
   dot: (color: string) => ({
     width: 7,
     height: 7,
     borderRadius: '50%',
     backgroundColor: color,
     display: 'inline-block',
-    flexShrink: 0,
-  }) as React.CSSProperties,
+    flexShrink: 0 }) as React.CSSProperties,
   statBlock: {
     backgroundColor: 'rgba(17, 24, 39, 0.9)',
     borderRadius: '6px',
@@ -531,25 +540,21 @@ const ps = {
     flexDirection: 'column' as const,
     alignItems: 'center',
     justifyContent: 'center',
-    minWidth: '54px',
-  } as React.CSSProperties,
+    minWidth: '54px' } as React.CSSProperties,
   statVal: {
     fontSize: '18px',
     fontWeight: 700,
-    lineHeight: 1.2,
-  } as React.CSSProperties,
+    lineHeight: 1.2 } as React.CSSProperties,
   statLbl: {
     fontSize: '9px',
     color: '#9ca3af',
     textTransform: 'uppercase' as const,
     letterSpacing: '0.05em',
-    marginTop: '1px',
-  } as React.CSSProperties,
+    marginTop: '1px' } as React.CSSProperties,
   row: { display: 'flex', gap: PREV_SM, alignItems: 'center' } as React.CSSProperties,
   col: { display: 'flex', flexDirection: 'column' as const, gap: PREV_XS } as React.CSSProperties,
   muted: { color: '#9ca3af', fontSize: '10px' } as React.CSSProperties,
-  colors: { healthy: '#22c55e', warning: '#eab308', error: '#ef4444', info: '#3b82f6', purple: '#9333ea' },
-}
+  colors: { healthy: '#22c55e', warning: '#eab308', error: '#ef4444', info: '#3b82f6', purple: '#9333ea' } }
 
 // Sample stat data for realistic previews
 const SAMPLE_STATS: Record<string, number | string> = {
@@ -559,8 +564,7 @@ const SAMPLE_STATS: Record<string, number | string> = {
   cpu_usage: '67%',
   memory_usage: '54%',
   unhealthy_pods: 3,
-  active_alerts: 2,
-}
+  active_alerts: 2 }
 
 // Widget preview with realistic mock data
 function WidgetPreview({ config }: { config: WidgetConfig | null }) {
@@ -911,8 +915,7 @@ function GenericCardPreview({ card }: { card: WidgetCardDefinition }) {
     workload: { dot: ps.colors.info, items: [{ label: 'Running', value: '45', color: ps.colors.healthy }, { label: 'Pending', value: '2', color: ps.colors.warning }, { label: 'Failed', value: '1', color: ps.colors.error }] },
     gpu: { dot: ps.colors.purple, items: [{ label: 'Total', value: '32' }, { label: 'Allocated', value: '24', color: ps.colors.purple }, { label: 'Available', value: '8', color: ps.colors.healthy }] },
     security: { dot: ps.colors.warning, items: [{ label: 'Critical', value: '2', color: ps.colors.error }, { label: 'Warning', value: '5', color: ps.colors.warning }, { label: 'Info', value: '8', color: ps.colors.info }] },
-    monitoring: { dot: ps.colors.info, items: [{ label: 'Active', value: '3', color: ps.colors.info }, { label: 'Resolved', value: '12', color: ps.colors.healthy }, { label: 'Silenced', value: '1' }] },
-  }
+    monitoring: { dot: ps.colors.info, items: [{ label: 'Active', value: '3', color: ps.colors.info }, { label: 'Resolved', value: '12', color: ps.colors.healthy }, { label: 'Silenced', value: '1' }] } }
   const data = categoryData[card.category] || categoryData.monitoring
   return (
     <div style={ps.card}>
@@ -972,8 +975,7 @@ function TemplatePreview({ templateId }: { templateId: string }) {
     backgroundColor: 'rgba(31, 41, 55, 0.5)',
     borderRadius: '6px',
     padding: PREV_ITEM_PAD,
-    border: '1px solid rgba(255, 255, 255, 0.05)',
-  }
+    border: '1px solid rgba(255, 255, 255, 0.05)' }
 
   const isGrid = template.layout === 'grid'
   const isRow = template.layout === 'row'
@@ -1020,8 +1022,7 @@ function NightlyE2EPreview() {
         { acronym: 'WEP', dots: ['g','g','g','g','g','g','b'] },
         { acronym: 'WVA', dots: ['g','r','g','g','r','g','g'] },
         { acronym: 'BM', dots: ['r','r','g','r','g','r','g'] },
-      ],
-    },
+      ] },
     {
       name: 'GKE', color: '#3b82f6',
       guides: [
@@ -1029,8 +1030,7 @@ function NightlyE2EPreview() {
         { acronym: 'PD', dots: ['r','g','g','g','g','g','g'] },
         { acronym: 'WEP', dots: ['g','g','g','g','g','g','g'] },
         { acronym: 'BM', dots: ['b','g','g','r','g','g','g'] },
-      ],
-    },
+      ] },
     {
       name: 'CKS', color: '#a855f7',
       guides: [
@@ -1038,8 +1038,7 @@ function NightlyE2EPreview() {
         { acronym: 'PD', dots: [] as string[] },
         { acronym: 'WEP', dots: [] as string[] },
         { acronym: 'BM', dots: [] as string[] },
-      ],
-    },
+      ] },
   ]
   const dotColor: Record<string, string> = { g: '#22c55e', r: '#ef4444', b: '#60a5fa' }
 

@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useMemo, useCallback } from 'react'
+import { useState, useRef, useEffect, useMemo } from 'react'
 import { useNavigate, useLocation } from 'react-router-dom'
 import {
   Search,
@@ -14,8 +14,7 @@ import {
   Globe,
   Bot,
   Package,
-  HardDrive,
-} from 'lucide-react'
+  HardDrive } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { useSearchIndex, CATEGORY_ORDER, type SearchCategory, type SearchItem } from '../../../hooks/useSearchIndex'
 import { useMissions } from '../../../hooks/useMissions'
@@ -42,8 +41,7 @@ const CATEGORY_CONFIG: Record<SearchCategory, { label: string; icon: typeof Serv
   mission: { label: 'AI Missions', icon: Bot },
   dashboard: { label: 'Custom Dashboards', icon: LayoutDashboard },
   helm: { label: 'Helm Releases', icon: Package },
-  node: { label: 'Nodes', icon: HardDrive },
-}
+  node: { label: 'Nodes', icon: HardDrive } }
 
 /**
  * SearchResultsPanel is rendered only when the search bar is open AND has a
@@ -57,13 +55,12 @@ function SearchResultsPanel({
   onSelect,
   onAskAI,
   resultsRef,
-  onResultsChange,
-}: {
+  onResultsChange }: {
   searchQuery: string
   selectedIndex: number
   onSelect: (item: SearchItem, index: number) => void
   onAskAI: () => void
-  resultsRef: React.RefObject<HTMLDivElement>
+  resultsRef: React.RefObject<HTMLDivElement | null>
   /** Called when results change so the parent can handle Enter key selection and analytics */
   onResultsChange: (flatResults: SearchItem[], totalCount: number) => void
 }) {
@@ -91,7 +88,7 @@ function SearchResultsPanel({
   let flatIndex = 0
 
   return (
-    <div className="absolute top-full left-0 right-0 mt-2 bg-card border border-border rounded-lg shadow-xl overflow-hidden z-[60]">
+    <div className="absolute top-full left-0 right-0 mt-2 bg-card border border-border rounded-lg shadow-xl overflow-hidden z-dropdown">
       {flatResults.length > 0 ? (
         <div ref={resultsRef} className="py-1 max-h-96 overflow-y-auto">
           {CATEGORY_ORDER.map(cat => {
@@ -234,13 +231,13 @@ export function SearchDropdown() {
   }, [isResultsPanelActive])
 
   // Callback for SearchResultsPanel to sync flat results to parent
-  const handleResultsChange = useCallback((flatResults: SearchItem[], totalCount: number) => {
+  const handleResultsChange = (flatResults: SearchItem[], totalCount: number) => {
     flatResultsRef.current = flatResults
     totalCountRef.current = totalCount
-  }, [])
+  }
 
   // Create a custom mission from the search query
-  const handleAskAI = useCallback(() => {
+  const handleAskAI = () => {
     if (!searchQuery.trim()) return
 
     const query = searchQuery.trim()
@@ -249,20 +246,19 @@ export function SearchDropdown() {
       title: query.length > 50 ? query.substring(0, 47) + '...' : query,
       description: 'Custom AI mission from search',
       type: 'custom',
-      initialPrompt: query,
-    })
+      initialPrompt: query })
 
     setSearchQuery('')
     closeSearch()
-  }, [searchQuery, startMission, closeSearch])
+  }
 
   // Check if a page route is a discoverable dashboard not currently in the sidebar
-  const sidebarHrefs = useMemo(() => {
+  const sidebarHrefs = (() => {
     if (!sidebarConfig) return new Set<string>()
     return new Set(sidebarConfig.primaryNav.map(item => item.href))
-  }, [sidebarConfig])
+  })()
 
-  const handleSelect = useCallback((item: SearchItem, index?: number) => {
+  const handleSelect = (item: SearchItem, index?: number) => {
     emitGlobalSearchSelected(item.category, index ?? 0)
     // Mission items open the sidebar instead of navigating
     if (item.category === 'mission' && item.href?.startsWith('#mission:')) {
@@ -306,7 +302,7 @@ export function SearchDropdown() {
     }
     setSearchQuery('')
     closeSearch()
-  }, [navigate, location.pathname, setActiveMission, openSidebar, sidebarHrefs, closeSearch])
+  }
 
   // Close dropdown when clicking outside
   useEffect(() => {
@@ -322,9 +318,20 @@ export function SearchDropdown() {
   // Keyboard navigation
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
+      // Skip if this instance's container is not visible — prevents duplicate
+      // handlers when SearchDropdown is mounted in both desktop and mobile slots (#5711)
+      if (searchRef.current && searchRef.current.offsetParent === null) return
+
       // Open search with Cmd+K
       if ((event.metaKey || event.ctrlKey) && event.key === 'k') {
         event.preventDefault()
+        // #6225: stop propagation so FloatingDashboardActions's bubble-phase
+        // listener does not also fire on the same Ctrl+K — without this,
+        // both the search dropdown and the dashboard actions menu opened
+        // simultaneously and required two Escape presses to close. Paired
+        // with the `capture: true` on the addEventListener call below so
+        // this listener wins regardless of registration order.
+        event.stopPropagation()
         inputRef.current?.focus()
         openSearch()
         emitGlobalSearchOpened('keyboard')
@@ -356,8 +363,12 @@ export function SearchDropdown() {
       }
     }
 
-    document.addEventListener('keydown', handleKeyDown)
-    return () => document.removeEventListener('keydown', handleKeyDown)
+    // #6225: capture phase so this listener fires BEFORE bubble-phase
+    // handlers (e.g. FloatingDashboardActions) — paired with the
+    // event.stopPropagation() inside the Ctrl+K branch above. The third
+    // arg must match between addEventListener and removeEventListener.
+    document.addEventListener('keydown', handleKeyDown, true)
+    return () => document.removeEventListener('keydown', handleKeyDown, true)
   }, [isSearchOpen, isResultsPanelActive, selectedIndex, handleSelect, handleAskAI, openSearch, closeSearch])
 
   // Reset selected index when results change
@@ -375,7 +386,7 @@ export function SearchDropdown() {
   }, [selectedIndex])
 
   return (
-    <div data-tour="search" className="flex-1 max-w-md mx-8" ref={searchRef}>
+    <div data-tour="search" className="flex-1 min-w-0" ref={searchRef}>
       <div className="relative">
         <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
         <input

@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { Send, Copy, Download, FileCode, History, Sparkles, Trash2, Search, ChevronDown, FileText, AlertCircle, CheckCircle, Loader2 } from 'lucide-react'
 import { STORAGE_KEY_KUBECTL_HISTORY } from '../../lib/constants'
 import { TRANSITION_DELAY_MS } from '../../lib/constants/network'
@@ -10,6 +10,8 @@ import { useCardLoadingState } from './CardDataContext'
 import { useTranslation } from 'react-i18next'
 import { useDemoMode } from '../../hooks/useDemoMode'
 import { copyToClipboard } from '../../lib/clipboard'
+import { downloadText } from '../../lib/download'
+import { useToast } from '../ui/Toast'
 
 interface CommandHistoryItem {
   id: string
@@ -29,6 +31,8 @@ interface YAMLManifest {
 
 export function Kubectl() {
   const { t } = useTranslation(['common', 'cards'])
+  // #6226: useToast for download error feedback.
+  const { showToast } = useToast()
   const { execute } = useKubectl()
   const { deduplicatedClusters: clusters, isLoading } = useClusters()
   const { isDemoMode } = useDemoMode()
@@ -38,8 +42,7 @@ export function Kubectl() {
   useCardLoadingState({
     isLoading,
     hasAnyData: clusters.length > 0,
-    isDemoData: isDemoMode,
-  })
+    isDemoData: isDemoMode })
   const [command, setCommand] = useState('')
   const [aiPrompt, setAiPrompt] = useState('')
   const [output, setOutput] = useState<string[]>([])
@@ -108,7 +111,7 @@ export function Kubectl() {
   // Validate YAML
   // Note: This is basic validation. For production use, consider using a library like js-yaml
   // for comprehensive YAML parsing and validation
-  const validateYAML = useCallback((content: string) => {
+  const validateYAML = (content: string) => {
     if (!content.trim()) {
       setYamlError(null)
       return true
@@ -141,10 +144,10 @@ export function Kubectl() {
       setYamlError(err instanceof Error ? err.message : 'Invalid YAML')
       return false
     }
-  }, [])
+  }
 
   // Execute kubectl command
-  const executeCommand = useCallback(async (cmd: string, dryRun = false) => {
+  const executeCommand = async (cmd: string, dryRun = false) => {
     if (!cmd.trim() || !selectedContext) return
 
     setIsExecuting(true)
@@ -211,10 +214,10 @@ export function Kubectl() {
     } finally {
       setIsExecuting(false)
     }
-  }, [selectedContext, execute, outputFormat])
+  }
 
   // AI-assisted command generation
-  const generateCommand = useCallback(async () => {
+  const generateCommand = async () => {
     if (!aiPrompt.trim()) return
 
     setIsExecuting(true)
@@ -271,10 +274,10 @@ export function Kubectl() {
     } finally {
       setIsExecuting(false)
     }
-  }, [aiPrompt])
+  }
 
   // Generate YAML from AI prompt
-  const generateYAML = useCallback(async () => {
+  const generateYAML = async () => {
     if (!aiPrompt.trim()) return
 
     setIsExecuting(true)
@@ -359,10 +362,10 @@ data:
     } finally {
       setIsExecuting(false)
     }
-  }, [aiPrompt, validateYAML])
+  }
 
   // Apply YAML manifest
-  const applyYAML = useCallback(async () => {
+  const applyYAML = async () => {
     if (!yamlContent.trim() || !selectedContext) return
 
     if (!validateYAML(yamlContent)) {
@@ -414,29 +417,28 @@ data:
     } finally {
       setIsExecuting(false)
     }
-  }, [yamlContent, selectedContext, validateYAML, isDryRun, execute])
+  }
 
   // Copy output to clipboard
-  const copyOutput = useCallback(() => {
+  const copyOutput = () => {
     copyToClipboard(output.join('\n'))
     setOutput(prev => [...prev, 'Copied to clipboard!', ''])
-  }, [output])
+  }
 
   // Export YAML
-  const exportYAML = useCallback(() => {
+  const exportYAML = () => {
     if (!yamlContent.trim()) return
 
-    const blob = new Blob([yamlContent], { type: 'text/yaml' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = 'manifest.yaml'
-    a.click()
-    URL.revokeObjectURL(url)
-  }, [yamlContent])
+    // #6226: surface download failures via toast instead of letting an
+    // unhandled exception white-screen the card.
+    const result = downloadText('manifest.yaml', yamlContent, 'text/yaml')
+    if (!result.ok) {
+      showToast(`Failed to export YAML: ${result.error?.message || 'unknown error'}`, 'error')
+    }
+  }
 
   // Handle keyboard shortcuts
-  const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLInputElement>) => {
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
       executeCommand(command, isDryRun)
@@ -458,12 +460,12 @@ data:
         setCommand('')
       }
     }
-  }, [command, commandHistory, historyIndex, executeCommand, isDryRun])
+  }
 
   // Clear output
-  const clearOutput = useCallback(() => {
+  const clearOutput = () => {
     setOutput([])
-  }, [])
+  }
 
   // Filtered history based on search
   const filteredHistory = commandHistory.filter(item =>
@@ -748,12 +750,12 @@ data:
       >
         {output.length === 0 ? (
           <div className="text-muted-foreground/50 whitespace-pre">
-            <p>kubectl terminal ready. Type commands or use AI assistant.</p>
-            <p className="mt-2">Examples:</p>
-            <p className="ml-4">  get pods</p>
-            <p className="ml-4">  get deployments</p>
-            <p className="ml-4">  describe pod &lt;name&gt;</p>
-            <p className="ml-4">  logs &lt;pod-name&gt;</p>
+            <p>{t('cards:kubectl.terminalReady')}</p>
+            <p className="mt-2">{t('cards:kubectl.examples')}</p>
+            <p className="ml-4">  {t('cards:kubectl.exampleGetPods')}</p>
+            <p className="ml-4">  {t('cards:kubectl.exampleGetDeployments')}</p>
+            <p className="ml-4">  {t('cards:kubectl.exampleDescribePod')}</p>
+            <p className="ml-4">  {t('cards:kubectl.exampleLogs')}</p>
           </div>
         ) : (
           output.map((line, idx) => {

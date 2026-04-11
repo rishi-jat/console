@@ -1,4 +1,3 @@
-import { useCallback } from 'react'
 import { AlertTriangle } from 'lucide-react'
 import { useClusters } from '../../hooks/useMCP'
 import { useGlobalFilters } from '../../hooks/useGlobalFilters'
@@ -6,6 +5,7 @@ import { useUniversalStats, createMergedStatValueGetter } from '../../hooks/useU
 import { useDataCompliance } from '../../hooks/useDataCompliance'
 import { StatBlockValue } from '../ui/StatsOverview'
 import { DashboardPage } from '../../lib/dashboards/DashboardPage'
+import { RotatingTip } from '../ui/RotatingTip'
 
 const DATA_COMPLIANCE_CARDS_KEY = 'data-compliance-dashboard-cards'
 
@@ -21,13 +21,13 @@ export function DataCompliance() {
   const { isLoading: clustersLoading, refetch, lastUpdated, isRefreshing: dataRefreshing, error } = useClusters()
   useGlobalFilters() // Keep hook for potential future use
   const { getStatValue: getUniversalStatValue } = useUniversalStats()
-  const { posture, scores, isLoading: complianceLoading, isDemoData, isRefreshing: complianceRefreshing } = useDataCompliance()
+  const { posture, scores, isLoading: complianceLoading, isDemoData, isRefreshing: complianceRefreshing, failedClusters } = useDataCompliance()
 
   const isLoading = clustersLoading || complianceLoading
   const isRefreshing = dataRefreshing || complianceRefreshing
 
   // Stats value getter — derives values from real cluster data
-  const getDashboardStatValue = useCallback((blockId: string): StatBlockValue => {
+  const getDashboardStatValue = (blockId: string): StatBlockValue => {
     const demo = isDemoData
     switch (blockId) {
       // Encryption
@@ -73,18 +73,16 @@ export function DataCompliance() {
       default:
         return { value: '-' }
     }
-  }, [posture, scores, isDemoData])
+  }
 
-  const getStatValue = useCallback(
-    (blockId: string) => createMergedStatValueGetter(getDashboardStatValue, getUniversalStatValue)(blockId),
-    [getDashboardStatValue, getUniversalStatValue]
-  )
+  const getStatValue = (blockId: string) => createMergedStatValueGetter(getDashboardStatValue, getUniversalStatValue)(blockId)
 
   return (
     <DashboardPage
       title="Data Compliance"
       subtitle="GDPR, HIPAA, PCI-DSS, and SOC 2 data protection compliance"
       icon="Database"
+      rightExtra={<RotatingTip page="data-compliance" />}
       storageKey={DATA_COMPLIANCE_CARDS_KEY}
       defaultCards={DEFAULT_DATA_COMPLIANCE_CARDS}
       statsType="data-compliance"
@@ -97,8 +95,7 @@ export function DataCompliance() {
       isDemoData={isDemoData}
       emptyState={{
         title: 'Data Compliance Dashboard',
-        description: 'Add cards to monitor data encryption, access controls, and compliance frameworks.',
-      }}
+        description: 'Add cards to monitor data encryption, access controls, and compliance frameworks.' }}
     >
       {/* Error State */}
       {error && (
@@ -107,6 +104,20 @@ export function DataCompliance() {
           <div>
             <div className="font-medium">Failed to load cluster data</div>
             <div className="text-sm text-muted-foreground">{error}</div>
+          </div>
+        </div>
+      )}
+      {/* Partial cluster failure warning */}
+      {failedClusters.length > 0 && !error && (
+        <div className="mb-4 p-4 rounded-lg bg-yellow-500/10 border border-yellow-500/20 text-yellow-400 flex items-center gap-2">
+          <AlertTriangle className="w-5 h-5" />
+          <div>
+            <div className="font-medium">
+              Data from {failedClusters.length}/{posture.totalClusters} clusters unavailable
+            </div>
+            <div className="text-sm text-muted-foreground">
+              Unreachable: {(failedClusters || []).join(', ')}
+            </div>
           </div>
         </div>
       )}

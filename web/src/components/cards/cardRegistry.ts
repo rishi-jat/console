@@ -26,6 +26,7 @@ import { HardwareHealthCard } from './HardwareHealthCard'
 import { ConsoleOfflineDetectionCard } from './console-missions/ConsoleOfflineDetectionCard'
 import { DeploymentStatus } from './DeploymentStatus'
 // Remaining cards are lazy-loaded for code splitting
+const PodLogs = safeLazy(() => import('./PodLogs'), 'PodLogs')
 const TopPods = safeLazy(() => import('./TopPods'), 'TopPods')
 const AppStatus = safeLazy(() => import('./AppStatus'), 'AppStatus')
 // Deploy dashboard cards — eagerly start loading the barrel at module parse time
@@ -117,6 +118,7 @@ const MLJobs = safeLazy(() => _workloadDetectionBundle, 'MLJobs')
 const MLNotebooks = safeLazy(() => _workloadDetectionBundle, 'MLNotebooks')
 // Weather — migrated to cardDescriptors.registry.ts (unified descriptor system)
 const GitHubActivity = safeLazy(() => import('./GitHubActivity'), 'GitHubActivity')
+const IssueActivityChart = safeLazy(() => import('./IssueActivityChart'), 'IssueActivityChart')
 const RSSFeed = safeLazy(() => import('./rss'), 'RSSFeed')
 const Kubectl = safeLazy(() => import('./Kubectl'), 'Kubectl')
 // Arcade/game cards — share one chunk via barrel import.
@@ -149,13 +151,10 @@ const KubeSnake = safeLazy(() => _arcadeBundle, 'KubeSnake')
 const KubeGalaga = safeLazy(() => _arcadeBundle, 'KubeGalaga')
 const KubeBert = safeLazy(() => _arcadeBundle, 'KubeBert')
 const KubeDoom = safeLazy(() => _arcadeBundle, 'KubeDoom')
-const KubeCraft = safeLazy(() => _arcadeBundle, 'KubeCraft')
 const IframeEmbed = safeLazy(() => import('./IframeEmbed'), 'IframeEmbed')
 const NetworkUtils = safeLazy(() => import('./NetworkUtils'), 'NetworkUtils')
 const MobileBrowser = safeLazy(() => import('./MobileBrowser'), 'MobileBrowser')
 const KubeChess = safeLazy(() => _arcadeBundle, 'KubeChess')
-// Temporarily disabled to reduce bundle size (saves ~469KB)
-// const KubeCraft3D = safeLazy(() => import('./KubeCraft3D'), 'KubeCraft3D')
 const ServiceExports = safeLazy(() => import('./ServiceExports'), 'ServiceExports')
 const ServiceImports = safeLazy(() => import('./ServiceImports'), 'ServiceImports')
 const GatewayStatus = safeLazy(() => import('./GatewayStatus'), 'GatewayStatus')
@@ -269,6 +268,10 @@ const MultiTenancyOverview = safeLazy(() => _multiTenancyBundle, 'MultiTenancyOv
 const TenantIsolationSetup = safeLazy(() => _multiTenancyBundle, 'TenantIsolationSetup')
 const TenantTopology = safeLazy(() => _multiTenancyBundle, 'TenantTopology')
 
+
+// vCluster status card
+const VClusterStatus = safeLazy(() => import('./VClusterStatus'), 'VClusterStatus')
+
 // Multi-cluster insights cards — share one chunk via barrel import
 const _insightsBundle = import('./insights').catch(() => undefined as never)
 const CrossClusterEventCorrelation = safeLazy(() => _insightsBundle, 'CrossClusterEventCorrelation')
@@ -317,6 +320,7 @@ const RAW_CARD_COMPONENTS: Record<string, CardComponent> = {
   warning_events: WarningEvents,
   recent_events: RecentEvents,
   pod_issues: PodIssues,
+  pod_logs: PodLogs,
   top_pods: TopPods,
   app_status: AppStatus,
   resource_usage: ResourceUsage,
@@ -422,6 +426,8 @@ const RAW_CARD_COMPONENTS: Record<string, CardComponent> = {
   // Weather card — registered via unified descriptor system
   // GitHub Activity Monitoring card
   github_activity: GitHubActivity,
+  // Issue Activity Chart — daily issues opened/closed + PRs merged
+  issue_activity_chart: IssueActivityChart,
   // RSS Feed card
   rss_feed: RSSFeed,
   // Kubectl card
@@ -461,7 +467,6 @@ const RAW_CARD_COMPONENTS: Record<string, CardComponent> = {
   kube_galaga: KubeGalaga,
   kube_bert: KubeBert,
   kube_doom: KubeDoom,
-  kube_craft: KubeCraft,
   // Generic Iframe Embed card
   iframe_embed: IframeEmbed,
   network_utils: NetworkUtils,
@@ -469,8 +474,6 @@ const RAW_CARD_COMPONENTS: Record<string, CardComponent> = {
   mobile_browser: MobileBrowser,
   // Kube Chess card
   kube_chess: KubeChess,
-  // KubeCraft 3D card - Temporarily disabled to reduce bundle size
-  // kube_craft_3d: KubeCraft3D,
   // MCS (Multi-Cluster Service) cards
   service_exports: ServiceExports,
   service_imports: ServiceImports,
@@ -596,6 +599,7 @@ const RAW_CARD_COMPONENTS: Record<string, CardComponent> = {
   kubeflex_status: KubeflexStatus,
   k3s_status: K3sStatus,
   kubevirt_status: KubevirtStatus,
+  vcluster_status: VClusterStatus,
   multi_tenancy_overview: MultiTenancyOverview,
   tenant_isolation_setup: TenantIsolationSetup,
   tenant_topology: TenantTopology,
@@ -751,6 +755,7 @@ export const DEMO_DATA_CARDS = new Set([
   'crossplane_managed_resources',
   // KubeVela - demo until KubeVela is installed
   'kubevela_status',
+  'vcluster_status',
 ])
 
 /**
@@ -778,6 +783,7 @@ const CARD_CHUNK_PRELOADERS: Record<string, () => Promise<unknown>> = {
   warning_events: () => import('./WarningEvents'),
   recent_events: () => import('./RecentEvents'),
   pod_issues: () => import('./PodIssues'),
+  pod_logs: () => import('./PodLogs'),
   top_pods: () => import('./TopPods'),
   app_status: () => import('./AppStatus'),
   resource_usage: () => import('./ResourceUsage'),
@@ -861,6 +867,7 @@ const CARD_CHUNK_PRELOADERS: Record<string, () => Promise<unknown>> = {
   ml_notebooks: () => import('./workload-detection'),
   // GitHub & misc
   github_activity: () => import('./GitHubActivity'),
+  issue_activity_chart: () => import('./IssueActivityChart'),
   hardware_health: () => import('./HardwareHealthCard'),
   gpu_node_health: () => import('./ProactiveGPUNodeHealthMonitor'),
   console_ai_offline_detection: () => import('./console-missions/ConsoleOfflineDetectionCard'),
@@ -906,6 +913,7 @@ const CARD_CHUNK_PRELOADERS: Record<string, () => Promise<unknown>> = {
   multi_tenancy_overview: () => _multiTenancyBundle,
   tenant_isolation_setup: () => _multiTenancyBundle,
   tenant_topology: () => _multiTenancyBundle,
+  vcluster_status: () => import('./VClusterStatus'),
   // Cluster admin — all share one chunk via barrel
   predictive_health: () => import('./cluster-admin-bundle'),
   node_debug: () => import('./cluster-admin-bundle'),
@@ -1010,7 +1018,6 @@ const CARD_CHUNK_PRELOADERS: Record<string, () => Promise<unknown>> = {
   kube_galaga: () => import('./arcade-bundle'),
   kube_bert: () => import('./arcade-bundle'),
   kube_doom: () => import('./arcade-bundle'),
-  kube_craft: () => import('./arcade-bundle'),
   kube_chess: () => import('./arcade-bundle'),
   // Inspektor Gadget cards
   network_trace: () => import('./gadget/NetworkTraceCard'),
@@ -1074,6 +1081,7 @@ export function prefetchDemoCardChunks(): void {
     () => import('./kagent/KagentSecurity'),
     () => import('./kagent/KagentTopology'),
     () => import('./crossplane-status/CrossplaneManagedResources'),
+    () => import('./VClusterStatus'),
   ]
   startupChunks.forEach(load => load().catch(() => {}))
 }
@@ -1307,6 +1315,7 @@ export const CARD_DEFAULT_WIDTHS: Record<string, number> = {
   kubeflex_status: 6,
   k3s_status: 6,
   kubevirt_status: 6,
+  vcluster_status: 6,
   multi_tenancy_overview: 6,
   tenant_isolation_setup: 6,
   tenant_topology: 6,
@@ -1318,6 +1327,7 @@ export const CARD_DEFAULT_WIDTHS: Record<string, number> = {
 
   // Medium cards (5-6 columns) - lists and tables
   event_stream: 6,
+  pod_logs: 12,
   pod_issues: 6,
   deployment_status: 6,
   deployment_issues: 6,
@@ -1380,6 +1390,8 @@ export const CARD_DEFAULT_WIDTHS: Record<string, number> = {
   // weather — width registered via unified descriptor system
   // GitHub Activity Monitoring card
   github_activity: 8,
+  // Issue Activity Chart — full-width for time-series readability
+  issue_activity_chart: 12,
   // RSS Feed card
   rss_feed: 6,
   // Kubectl card - interactive terminal
@@ -1417,14 +1429,11 @@ export const CARD_DEFAULT_WIDTHS: Record<string, number> = {
   kube_snake: 5,
   kube_galaga: 5,
   kube_doom: 6,
-  kube_craft: 5,
   iframe_embed: 6,
   network_utils: 5,
   mobile_browser: 5,
   kube_chess: 5,
   kube_bert: 5,
-  // kube_craft_3d: 6,  // Temporarily disabled
-
   // Wide cards (7-8 columns) - charts and trends
   pod_health_trend: 8,
   events_timeline: 8,
@@ -1494,6 +1503,13 @@ export function getCardComponent(cardType: string): CardComponent | undefined {
   if (isDynamicCardRegistered(cardType)) {
     return CARD_COMPONENTS['dynamic_card']
   }
+
+  // Log a warning so missing/misspelled card types are surfaced in the console
+  // instead of silently disappearing (#4932).
+  console.warn(
+    `[cardRegistry] Unknown card type "${cardType}" — no component registered. ` +
+    'Check for typos in the dashboard config or register the card in cardRegistry.ts.',
+  )
 
   return undefined
 }

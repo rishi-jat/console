@@ -24,6 +24,7 @@
  */
 
 import { useEffect, useCallback, useRef, useSyncExternalStore } from 'react'
+import { useKeepAliveActive } from '../../hooks/useKeepAliveActive'
 import { isDemoMode, subscribeDemoMode } from '../demoMode'
 import { registerCacheReset, registerRefetch } from '../modeTransition'
 import { STORAGE_KEY_KUBECTL_HISTORY } from '../constants'
@@ -94,6 +95,25 @@ function ssRead<T>(key: string): { data: T; timestamp: number } | null {
     return { data: d, timestamp: t }
   } catch {
     return null
+  }
+}
+
+/**
+ * Remove ALL sessionStorage snapshots with the kcc: prefix.
+ * Called during cache clearing to prevent stale data rehydration (#4967, #4970).
+ */
+function clearSessionSnapshots(): void {
+  try {
+    const keysToRemove: string[] = []
+    for (let i = 0; i < sessionStorage.length; i++) {
+      const key = sessionStorage.key(i)
+      if (key?.startsWith(SS_PREFIX)) {
+        keysToRemove.push(key)
+      }
+    }
+    keysToRemove.forEach(k => sessionStorage.removeItem(k))
+  } catch {
+    // sessionStorage may be unavailable in some contexts
   }
 }
 
@@ -491,8 +511,7 @@ export function initPreloadedMeta(meta: Record<string, WorkerCacheMeta>): void {
     preloadedMetaMap.set(key, {
       consecutiveFailures: value.consecutiveFailures,
       lastError: value.lastError,
-      lastSuccessfulRefresh: value.lastSuccessfulRefresh,
-    })
+      lastSuccessfulRefresh: value.lastSuccessfulRefresh })
   }
   // Update any stores that were constructed before meta was available
   // (i.e. before the async worker init completed after first render).
@@ -519,7 +538,8 @@ export function isSQLiteWorkerActive(): boolean {
  * 1. Wipe the persistent backend (SQLite / IndexedDB) so no old entries
  *    can be reloaded on future page loads or storage-load cycles.
  * 2. Clear the preloaded metadata map (failure counters, etc.).
- * 3. Reset every in-memory CacheStore to its initial (empty) state WITHOUT
+ * 3. Clear sessionStorage snapshots (kcc:*) so stale data cannot rehydrate.
+ * 4. Reset every in-memory CacheStore to its initial (empty) state WITHOUT
  *    reloading from storage (the storage was just cleared).
  */
 function clearAllInMemoryCaches(): void {
@@ -531,7 +551,10 @@ function clearAllInMemoryCaches(): void {
   // 2. Clear metadata
   preloadedMetaMap.clear()
 
-  // 3. Reset every in-memory store WITHOUT reloading from (now-empty) storage
+  // 3. Clear sessionStorage snapshots so next mount cannot rehydrate stale data (#4967)
+  clearSessionSnapshots()
+
+  // 4. Reset every in-memory store WITHOUT reloading from (now-empty) storage
   for (const store of cacheRegistry.values()) {
     (store as CacheStore<unknown>).resetForModeTransition()
   }
@@ -605,8 +628,7 @@ class CacheStore<T> {
         error: null,
         isFailed: false,
         consecutiveFailures: 0,
-        lastRefresh: snapshot.timestamp,
-      }
+        lastRefresh: snapshot.timestamp }
       this.storageLoadPromise = Promise.resolve()
     } else {
       this.state = {
@@ -616,8 +638,7 @@ class CacheStore<T> {
         error: null,
         isFailed: meta.consecutiveFailures >= MAX_FAILURES,
         consecutiveFailures: meta.consecutiveFailures,
-        lastRefresh: meta.lastSuccessfulRefresh ?? null,
-      }
+        lastRefresh: meta.lastSuccessfulRefresh ?? null }
       // Async fallback — load from storage if snapshot wasn't ready
       if (this.persist) {
         this.storageLoadPromise = this.loadFromStorage()
@@ -645,8 +666,7 @@ class CacheStore<T> {
           isRefreshing: true,
           lastRefresh: entry.timestamp,
           isFailed: false,
-          consecutiveFailures: 0,
-        })
+          consecutiveFailures: 0 })
         this.saveMeta({ consecutiveFailures: 0, lastSuccessfulRefresh: entry.timestamp })
       }
     } catch {
@@ -725,8 +745,7 @@ class CacheStore<T> {
       isRefreshing: false,
       error: null,
       isFailed: false,
-      consecutiveFailures: 0,
-    })
+      consecutiveFailures: 0 })
     // Re-trigger storage load to recover cached live data
     if (this.persist) {
       this.storageLoadPromise = this.loadFromStorage()
@@ -753,8 +772,7 @@ class CacheStore<T> {
       isRefreshing: false,
       error: null,
       isFailed: false,
-      consecutiveFailures: 0,
-    })
+      consecutiveFailures: 0 })
   }
 
   /**
@@ -768,8 +786,7 @@ class CacheStore<T> {
       this.setState({
         isFailed: meta.consecutiveFailures >= MAX_FAILURES,
         consecutiveFailures: meta.consecutiveFailures,
-        lastRefresh: meta.lastSuccessfulRefresh ?? null,
-      })
+        lastRefresh: meta.lastSuccessfulRefresh ?? null })
     }
   }
 
@@ -806,8 +823,7 @@ class CacheStore<T> {
 
     this.setState({
       isLoading: !hasCachedData,
-      isRefreshing: hasCachedData,
-    })
+      isRefreshing: hasCachedData })
 
     try {
       // Progressive fetcher: push partial updates to UI as each chunk arrives.
@@ -815,18 +831,53 @@ class CacheStore<T> {
       // The fetch() completion below sets isLoading: false.
       // This lets CardWrapper show partial data + refresh spinner while
       // more clusters are still streaming in via SSE.
+      //
+      // Throttle progress updates to avoid overwhelming React with rapid-fire
+      // re-renders when multiple clusters respond within the same tick (#4935).
+      // Each update creates a new state object reference so useSyncExternalStore
+      // triggers a synchronous re-render.
+      /** Minimum interval (ms) between progress-driven re-renders */
+      const PROGRESS_THROTTLE_MS = 100
+      let lastProgressTs = 0
+      let pendingProgress: T | null = null
+      let progressTimerId: ReturnType<typeof setTimeout> | null = null
+
+      const flushProgress = () => {
+        if (pendingProgress === null) return
+        if (this.resetVersion !== fetchVersion) return
+        this.setState({ data: pendingProgress })
+        pendingProgress = null
+        lastProgressTs = Date.now()
+      }
+
       const onProgress = progressiveFetcher ? (partialData: T) => {
         if (this.resetVersion !== fetchVersion) return  // stale — ignore
         // Skip empty progress updates — don't wipe cached data with []
         if (isEquivalentToInitial(partialData, this.initialData)) return
-        this.setState({
-          data: partialData,
-        })
+
+        const now = Date.now()
+        pendingProgress = partialData
+
+        if (now - lastProgressTs >= PROGRESS_THROTTLE_MS) {
+          // Enough time has passed — flush immediately
+          if (progressTimerId) { clearTimeout(progressTimerId); progressTimerId = null }
+          flushProgress()
+        } else if (!progressTimerId) {
+          // Schedule a flush at the end of the throttle window
+          const remaining = PROGRESS_THROTTLE_MS - (now - lastProgressTs)
+          progressTimerId = setTimeout(() => {
+            progressTimerId = null
+            flushProgress()
+          }, remaining)
+        }
       } : undefined
 
       const newData = progressiveFetcher && onProgress
         ? await progressiveFetcher(onProgress)
         : await fetcher()
+
+      // Flush any pending throttled progress update before processing final data
+      if (progressTimerId) { clearTimeout(progressTimerId); progressTimerId = null }
 
       // If a reset happened during fetch, discard stale results
       if (this.resetVersion !== fetchVersion) {
@@ -865,8 +916,7 @@ class CacheStore<T> {
         error: null,
         isFailed: false,
         consecutiveFailures: 0,
-        lastRefresh: Date.now(),
-      })
+        lastRefresh: Date.now() })
     } catch (e) {
       // If a reset happened during fetch, discard stale error
       if (this.resetVersion !== fetchVersion) {
@@ -890,8 +940,7 @@ class CacheStore<T> {
       this.saveMeta({
         consecutiveFailures: newFailures,
         lastError: errorMessage,
-        lastSuccessfulRefresh: hasData ? Date.now() : (this.state.lastRefresh ?? undefined),
-      })
+        lastSuccessfulRefresh: hasData ? Date.now() : (this.state.lastRefresh ?? undefined) })
 
       this.setState({
         // Keep isLoading: true when we have no cached data and haven't
@@ -899,10 +948,9 @@ class CacheStore<T> {
         // After MAX_FAILURES, isFailed triggers failure state instead of skeleton.
         isLoading: !hasData && !reachedMaxFailures,
         isRefreshing: false,
-        error: null,
+        error: errorMessage,
         isFailed: hasData ? false : reachedMaxFailures,
-        consecutiveFailures: hasData ? 0 : newFailures,
-      })
+        consecutiveFailures: hasData ? 0 : newFailures })
     } finally {
       this.fetchingRef = false
     }
@@ -911,6 +959,8 @@ class CacheStore<T> {
   // Clear cache
   async clear(): Promise<void> {
     await cacheStorage.delete(this.key)
+    // Remove sessionStorage snapshot so re-creating the store cannot rehydrate stale data (#4969)
+    try { sessionStorage.removeItem(SS_PREFIX + this.key) } catch { /* ignore */ }
     preloadedMetaMap.delete(this.key)
     if (workerRpc) {
       workerRpc.setMeta(this.key, { consecutiveFailures: 0 })
@@ -925,8 +975,7 @@ class CacheStore<T> {
       error: null,
       isFailed: false,
       consecutiveFailures: 0,
-      lastRefresh: null,
-    })
+      lastRefresh: null })
   }
 
   // Cleanup
@@ -943,13 +992,11 @@ class CacheStore<T> {
 
     this.saveMeta({
       consecutiveFailures: 0,
-      lastSuccessfulRefresh: this.state.lastRefresh ?? undefined,
-    })
+      lastSuccessfulRefresh: this.state.lastRefresh ?? undefined })
 
     this.setState({
       consecutiveFailures: 0,
-      isFailed: false,
-    })
+      isFailed: false })
   }
 }
 
@@ -1041,8 +1088,7 @@ export function useCache<T>({
   liveInDemoMode = false,
   merge,
   shared = true,
-  progressiveFetcher,
-}: UseCacheOptions<T>): UseCacheResult<T> {
+  progressiveFetcher }: UseCacheOptions<T>): UseCacheResult<T> {
   // Subscribe to demo mode - this ensures we re-render when demo mode changes
   const demoMode = useSyncExternalStore(subscribeDemoMode, isDemoMode, isDemoMode)
 
@@ -1051,14 +1097,44 @@ export function useCache<T>({
     subscribeAutoRefreshPaused, isAutoRefreshPaused, isAutoRefreshPaused
   )
 
+  // Pause polling when this component is on an inactive KeepAlive route (#5856).
+  // Hidden routes should not fetch or trigger state updates that block rendering.
+  const keepAliveActive = useKeepAliveActive()
+
   // Effective enabled: both the passed prop AND not in demo mode
   // liveInDemoMode bypasses the demo check for cards backed by serverless functions
   const effectiveEnabled = enabled && (!demoMode || liveInDemoMode)
 
-  // Get or create cache store
-  const storeRef = useRef<CacheStore<T> | null>(null)
+  // Track mount state to distinguish initial mount from mode-switch re-fires.
+  // On initial mount / page navigation: fetch immediately (needed for data).
+  // On mode transition (enabled false→true after mount): skip immediate refetch,
+  // let triggerAllRefetches() handle it after the 500ms skeleton timer.
+  const hasMountedRef = useRef(false)
+  const prevEnabledRef = useRef(effectiveEnabled)
+  const initialFetchDoneRef = useRef(false)
 
-  if (!storeRef.current) {
+  // Track the auto-refresh timer in a ref to avoid thrashing (#5252).
+  // Without this, changing consecutiveFailures recreates the interval on every
+  // render, defeating the exponential backoff.
+  const autoRefreshTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+
+  // Get or create cache store.
+  // Track the key so we can reset the ref when the cache key changes
+  // (e.g., switching clusters). Without this, storeRef points to stale data (#5259).
+  const storeRef = useRef<CacheStore<T> | null>(null)
+  const storeKeyRef = useRef(key)
+
+  if (!storeRef.current || storeKeyRef.current !== key) {
+    // Key changed — clear the old auto-refresh timer so it doesn't keep
+    // polling the previous key (#5399), and reset the initial-fetch guard
+    // so the new key triggers an immediate fetch (#5400).
+    if (autoRefreshTimerRef.current) {
+      clearInterval(autoRefreshTimerRef.current)
+      autoRefreshTimerRef.current = null
+    }
+    initialFetchDoneRef.current = false
+
+    storeKeyRef.current = key
     storeRef.current = shared
       ? getOrCreateCache(key, initialData, persist)
       : new CacheStore(key, initialData, persist)
@@ -1084,27 +1160,19 @@ export function useCache<T>({
   progressiveFetcherRef.current = progressiveFetcher
 
   const refetch = useCallback(async () => {
-    if (!effectiveEnabled) return
+    if (!effectiveEnabled || !keepAliveActive) return
     await store.fetch(() => fetcherRef.current(), mergeRef.current, progressiveFetcherRef.current)
-  }, [effectiveEnabled, store])
+  }, [effectiveEnabled, keepAliveActive, store])
 
-  const clearAndRefetch = useCallback(async () => {
+  const clearAndRefetch = async () => {
     await store.clear()
     await refetch()
-  }, [store, refetch])
+  }
 
   // Initial fetch and auto-refresh
   // Calculate effective interval with failure backoff
   const baseInterval = refreshInterval ?? REFRESH_RATES[category]
   const effectiveInterval = getEffectiveInterval(baseInterval, state.consecutiveFailures)
-
-  // Track mount state to distinguish initial mount from mode-switch re-fires.
-  // On initial mount / page navigation: fetch immediately (needed for data).
-  // On mode transition (enabled false→true after mount): skip immediate refetch,
-  // let triggerAllRefetches() handle it after the 500ms skeleton timer.
-  const hasMountedRef = useRef(false)
-  const prevEnabledRef = useRef(effectiveEnabled)
-  const initialFetchDoneRef = useRef(false)
 
   useEffect(() => {
     if (!effectiveEnabled) {
@@ -1113,6 +1181,11 @@ export function useCache<T>({
       hasMountedRef.current = true
       prevEnabledRef.current = effectiveEnabled
       initialFetchDoneRef.current = false
+      // Clear any pending auto-refresh timer
+      if (autoRefreshTimerRef.current) {
+        clearInterval(autoRefreshTimerRef.current)
+        autoRefreshTimerRef.current = null
+      }
       return
     }
 
@@ -1123,8 +1196,9 @@ export function useCache<T>({
 
     // Only fetch immediately on initial mount or page navigation, NOT when
     // the effect re-fires due to consecutiveFailures/backoff interval changes.
-    if (!isModeTransition && !initialFetchDoneRef.current) {
-      // Initial mount or page navigation remount — fetch immediately
+    if (!isModeTransition && !initialFetchDoneRef.current && keepAliveActive) {
+      // Initial mount or page navigation remount — fetch immediately.
+      // Only mark done when we actually started a fetch (#5891).
       initialFetchDoneRef.current = true
       refetch().catch(() => { /* errors handled inside CacheStore.fetch */ })
     }
@@ -1134,15 +1208,46 @@ export function useCache<T>({
     // Register for mode-transition refetches so triggerAllRefetches() reaches us
     const unregisterRefetch = registerRefetch(`cache:${key}`, refetch)
 
-    // Auto-refresh interval
-    // The interval restarts when consecutiveFailures changes (backoff kicks in).
-    // Suppressed when the dashboard "Auto" checkbox is unchecked (global pause).
-    if (autoRefresh && !autoRefreshGloballyPaused) {
-      const intervalId = setInterval(() => { refetch().catch(() => { /* errors handled inside CacheStore.fetch */ }) }, effectiveInterval)
-      return () => { clearInterval(intervalId); unregisterRefetch() }
+    // Auto-refresh interval — uses a ref-tracked timer to prevent thrashing.
+    // Only create a new timer if none is already pending (#5252).
+    // Pause when the route is inactive in KeepAlive to stop hidden dashboards
+    // from polling and blocking the active route (#5856).
+    if (autoRefresh && !autoRefreshGloballyPaused && keepAliveActive) {
+      if (!autoRefreshTimerRef.current) {
+        autoRefreshTimerRef.current = setInterval(() => {
+          refetch().catch(() => { /* errors handled inside CacheStore.fetch */ })
+        }, effectiveInterval)
+      }
+    } else if (autoRefreshTimerRef.current) {
+      clearInterval(autoRefreshTimerRef.current)
+      autoRefreshTimerRef.current = null
     }
-    return () => unregisterRefetch()
-  }, [effectiveEnabled, autoRefresh, autoRefreshGloballyPaused, effectiveInterval, refetch, store, key, state.consecutiveFailures])
+
+    return () => {
+      unregisterRefetch()
+    }
+  }, [effectiveEnabled, autoRefresh, autoRefreshGloballyPaused, keepAliveActive, refetch, store, key])
+
+  // Restart the auto-refresh timer when the backoff interval changes.
+  // Separated from the main effect to avoid re-running mount/mode-transition logic (#5252).
+  useEffect(() => {
+    if (!autoRefreshTimerRef.current || !autoRefresh || autoRefreshGloballyPaused || !keepAliveActive) return
+    // Clear old timer and create a new one with updated interval
+    clearInterval(autoRefreshTimerRef.current)
+    autoRefreshTimerRef.current = setInterval(() => {
+      refetch().catch(() => { /* errors handled inside CacheStore.fetch */ })
+    }, effectiveInterval)
+  }, [effectiveInterval, autoRefresh, autoRefreshGloballyPaused, keepAliveActive, refetch])
+
+  // Clean up auto-refresh timer on unmount
+  useEffect(() => {
+    return () => {
+      if (autoRefreshTimerRef.current) {
+        clearInterval(autoRefreshTimerRef.current)
+        autoRefreshTimerRef.current = null
+      }
+    }
+  }, [])
 
   // Cleanup non-shared stores on unmount
   useEffect(() => {
@@ -1160,8 +1265,27 @@ export function useCache<T>({
   // Combined with useLayoutEffect state reports this caused React error #185
   // (Maximum update depth exceeded).  Capturing via ref keeps the identity
   // stable across renders while still picking up the first provided value.
+  //
+  // Update the refs when the caller provides meaningfully different data (#5425).
+  // JSON.stringify comparison is used to detect structural changes without
+  // triggering on every render when the caller creates new-but-equal objects.
   const demoDataRef = useRef(demoData)
   const initialDataRef = useRef(initialData)
+
+  const demoDataJSON = JSON.stringify(demoData)
+  const initialDataJSON = JSON.stringify(initialData)
+  const prevDemoJSON = useRef(demoDataJSON)
+  const prevInitialJSON = useRef(initialDataJSON)
+
+  if (demoDataJSON !== prevDemoJSON.current) {
+    prevDemoJSON.current = demoDataJSON
+    demoDataRef.current = demoData
+  }
+  if (initialDataJSON !== prevInitialJSON.current) {
+    prevInitialJSON.current = initialDataJSON
+    initialDataRef.current = initialData
+  }
+
   const stableDemoData = demoDataRef.current
   const stableInitialData = initialDataRef.current
 
@@ -1199,8 +1323,7 @@ export function useCache<T>({
     lastRefresh: state.lastRefresh,
     isDemoFallback: shouldFallbackToDemo || !effectiveEnabled || showOptimisticDemo,
     refetch,
-    clearAndRefetch,
-  }
+    clearAndRefetch }
 }
 
 // ============================================================================
@@ -1213,8 +1336,7 @@ export function useArrayCache<T>(
 ): UseCacheResult<T[]> {
   return useCache({
     ...options,
-    initialData: options.initialData ?? [],
-  })
+    initialData: options.initialData ?? [] })
 }
 
 /** Hook for object data with automatic empty object initial value */
@@ -1223,8 +1345,7 @@ export function useObjectCache<T extends Record<string, unknown>>(
 ): UseCacheResult<T> {
   return useCache({
     ...options,
-    initialData: options.initialData ?? ({} as T),
-  })
+    initialData: options.initialData ?? ({} as T) })
 }
 
 // ============================================================================
@@ -1238,6 +1359,9 @@ export async function clearAllCaches(): Promise<void> {
 
   // Clear preloaded metadata
   preloadedMetaMap.clear()
+
+  // Clear sessionStorage snapshots so stale data cannot rehydrate (#4970)
+  clearSessionSnapshots()
 
   // Clear any remaining localStorage metadata (fallback/legacy)
   const keysToRemove: string[] = []
@@ -1338,8 +1462,7 @@ export async function preloadCacheFromStorage(): Promise<void> {
           data: entry.data,
           isLoading: false,
           isRefreshing: true, // Will fetch fresh data in background
-          lastRefresh: entry.timestamp,
-        }
+          lastRefresh: entry.timestamp }
       }
     } catch {
       // Ignore individual load failures
@@ -1424,8 +1547,7 @@ export async function migrateIDBToSQLite(): Promise<void> {
       if (entry) {
         cacheEntries.push({
           key,
-          entry: { data: entry.data, timestamp: entry.timestamp, version: entry.version },
-        })
+          entry: { data: entry.data, timestamp: entry.timestamp, version: entry.version } })
       }
     }
 
@@ -1497,5 +1619,4 @@ export {
   useCollapsedPreference,
   useIndexedData,
   getStorageStats,
-  clearAllStorage,
-} from './hooks'
+  clearAllStorage } from './hooks'

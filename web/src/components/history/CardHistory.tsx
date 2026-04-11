@@ -99,16 +99,17 @@ export function CardHistory({ onRestoreCard }: CardHistoryProps) {
             <History className="w-6 h-6 text-purple-400" />
             Card History
           </h1>
-          <p className="text-muted-foreground">
+          <div className="text-muted-foreground">
             Track changes to your dashboard cards
-          </p>
+          </div>
         </div>
         {history.length > 0 && (
           <button
             onClick={clearHistory}
             className="flex items-center gap-2 px-3 py-2 rounded-lg bg-red-500/20 text-red-400 hover:bg-red-500/30 transition-colors"
+            aria-label="Clear all card history"
           >
-            <Trash2 className="w-4 h-4" />
+            <Trash2 className="w-4 h-4" aria-hidden="true" />
             Clear History
           </button>
         )}
@@ -126,6 +127,8 @@ export function CardHistory({ onRestoreCard }: CardHistoryProps) {
                 ? 'bg-purple-500/20 text-purple-400 border border-purple-500/30'
                 : 'bg-secondary/50 text-muted-foreground hover:text-foreground'
             )}
+            aria-label={`Filter by ${action === 'all' ? 'all actions' : action}`}
+            aria-pressed={filter === action}
           >
             {action === 'all' ? 'All' : action.charAt(0).toUpperCase() + action.slice(1)}
             {action !== 'all' && (
@@ -141,11 +144,11 @@ export function CardHistory({ onRestoreCard }: CardHistoryProps) {
       {filteredHistory.length === 0 ? (
         <div className="flex flex-col items-center justify-center h-64 rounded-lg border border-dashed border-border">
           <History className="w-12 h-12 text-muted-foreground/50 mb-4" />
-          <p className="text-muted-foreground text-center">
+          <div className="text-muted-foreground text-center">
             {filter === 'all'
               ? 'No card history yet. Changes to dashboard cards will appear here.'
               : `No ${filter} cards in history.`}
-          </p>
+          </div>
         </div>
       ) : (
         <div className="space-y-3">
@@ -169,7 +172,7 @@ export function CardHistory({ onRestoreCard }: CardHistoryProps) {
                 </div>
 
                 {/* Action description */}
-                <p className="text-sm text-muted-foreground">
+                <div className="text-sm text-muted-foreground">
                   {entry.action === 'replaced' && entry.previousCardType && (
                     <>
                       <span className="text-foreground/80">{formatCardType(entry.previousCardType)}</span>
@@ -186,7 +189,7 @@ export function CardHistory({ onRestoreCard }: CardHistoryProps) {
                   {entry.action === 'configured' && (
                     <>{t('history.configurationUpdated')}</>
                   )}
-                </p>
+                </div>
 
                 {/* Dashboard and timestamp */}
                 <div className="flex items-center gap-3 mt-2 text-xs text-muted-foreground">

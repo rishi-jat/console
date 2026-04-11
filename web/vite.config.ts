@@ -58,7 +58,12 @@ export default defineConfig(({ mode }) => ({
     } : {}),
   },
   plugins: [
-    react(),
+    react({
+      // React Compiler disabled — it strips useCallback/useMemo that are
+      // load-bearing for useLayoutEffect dependency stability in CardDataContext,
+      // causing infinite re-render loops (React error #185) in production builds.
+      // Re-enable only after adding 'use no memo' directives to all affected files.
+    }),
     // Inject build commit hash into the HTML <meta name="app-build-id"> tag
     // so the stale-HTML detection script can compare against the server.
     {
@@ -99,12 +104,22 @@ export default defineConfig(({ mode }) => ({
           if (id.includes('/react/') || id.includes('/react-dom/') || id.includes('/react-router') || id.includes('/scheduler/') || id.includes('/react-reconciler/')) {
             return 'react-vendor'
           }
-          // 3D engine — no longer in a separate chunk because shared deps
-          // (zustand, react-reconciler) create circular deps with vendor.
-          // Falls through to the vendor chunk instead.
-          // Charting libraries
-          if (id.includes('/echarts/') || id.includes('/echarts-for-react/') || id.includes('/recharts/') || id.includes('/d3-') || id.includes('/victory-')) {
-            return 'charts-vendor'
+          // 3D engine — three.js + @react-three (~400KB) only used by
+          // globe animation and KubeCraft3D card; isolate so they never
+          // load on normal page views. zustand is a transitive dep of
+          // @react-three (not used directly), so keep it with three.
+          // react-reconciler is already in react-vendor above.
+          if (id.includes('/three/') || id.includes('/three-stdlib/') || id.includes('/@react-three/') || id.includes('/zustand/') || id.includes('/stats-gl/')) {
+            return 'three-vendor'
+          }
+          // ECharts — only used by ParetoFrontier card; isolate the large
+          // (~500KB minified) echarts + zrender bundle from recharts.
+          if (id.includes('/echarts/') || id.includes('/echarts-for-react/') || id.includes('/zrender/')) {
+            return 'echarts-vendor'
+          }
+          // Recharts + d3 — used widely across chart cards.
+          if (id.includes('/recharts/') || id.includes('/d3-') || id.includes('/victory-')) {
+            return 'recharts-vendor'
           }
           // Animation — framer-motion is large (~350KB) and only needed on pages
           // that use <motion.*> or AnimatePresence, so isolate it from core UI deps.
@@ -246,14 +261,9 @@ export default defineConfig(({ mode }) => ({
     // CI runners (2-core, 7GB) OOM with 600+ test files at full concurrency
     maxWorkers: process.env.CI ? 2 : undefined,
     minWorkers: process.env.CI ? 1 : undefined,
-    poolOptions: {
-      forks: {
-        // Prevent "Timeout terminating forks worker" on slow CI runners
-        terminateTimeout: process.env.CI ? 60_000 : 10_000,
-        maxForks: process.env.CI ? 2 : undefined,
-        minForks: process.env.CI ? 1 : undefined,
-      },
-    },
+    // poolOptions.forks removed — deprecated in Vitest 4 (#5860).
+    // maxWorkers/minWorkers above handle fork limits; teardownTimeout
+    // above handles worker termination timeout.
     coverage: {
       provider: 'v8',
       reporter: ['text', 'json', 'json-summary', 'html'],
@@ -261,6 +271,10 @@ export default defineConfig(({ mode }) => ({
         'src/hooks/**',
         'src/lib/**',
         'src/contexts/**',
+        'src/components/charts/**',
+        'src/components/dashboard/customizer/**',
+        'src/components/dashboard/shared/cardCatalog.ts',
+        'src/components/dashboard/shared/CardPreview.tsx',
       ],
       exclude: [
         'node_modules/',

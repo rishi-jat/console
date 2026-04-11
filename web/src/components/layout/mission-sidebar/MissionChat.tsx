@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
+import { useState, useRef, useEffect, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 import {
   Send,
@@ -20,8 +20,7 @@ import {
   RotateCcw,
   StopCircle,
   ListChecks,
-  Loader2,
-} from 'lucide-react'
+  Loader2 } from 'lucide-react'
 import { useMissions, type Mission } from '../../../hooks/useMissions'
 import { useAuth } from '../../../lib/auth'
 import { useDemoMode } from '../../../hooks/useDemoMode'
@@ -29,11 +28,14 @@ import { isNetlifyDeployment } from '../../../lib/demoMode'
 import { useResolutions, detectIssueSignature } from '../../../hooks/useResolutions'
 import { cn } from '../../../lib/cn'
 import { ConfirmDialog } from '../../../lib/modals'
+import { useToast } from '../../ui/Toast'
+import { downloadText } from '../../../lib/download'
 import { MAX_MESSAGE_SIZE_CHARS } from '../../../lib/constants'
 import { AgentBadge, AgentIcon } from '../../agent/AgentIcon'
 import { PreflightFailure } from '../../missions/PreflightFailure'
 import { SaveResolutionDialog } from '../../missions/SaveResolutionDialog'
 import { SetupInstructionsDialog } from '../../setup/SetupInstructionsDialog'
+import { OrbitSetupOffer } from '../../missions/OrbitSetupOffer'
 import { STATUS_CONFIG, TYPE_ICONS } from './types'
 import type { FontSize } from './types'
 import { TypingIndicator } from './TypingIndicator'
@@ -41,7 +43,10 @@ import { MemoizedMessage } from './MemoizedMessage'
 
 export function MissionChat({ mission, isFullScreen = false, fontSize = 'base' as FontSize, onToggleFullScreen }: { mission: Mission; isFullScreen?: boolean; fontSize?: FontSize; onToggleFullScreen?: () => void }) {
   const { t } = useTranslation('common')
-  const { sendMessage, retryPreflight, cancelMission, rateMission, setActiveMission, dismissMission, renameMission, runSavedMission, updateSavedMission, selectedAgent } = useMissions()
+  // #6226: useToast for download error feedback (replaces an unhandled
+  // exception path that could white-screen the dialog).
+  const { showToast } = useToast()
+  const { sendMessage, retryPreflight, cancelMission, rateMission, setActiveMission, dismissMission, renameMission, runSavedMission, updateSavedMission } = useMissions()
   const { user } = useAuth()
   const { isDemoMode } = useDemoMode()
   const { findSimilarResolutions, recordUsage } = useResolutions()
@@ -90,28 +95,27 @@ export function MissionChat({ mission, isFullScreen = false, fontSize = 'base' a
   }, [mission.id])
 
   /** Persist edits and exit editing mode */
-  const saveEdits = useCallback(() => {
+  const saveEdits = () => {
     updateSavedMission(mission.id, {
       description: editDescription.trim(),
-      steps: editSteps.map(s => ({ title: s.title.trim(), description: s.description.trim() })),
-    })
+      steps: editSteps.map(s => ({ title: s.title.trim(), description: s.description.trim() })) })
     setIsEditingMission(false)
-  }, [mission.id, editDescription, editSteps, updateSavedMission])
+  }
 
   /** Discard edits and exit editing mode */
-  const cancelEdits = useCallback(() => {
+  const cancelEdits = () => {
     setEditDescription(mission.description)
     setEditSteps((mission.importedFrom?.steps || []).map(s => ({ title: s.title, description: s.description })))
     setIsEditingMission(false)
-  }, [mission.description, mission.importedFrom?.steps])
+  }
 
   /** Update a single step's field */
-  const updateStep = useCallback((idx: number, field: 'title' | 'description', value: string) => {
+  const updateStep = (idx: number, field: 'title' | 'description', value: string) => {
     setEditSteps(prev => prev.map((s, i) => i === idx ? { ...s, [field]: value } : s))
-  }, [])
+  }
 
   // Find related resolutions based on mission content
-  const relatedResolutions = useMemo(() => {
+  const relatedResolutions = (() => {
     const content = [
       mission.title,
       mission.description,
@@ -124,10 +128,10 @@ export function MissionChat({ mission, isFullScreen = false, fontSize = 'base' a
     }
 
     return findSimilarResolutions(signature as { type: string }, { minSimilarity: 0.4, limit: 5 })
-  }, [mission.title, mission.description, mission.messages, findSimilarResolutions])
+  })()
 
   // Save transcript as markdown file
-  const saveTranscript = useCallback(() => {
+  const saveTranscript = () => {
     const lines: string[] = [
       `# Mission: ${mission.title}`,
       '',
@@ -165,29 +169,28 @@ export function MissionChat({ mission, isFullScreen = false, fontSize = 'base' a
     }
 
     const content = lines.filter(l => l !== undefined).join('\n')
-    const blob = new Blob([content], { type: 'text/markdown' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `mission-${mission.title.toLowerCase().replace(/[^a-z0-9]+/g, '-')}-${new Date().toISOString().split('T')[0]}.md`
-    document.body.appendChild(a)
-    a.click()
-    document.body.removeChild(a)
-    URL.revokeObjectURL(url)
-  }, [mission])
+    // #6226: route through downloadText so a failure surfaces as a
+    // toast instead of an unhandled exception that white-screens the
+    // mission chat.
+    const filename = `mission-${mission.title.toLowerCase().replace(/[^a-z0-9]+/g, '-')}-${new Date().toISOString().split('T')[0]}.md`
+    const result = downloadText(filename, content, 'text/markdown')
+    if (!result.ok) {
+      showToast(`Failed to export mission: ${result.error?.message || 'unknown error'}`, 'error')
+    }
+  }
 
   // Check if user is at bottom of scroll container
-  const isAtBottom = useCallback(() => {
+  const isAtBottom = () => {
     const container = messagesContainerRef.current
     if (!container) return true
     const threshold = 50 // pixels from bottom to consider "at bottom"
     return container.scrollHeight - container.scrollTop - container.clientHeight < threshold
-  }, [])
+  }
 
   // Handle scroll events to detect user scrolling
-  const handleScroll = useCallback(() => {
+  const handleScroll = () => {
     setShouldAutoScroll(isAtBottom())
-  }, [isAtBottom])
+  }
 
   // Auto-scroll to bottom only when new messages are added (not on every render)
   useEffect(() => {
@@ -227,10 +230,10 @@ export function MissionChat({ mission, isFullScreen = false, fontSize = 'base' a
   }, [isFullScreen])
 
   // Get the original ask (first user message)
-  const originalAsk = useMemo(() => {
+  const originalAsk = (() => {
     const firstUserMsg = mission.messages.find(m => m.role === 'user')
     return firstUserMsg?.content || mission.description
-  }, [mission.messages, mission.description])
+  })()
 
   // Generate a simple summary based on conversation state
   const conversationSummary = useMemo(() => {
@@ -254,38 +257,37 @@ export function MissionChat({ mission, isFullScreen = false, fontSize = 'base' a
       keyPoints,
       hasToolExecution: assistantMsgs.some(m =>
         m.content.includes('```') && (m.content.includes('kubectl') || m.content.includes('executed'))
-      ),
-    }
+      ) }
   }, [mission.messages, mission.status, mission.updatedAt])
 
   /** Maximum allowed length for mission titles */
   const MAX_TITLE_LENGTH = 80
 
   /** Start inline title editing */
-  const startEditingTitle = useCallback(() => {
+  const startEditingTitle = () => {
     setEditTitleValue(mission.title)
     setIsEditingTitle(true)
     // Focus the input after React renders it
     requestAnimationFrame(() => titleInputRef.current?.select())
-  }, [mission.title])
+  }
 
   /** Save the edited title */
-  const saveTitle = useCallback(() => {
+  const saveTitle = () => {
     const trimmed = editTitleValue.trim()
     if (trimmed.length > 0 && trimmed.length <= MAX_TITLE_LENGTH && trimmed !== mission.title) {
       renameMission(mission.id, trimmed)
     }
     setIsEditingTitle(false)
-  }, [editTitleValue, mission.id, mission.title, renameMission])
+  }
 
   /** Cancel title editing */
-  const cancelEditTitle = useCallback(() => {
+  const cancelEditTitle = () => {
     setIsEditingTitle(false)
     setEditTitleValue('')
-  }, [])
+  }
 
   /** Handle keyboard events in the title input */
-  const handleTitleKeyDown = useCallback((e: React.KeyboardEvent) => {
+  const handleTitleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter') {
       e.preventDefault()
       saveTitle()
@@ -293,7 +295,7 @@ export function MissionChat({ mission, isFullScreen = false, fontSize = 'base' a
       e.preventDefault()
       cancelEditTitle()
     }
-  }, [saveTitle, cancelEditTitle])
+  }
 
   const handleSend = () => {
     if (!input.trim()) return
@@ -303,8 +305,7 @@ export function MissionChat({ mission, isFullScreen = false, fontSize = 'base' a
         t('missionChat.messageTooLong', {
           current: input.length.toLocaleString(),
           max: MAX_MESSAGE_SIZE_CHARS.toLocaleString(),
-          defaultValue: `Message is too long ({{current}} characters). Maximum is {{max}} characters.`,
-        })
+          defaultValue: `Message is too long ({{current}} characters). Maximum is {{max}} characters.` })
       )
       return
     }
@@ -318,13 +319,13 @@ export function MissionChat({ mission, isFullScreen = false, fontSize = 'base' a
     setTimeout(() => inputRef.current?.focus(), 0)
   }
 
-  const handleRetryMission = useCallback(() => {
+  const handleRetryMission = () => {
     // Find the last user message in the conversation (the one that failed)
     const lastUserMessage = [...mission.messages].reverse().find(m => m.role === 'user')
     const prompt = lastUserMessage?.content || ''
     if (!prompt.trim()) return
     sendMessage(mission.id, prompt)
-  }, [mission.id, mission.messages, sendMessage])
+  }
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -436,7 +437,7 @@ export function MissionChat({ mission, isFullScreen = false, fontSize = 'base' a
               <Maximize2 className="w-4 h-4 text-muted-foreground" />
             </button>
           )}
-          {mission.status === 'running' && (
+          {(mission.status === 'running' || mission.status === 'pending' || mission.status === 'blocked') && (
             <button
               onClick={() => cancelMission(mission.id)}
               className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium bg-red-500/15 hover:bg-red-500/25 text-red-400 border border-red-500/30 rounded-lg transition-colors"
@@ -444,7 +445,9 @@ export function MissionChat({ mission, isFullScreen = false, fontSize = 'base' a
               data-testid="terminate-session-btn"
             >
               <StopCircle className="w-3.5 h-3.5" />
-              {t('missionChat.terminateSession', { defaultValue: 'Terminate Session' })}
+              {mission.status === 'pending'
+                ? t('missionChat.cancelPending', { defaultValue: 'Cancel' })
+                : t('missionChat.terminateSession', { defaultValue: 'Terminate Session' })}
             </button>
           )}
           <div className={cn('flex items-center gap-1', config.color)}>
@@ -757,19 +760,19 @@ export function MissionChat({ mission, isFullScreen = false, fontSize = 'base' a
           </div>
         )}
 
-        {/* Typing indicator when agent is working - uses currently selected agent */}
+        {/* Typing indicator when agent is working — always shows the agent
+            the mission was started with, not the current global selection (#5480) */}
         {mission.status === 'running' && (
           <div className="flex gap-3">
             <div className="w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 bg-purple-500/20">
               <AgentIcon
                 provider={
-                  // Use selectedAgent (currently processing) instead of mission.agent (original)
-                  (selectedAgent || mission.agent) === 'claude' ? 'anthropic' :
-                  (selectedAgent || mission.agent) === 'openai' ? 'openai' :
-                  (selectedAgent || mission.agent) === 'gemini' ? 'google' :
-                  (selectedAgent || mission.agent) === 'bob' ? 'bob' :
-                  (selectedAgent || mission.agent) === 'claude-code' ? 'anthropic-local' :
-                  (selectedAgent || mission.agent || 'anthropic')
+                  (mission.agent || 'anthropic') === 'claude' ? 'anthropic' :
+                  (mission.agent || 'anthropic') === 'openai' ? 'openai' :
+                  (mission.agent || 'anthropic') === 'gemini' ? 'google' :
+                  (mission.agent || 'anthropic') === 'bob' ? 'bob' :
+                  (mission.agent || 'anthropic') === 'claude-code' ? 'anthropic-local' :
+                  (mission.agent || 'anthropic')
                 }
                 className="w-4 h-4"
               />
@@ -802,20 +805,18 @@ export function MissionChat({ mission, isFullScreen = false, fontSize = 'base' a
           </div>
         ) : mission.status === 'running' ? (
           <div className="flex flex-col gap-2">
+            {/* Input is disabled while mission is running to prevent interleaved
+                responses from concurrent requests (#5478). Only cancel is allowed. */}
             <div className="flex gap-2 min-w-0">
               <input
-                ref={inputRef}
                 type="text"
-                value={input}
-                onChange={(e) => { setInput(e.target.value); setInputError(null) }}
-                onKeyDown={handleKeyDown}
-                placeholder={t('missionChat.typeNextMessage')}
-                className="flex-1 min-w-0 px-3 py-2 text-sm bg-secondary/50 border border-border rounded-lg text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+                disabled
+                placeholder={t('missionChat.waitingForAgent', { defaultValue: 'Waiting for agent to finish...' })}
+                className="flex-1 min-w-0 px-3 py-2 text-sm bg-secondary/30 border border-border rounded-lg text-muted-foreground placeholder:text-muted-foreground/60 cursor-not-allowed"
               />
               <button
-                onClick={handleSend}
-                disabled={!input.trim()}
-                className="flex-shrink-0 px-3 py-2 bg-primary text-primary-foreground rounded-lg hover:bg-primary/80 disabled:opacity-50 disabled:cursor-not-allowed"
+                disabled
+                className="flex-shrink-0 px-3 py-2 bg-primary text-primary-foreground rounded-lg disabled:opacity-50 disabled:cursor-not-allowed"
                 title={t('missionChat.sendWillQueue')}
               >
                 <Send className="w-4 h-4" />
@@ -905,6 +906,39 @@ export function MissionChat({ mission, isFullScreen = false, fontSize = 'base' a
                   )}
                 </div>
               </div>
+            </div>
+
+            {/* Orbit Setup Offer — shown after install/deploy missions complete */}
+            {(mission.importedFrom?.missionClass === 'install' || mission.type === 'deploy') && (
+              <OrbitSetupOffer
+                projects={mission.importedFrom?.cncfProject
+                  ? [{ name: mission.importedFrom.cncfProject, cncfProject: mission.importedFrom.cncfProject, category: (mission.context?.category as string) }]
+                  : [{ name: mission.title, category: (mission.context?.category as string) }]}
+                clusters={mission.cluster ? [mission.cluster] : []}
+                onCreateOrbit={() => {/* handled internally by OrbitSetupOffer */}}
+                onDashboardCreated={() => {/* navigation handled internally */}}
+                onSkip={() => {/* dismiss is internal */}}
+              />
+            )}
+
+            {/* Follow-up input — allow continuing the conversation after completion (#5735) */}
+            <div className="flex gap-2 min-w-0">
+              <input
+                ref={inputRef}
+                type="text"
+                value={input}
+                onChange={(e) => { setInput(e.target.value); setInputError(null) }}
+                onKeyDown={handleKeyDown}
+                placeholder={t('missionChat.askFollowUp', { defaultValue: 'Ask a follow-up question...' })}
+                className="flex-1 min-w-0 px-3 py-2 text-sm rounded-lg border border-border bg-secondary/50 focus:bg-secondary focus:outline-none focus:ring-1 focus:ring-primary"
+              />
+              <button
+                onClick={handleSend}
+                disabled={!input.trim()}
+                className="px-3 py-2 rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-30 transition-colors"
+              >
+                <Send className="w-4 h-4" />
+              </button>
             </div>
 
             <button

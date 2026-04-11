@@ -3,7 +3,6 @@ package handlers
 import (
 	"context"
 	"log/slog"
-	"sort"
 	"sync"
 
 	"github.com/gofiber/fiber/v2"
@@ -46,6 +45,13 @@ func (h *MCPHandlers) ListClusters(c *fiber.Ctx) error {
 				clusters[i].Healthy = health.Healthy
 				clusters[i].NodeCount = health.NodeCount
 				clusters[i].PodCount = health.PodCount
+				// Surface the stale-kubeconfig signal: a cluster that has
+				// a health cache entry but has never been successfully
+				// reached (empty LastSeen) drives the "never connected"
+				// warning banner in the Clusters page (#5921).
+				if !health.Reachable && health.LastSeen == "" {
+					clusters[i].NeverConnected = true
+				}
 			} else {
 				// No health data collected yet (e.g. immediately after boot).
 				// Signal "initializing" rather than falsely reporting Unhealthy.
@@ -72,6 +78,9 @@ func (h *MCPHandlers) ListClusters(c *fiber.Ctx) error {
 // GetClusterHealth returns health for a specific cluster
 func (h *MCPHandlers) GetClusterHealth(c *fiber.Ctx) error {
 	cluster := c.Params("cluster")
+	if err := mcpValidateName("cluster", cluster); err != nil {
+		return err
+	}
 
 	// Demo mode: return demo data immediately
 	if isDemoMode(c) {
@@ -132,6 +141,9 @@ func (h *MCPHandlers) GetNodes(c *fiber.Ctx) error {
 	}
 
 	cluster := c.Query("cluster")
+	if err := mcpValidateName("cluster", cluster); err != nil {
+		return err
+	}
 
 	if h.k8sClient != nil {
 		// If no cluster specified, query all clusters in parallel
@@ -145,6 +157,7 @@ func (h *MCPHandlers) GetNodes(c *fiber.Ctx) error {
 			var mu sync.Mutex
 			allNodes := make([]k8s.NodeInfo, 0)
 			clusterTimeout := mcpDefaultTimeout
+			var errTracker clusterErrorTracker
 
 			clusterCtx, clusterCancel := context.WithCancel(c.Context())
 			defer clusterCancel()
@@ -157,7 +170,9 @@ func (h *MCPHandlers) GetNodes(c *fiber.Ctx) error {
 					defer cancel()
 
 					nodes, err := h.k8sClient.GetNodes(ctx, clusterName)
-					if err == nil && len(nodes) > 0 {
+					if err != nil {
+						errTracker.add(clusterName, err)
+					} else if len(nodes) > 0 {
 						mu.Lock()
 						allNodes = append(allNodes, nodes...)
 						mu.Unlock()
@@ -166,7 +181,7 @@ func (h *MCPHandlers) GetNodes(c *fiber.Ctx) error {
 			}
 
 			waitWithDeadline(&wg, clusterCancel, maxResponseDeadline)
-			return c.JSON(fiber.Map{"nodes": allNodes, "source": "k8s"})
+			return c.JSON(errTracker.annotate(fiber.Map{"nodes": allNodes, "source": "k8s"}))
 		}
 
 		ctx, cancel := context.WithTimeout(c.Context(), mcpDefaultTimeout)
@@ -195,6 +210,13 @@ func (h *MCPHandlers) GetEvents(c *fiber.Ctx) error {
 	cluster := c.Query("cluster")
 	namespace := c.Query("namespace")
 	limit := c.QueryInt("limit", 50)
+
+	if err := mcpValidateClusterAndNamespace(cluster, namespace); err != nil {
+		return err
+	}
+	if err := mcpValidatePositiveInt("limit", limit, mcpMaxEventLimit); err != nil {
+		return err
+	}
 
 	// Try MCP bridge first
 	if h.bridge != nil {
@@ -233,6 +255,7 @@ func (h *MCPHandlers) GetEvents(c *fiber.Ctx) error {
 			var mu sync.Mutex
 			allEvents := make([]k8s.Event, 0)
 			clusterTimeout := mcpDefaultTimeout
+			var errTracker clusterErrorTracker
 
 			clusterCtx, clusterCancel := context.WithCancel(c.Context())
 			defer clusterCancel()
@@ -245,7 +268,9 @@ func (h *MCPHandlers) GetEvents(c *fiber.Ctx) error {
 					defer cancel()
 
 					events, err := h.k8sClient.GetEvents(ctx, clusterName, namespace, perClusterLimit)
-					if err == nil && len(events) > 0 {
+					if err != nil {
+						errTracker.add(clusterName, err)
+					} else if len(events) > 0 {
 						mu.Lock()
 						allEvents = append(allEvents, events...)
 						mu.Unlock()
@@ -255,14 +280,14 @@ func (h *MCPHandlers) GetEvents(c *fiber.Ctx) error {
 
 			waitWithDeadline(&wg, clusterCancel, maxResponseDeadline)
 
-			// Sort by timestamp (most recent first) and limit total
-			sort.Slice(allEvents, func(i, j int) bool {
-				return allEvents[i].LastSeen > allEvents[j].LastSeen
-			})
+			// Sort by LastSeen parsed as time (most recent first).
+			// Lexicographic string compare is unreliable across timezones
+			// and empty values (see issue #6043).
+			k8s.SortEventsByLastSeenDesc(allEvents)
 			if len(allEvents) > limit {
 				allEvents = allEvents[:limit]
 			}
-			return c.JSON(fiber.Map{"events": allEvents, "source": "k8s"})
+			return c.JSON(errTracker.annotate(fiber.Map{"events": allEvents, "source": "k8s"}))
 		}
 
 		ctx, cancel := context.WithTimeout(c.Context(), mcpDefaultTimeout)
@@ -291,6 +316,13 @@ func (h *MCPHandlers) GetWarningEvents(c *fiber.Ctx) error {
 	cluster := c.Query("cluster")
 	namespace := c.Query("namespace")
 	limit := c.QueryInt("limit", 50)
+
+	if err := mcpValidateClusterAndNamespace(cluster, namespace); err != nil {
+		return err
+	}
+	if err := mcpValidatePositiveInt("limit", limit, mcpMaxEventLimit); err != nil {
+		return err
+	}
 
 	// Try MCP bridge first
 	if h.bridge != nil {
@@ -326,6 +358,7 @@ func (h *MCPHandlers) GetWarningEvents(c *fiber.Ctx) error {
 			var mu sync.Mutex
 			allEvents := make([]k8s.Event, 0)
 			clusterTimeout := mcpDefaultTimeout
+			var errTracker clusterErrorTracker
 
 			clusterCtx, clusterCancel := context.WithCancel(c.Context())
 			defer clusterCancel()
@@ -338,7 +371,9 @@ func (h *MCPHandlers) GetWarningEvents(c *fiber.Ctx) error {
 					defer cancel()
 
 					events, err := h.k8sClient.GetWarningEvents(ctx, clusterName, namespace, perClusterLimit)
-					if err == nil && len(events) > 0 {
+					if err != nil {
+						errTracker.add(clusterName, err)
+					} else if len(events) > 0 {
 						mu.Lock()
 						allEvents = append(allEvents, events...)
 						mu.Unlock()
@@ -348,14 +383,14 @@ func (h *MCPHandlers) GetWarningEvents(c *fiber.Ctx) error {
 
 			waitWithDeadline(&wg, clusterCancel, maxResponseDeadline)
 
-			// Sort by timestamp (most recent first) and limit total
-			sort.Slice(allEvents, func(i, j int) bool {
-				return allEvents[i].LastSeen > allEvents[j].LastSeen
-			})
+			// Sort by LastSeen parsed as time (most recent first).
+			// Lexicographic string compare is unreliable across timezones
+			// and empty values (see issue #6043).
+			k8s.SortEventsByLastSeenDesc(allEvents)
 			if len(allEvents) > limit {
 				allEvents = allEvents[:limit]
 			}
-			return c.JSON(fiber.Map{"events": allEvents, "source": "k8s"})
+			return c.JSON(errTracker.annotate(fiber.Map{"events": allEvents, "source": "k8s"}))
 		}
 
 		ctx, cancel := context.WithTimeout(c.Context(), mcpDefaultTimeout)
@@ -384,6 +419,10 @@ func (h *MCPHandlers) CheckSecurityIssues(c *fiber.Ctx) error {
 	cluster := c.Query("cluster")
 	namespace := c.Query("namespace")
 
+	if err := mcpValidateClusterAndNamespace(cluster, namespace); err != nil {
+		return err
+	}
+
 	// Fall back to direct k8s client
 	if h.k8sClient != nil {
 		// If no cluster specified, query all clusters in parallel
@@ -397,6 +436,7 @@ func (h *MCPHandlers) CheckSecurityIssues(c *fiber.Ctx) error {
 			var mu sync.Mutex
 			allIssues := make([]k8s.SecurityIssue, 0)
 			clusterTimeout := mcpDefaultTimeout
+			var errTracker clusterErrorTracker
 
 			clusterCtx, clusterCancel := context.WithCancel(c.Context())
 			defer clusterCancel()
@@ -409,7 +449,9 @@ func (h *MCPHandlers) CheckSecurityIssues(c *fiber.Ctx) error {
 					defer cancel()
 
 					issues, err := h.k8sClient.CheckSecurityIssues(ctx, clusterName, namespace)
-					if err == nil && len(issues) > 0 {
+					if err != nil {
+						errTracker.add(clusterName, err)
+					} else if len(issues) > 0 {
 						mu.Lock()
 						allIssues = append(allIssues, issues...)
 						mu.Unlock()
@@ -418,7 +460,7 @@ func (h *MCPHandlers) CheckSecurityIssues(c *fiber.Ctx) error {
 			}
 
 			waitWithDeadline(&wg, clusterCancel, maxResponseDeadline)
-			return c.JSON(fiber.Map{"issues": allIssues, "source": "k8s"})
+			return c.JSON(errTracker.annotate(fiber.Map{"issues": allIssues, "source": "k8s"}))
 		}
 
 		ctx, cancel := context.WithTimeout(c.Context(), mcpDefaultTimeout)

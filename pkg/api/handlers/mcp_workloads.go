@@ -22,6 +22,13 @@ func (h *MCPHandlers) GetPods(c *fiber.Ctx) error {
 	namespace := c.Query("namespace")
 	labelSelector := c.Query("labelSelector")
 
+	if err := mcpValidateClusterAndNamespace(cluster, namespace); err != nil {
+		return err
+	}
+	if err := mcpValidateLabelSelector(labelSelector); err != nil {
+		return err
+	}
+
 	// Try MCP bridge first for its richer functionality
 	if h.bridge != nil {
 		ctx, cancel := context.WithTimeout(c.Context(), mcpDefaultTimeout)
@@ -47,6 +54,7 @@ func (h *MCPHandlers) GetPods(c *fiber.Ctx) error {
 			var mu sync.Mutex
 			allPods := make([]k8s.PodInfo, 0)
 			clusterTimeout := mcpExtendedTimeout
+			var errTracker clusterErrorTracker
 
 			clusterCtx, clusterCancel := context.WithCancel(c.Context())
 			defer clusterCancel()
@@ -59,7 +67,9 @@ func (h *MCPHandlers) GetPods(c *fiber.Ctx) error {
 					defer cancel()
 
 					pods, err := h.k8sClient.GetPods(ctx, clusterName, namespace)
-					if err == nil && len(pods) > 0 {
+					if err != nil {
+						errTracker.add(clusterName, err)
+					} else if len(pods) > 0 {
 						mu.Lock()
 						allPods = append(allPods, pods...)
 						mu.Unlock()
@@ -68,7 +78,7 @@ func (h *MCPHandlers) GetPods(c *fiber.Ctx) error {
 			}
 
 			waitWithDeadline(&wg, clusterCancel, maxResponseDeadline)
-			return c.JSON(fiber.Map{"pods": allPods, "source": "k8s"})
+			return c.JSON(errTracker.annotate(fiber.Map{"pods": allPods, "source": "k8s"}))
 		}
 
 		ctx, cancel := context.WithTimeout(c.Context(), mcpDefaultTimeout)
@@ -96,6 +106,10 @@ func (h *MCPHandlers) FindPodIssues(c *fiber.Ctx) error {
 
 	cluster := c.Query("cluster")
 	namespace := c.Query("namespace")
+
+	if err := mcpValidateClusterAndNamespace(cluster, namespace); err != nil {
+		return err
+	}
 
 	// Try MCP bridge first
 	if h.bridge != nil {
@@ -172,6 +186,10 @@ func (h *MCPHandlers) FindDeploymentIssues(c *fiber.Ctx) error {
 	cluster := c.Query("cluster")
 	namespace := c.Query("namespace")
 
+	if err := mcpValidateClusterAndNamespace(cluster, namespace); err != nil {
+		return err
+	}
+
 	// Fall back to direct k8s client
 	if h.k8sClient != nil {
 		// If no cluster specified, query all clusters in parallel
@@ -234,6 +252,10 @@ func (h *MCPHandlers) GetDeployments(c *fiber.Ctx) error {
 	cluster := c.Query("cluster")
 	namespace := c.Query("namespace")
 
+	if err := mcpValidateClusterAndNamespace(cluster, namespace); err != nil {
+		return err
+	}
+
 	if h.k8sClient != nil {
 		// If no cluster specified, query all clusters in parallel
 		if cluster == "" {
@@ -295,6 +317,10 @@ func (h *MCPHandlers) GetServices(c *fiber.Ctx) error {
 	cluster := c.Query("cluster")
 	namespace := c.Query("namespace")
 
+	if err := mcpValidateClusterAndNamespace(cluster, namespace); err != nil {
+		return err
+	}
+
 	if h.k8sClient != nil {
 		if cluster == "" {
 			clusters, _, err := h.k8sClient.HealthyClusters(c.Context())
@@ -305,6 +331,17 @@ func (h *MCPHandlers) GetServices(c *fiber.Ctx) error {
 			var wg sync.WaitGroup
 			var mu sync.Mutex
 			allServices := make([]k8s.Service, 0)
+			// clusterCounts represents every cluster we contacted, even
+			// those that returned zero services. Issue #6154: clusters
+			// with zero services used to be completely omitted from the
+			// aggregation response, which caused the frontend to think
+			// the cluster did not exist rather than displaying "0
+			// services". We now always include the cluster with its
+			// service count.
+			clusterCounts := make(map[string]int, len(clusters))
+			for _, cl := range clusters {
+				clusterCounts[cl.Name] = 0
+			}
 			clusterTimeout := mcpDefaultTimeout
 
 			clusterCtx, clusterCancel := context.WithCancel(c.Context())
@@ -318,16 +355,41 @@ func (h *MCPHandlers) GetServices(c *fiber.Ctx) error {
 					defer cancel()
 
 					services, err := h.k8sClient.GetServices(ctx, clusterName, namespace)
-					if err == nil && len(services) > 0 {
-						mu.Lock()
-						allServices = append(allServices, services...)
-						mu.Unlock()
+					if err != nil {
+						return
 					}
+					mu.Lock()
+					// Record the per-cluster count even when zero so
+					// the response always represents every cluster.
+					clusterCounts[clusterName] = len(services)
+					if len(services) > 0 {
+						allServices = append(allServices, services...)
+					}
+					mu.Unlock()
 				}(cl.Name)
 			}
 
 			waitWithDeadline(&wg, clusterCancel, maxResponseDeadline)
-			return c.JSON(fiber.Map{"services": allServices, "source": "k8s"})
+
+			// Serialize per-cluster counts as a stable slice so the
+			// frontend can iterate it without worrying about map
+			// ordering.
+			type clusterServiceCount struct {
+				Cluster  string `json:"cluster"`
+				Services int    `json:"services"`
+			}
+			counts := make([]clusterServiceCount, 0, len(clusters))
+			for _, cl := range clusters {
+				counts = append(counts, clusterServiceCount{
+					Cluster:  cl.Name,
+					Services: clusterCounts[cl.Name],
+				})
+			}
+			return c.JSON(fiber.Map{
+				"services":      allServices,
+				"clusterCounts": counts,
+				"source":        "k8s",
+			})
 		}
 
 		ctx, cancel := context.WithTimeout(c.Context(), mcpDefaultTimeout)
@@ -355,6 +417,10 @@ func (h *MCPHandlers) GetJobs(c *fiber.Ctx) error {
 
 	cluster := c.Query("cluster")
 	namespace := c.Query("namespace")
+
+	if err := mcpValidateClusterAndNamespace(cluster, namespace); err != nil {
+		return err
+	}
 
 	if h.k8sClient != nil {
 		if cluster == "" {
@@ -417,6 +483,10 @@ func (h *MCPHandlers) GetHPAs(c *fiber.Ctx) error {
 	cluster := c.Query("cluster")
 	namespace := c.Query("namespace")
 
+	if err := mcpValidateClusterAndNamespace(cluster, namespace); err != nil {
+		return err
+	}
+
 	if h.k8sClient != nil {
 		if cluster == "" {
 			clusters, _, err := h.k8sClient.HealthyClusters(c.Context())
@@ -477,6 +547,10 @@ func (h *MCPHandlers) GetReplicaSets(c *fiber.Ctx) error {
 
 	cluster := c.Query("cluster")
 	namespace := c.Query("namespace")
+
+	if err := mcpValidateClusterAndNamespace(cluster, namespace); err != nil {
+		return err
+	}
 
 	if h.k8sClient != nil {
 		if cluster == "" {
@@ -539,6 +613,10 @@ func (h *MCPHandlers) GetStatefulSets(c *fiber.Ctx) error {
 	cluster := c.Query("cluster")
 	namespace := c.Query("namespace")
 
+	if err := mcpValidateClusterAndNamespace(cluster, namespace); err != nil {
+		return err
+	}
+
 	if h.k8sClient != nil {
 		if cluster == "" {
 			clusters, _, err := h.k8sClient.HealthyClusters(c.Context())
@@ -600,6 +678,10 @@ func (h *MCPHandlers) GetDaemonSets(c *fiber.Ctx) error {
 	cluster := c.Query("cluster")
 	namespace := c.Query("namespace")
 
+	if err := mcpValidateClusterAndNamespace(cluster, namespace); err != nil {
+		return err
+	}
+
 	if h.k8sClient != nil {
 		if cluster == "" {
 			clusters, _, err := h.k8sClient.HealthyClusters(c.Context())
@@ -660,6 +742,10 @@ func (h *MCPHandlers) GetCronJobs(c *fiber.Ctx) error {
 
 	cluster := c.Query("cluster")
 	namespace := c.Query("namespace")
+
+	if err := mcpValidateClusterAndNamespace(cluster, namespace); err != nil {
+		return err
+	}
 
 	if h.k8sClient != nil {
 		if cluster == "" {
@@ -727,6 +813,13 @@ func (h *MCPHandlers) GetWorkloads(c *fiber.Ctx) error {
 	cluster := c.Query("cluster")
 	namespace := c.Query("namespace")
 	workloadType := c.Query("type")
+
+	if err := mcpValidateClusterAndNamespace(cluster, namespace); err != nil {
+		return err
+	}
+	if err := mcpValidateWorkloadType(workloadType); err != nil {
+		return err
+	}
 
 	ctx, cancel := context.WithTimeout(c.Context(), maxResponseDeadline)
 	defer cancel()

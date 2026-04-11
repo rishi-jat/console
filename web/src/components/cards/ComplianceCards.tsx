@@ -46,8 +46,7 @@ Please help me diagnose and fix the issue:
 5. If pods are crashing, check resource limits and node capacity
 6. If scans are stuck, try restarting the operator: kubectl rollout restart deployment -n trivy-system trivy-operator
 
-Please diagnose step by step and fix any issues found.`,
-  },
+Please diagnose step by step and fix any issues found.` },
   kubescape: {
     title: 'Troubleshoot Kubescape Operator',
     description: 'Kubescape is installed but not producing scan results',
@@ -63,8 +62,7 @@ Please help me diagnose and fix the issue:
 7. If storage pod is failing, check PVC status: kubectl get pvc -n kubescape
 8. Try triggering a fresh scan: kubectl annotate ns default kubescape.io/scan=true --overwrite
 
-Please diagnose step by step and fix any issues found.`,
-  },
+Please diagnose step by step and fix any issues found.` },
   kyverno: {
     title: 'Troubleshoot Kyverno',
     description: 'Kyverno is installed but no policies are configured',
@@ -81,9 +79,7 @@ Please help me diagnose and fix the issue:
 5. Check PolicyReports are being generated: kubectl get policyreports -A
 6. If pods are crashing, check resource limits and webhook configuration
 
-Please diagnose step by step and fix any issues found.`,
-  },
-}
+Please diagnose step by step and fix any issues found.` } }
 
 /** Install mission prompt for compliance tools (Kubescape + Kyverno) */
 const COMPLIANCE_INSTALL_PROMPT = `I want to set up compliance monitoring on my Kubernetes clusters.
@@ -183,29 +179,34 @@ export function TrivyScan({ config: _config }: CardConfig) {
   const allChecked = clustersChecked >= totalClusters && totalClusters > 0
 
   // Filter by selected clusters
-  const filtered = useMemo(() => {
+  const filtered = (() => {
     if (selectedClusters.length === 0) return aggregated
     const agg = { critical: 0, high: 0, medium: 0, low: 0, unknown: 0 }
     for (const [name, s] of Object.entries(statuses)) {
       if (!s.installed || !selectedClusters.includes(name)) continue
-      agg.critical += s.vulnerabilities.critical
-      agg.high += s.vulnerabilities.high
-      agg.medium += s.vulnerabilities.medium
-      agg.low += s.vulnerabilities.low
-      agg.unknown += s.vulnerabilities.unknown
+      const vuln = s.vulnerabilities
+      if (!vuln) continue
+      agg.critical += vuln.critical
+      agg.high += vuln.high
+      agg.medium += vuln.medium
+      agg.low += vuln.low
+      agg.unknown += vuln.unknown
     }
     return agg
-  }, [statuses, aggregated, selectedClusters])
+  })()
 
   const hasData = installed || isDemoData
-  useCardLoadingState({ isLoading: isLoading && !hasData, isRefreshing, hasAnyData: hasData, isDemoData })
+  // #6219: surface failure state. `hasErrors` from useTrivy means at least
+  // one cluster's scan errored — wire it through as isFailed so CardWrapper
+  // can show the error path immediately instead of a stale-data fallthrough.
+  useCardLoadingState({ isLoading: isLoading && !hasData, isRefreshing, hasAnyData: hasData, isDemoData, isFailed: hasErrors })
 
   // Detect degraded state: installed but no reports generated (excludes clusters with errors)
-  const isDegraded = useMemo(() => {
+  const isDegraded = (() => {
     if (!installed || isLoading) return false
     const installedClusters = Object.values(statuses).filter(s => s.installed && !s.error)
     return installedClusters.length > 0 && installedClusters.every(s => s.totalReports === 0)
-  }, [installed, isLoading, statuses])
+  })()
 
   const handleInstall = () => {
     startMission({
@@ -222,8 +223,7 @@ Please help me:
 Use: helm install trivy-operator aquasecurity/trivy-operator --version 0.23.0 --namespace trivy --create-namespace
 
 Please proceed step by step.`,
-      context: {},
-    })
+      context: {} })
   }
 
   const handleTroubleshoot = () => {
@@ -233,8 +233,7 @@ Please proceed step by step.`,
       description: mission.description,
       type: 'troubleshoot',
       initialPrompt: mission.prompt,
-      context: {},
-    })
+      context: {} })
   }
 
   // Only show full-screen spinner on very first load with zero data
@@ -314,8 +313,8 @@ Please proceed step by step.`,
         <div className="flex flex-wrap gap-1">
           {Object.values(statuses).filter(s => s.installed).map(s => (
             <button key={s.cluster} onClick={() => setModalCluster(s.cluster)} className="cursor-pointer">
-              <StatusBadge color={s.vulnerabilities.critical > 0 ? 'red' : 'green'} size="xs">
-                {s.cluster}: {s.vulnerabilities.critical}C/{s.vulnerabilities.high}H
+              <StatusBadge color={(s.vulnerabilities?.critical ?? 0) > 0 ? 'red' : 'green'} size="xs">
+                {s.cluster}: {s.vulnerabilities?.critical ?? 0}C/{s.vulnerabilities?.high ?? 0}H
               </StatusBadge>
             </button>
           ))}
@@ -414,19 +413,19 @@ export function KubescapeScan({ config: _config }: CardConfig) {
       frameworks: clusterStatuses[0]?.frameworks || [],
       totalControls: clusterStatuses.reduce((sum, s) => sum + s.totalControls, 0),
       passedControls: clusterStatuses.reduce((sum, s) => sum + s.passedControls, 0),
-      failedControls: clusterStatuses.reduce((sum, s) => sum + s.failedControls, 0),
-    }
+      failedControls: clusterStatuses.reduce((sum, s) => sum + s.failedControls, 0) }
   }, [statuses, aggregated, selectedClusters])
 
   const ksHasData = installed || isDemoData
-  useCardLoadingState({ isLoading: isLoading && !ksHasData, isRefreshing, hasAnyData: ksHasData, isDemoData })
+  // #6219: surface failure state via the same `hasErrors` field useKubescape exposes.
+  useCardLoadingState({ isLoading: isLoading && !ksHasData, isRefreshing, hasAnyData: ksHasData, isDemoData, isFailed: hasErrors })
 
   // Detect degraded state: installed but no scan data produced (excludes clusters with errors)
-  const isDegraded = useMemo(() => {
+  const isDegraded = (() => {
     if (!installed || isLoading) return false
     const installedClusters = Object.values(statuses).filter(s => s.installed && !s.error)
     return installedClusters.length > 0 && installedClusters.every(s => s.totalControls === 0)
-  }, [installed, isLoading, statuses])
+  })()
 
   const handleInstall = () => {
     startMission({
@@ -443,8 +442,7 @@ Please help me:
 Use: helm install kubescape-operator kubescape/kubescape-operator --version 1.30.5 --namespace kubescape --create-namespace --set capabilities.continuousScan=enable
 
 Please proceed step by step.`,
-      context: {},
-    })
+      context: {} })
   }
 
   const handleTroubleshoot = () => {
@@ -454,8 +452,7 @@ Please proceed step by step.`,
       description: mission.description,
       type: 'troubleshoot',
       initialPrompt: mission.prompt,
-      context: {},
-    })
+      context: {} })
   }
 
   const score = filtered.overallScore
@@ -722,11 +719,11 @@ export function PolicyViolations({ config: _config }: CardConfig) {
   }, [kyvernoStatuses, selectedClusters])
 
   // Detect degraded state: installed but no policies configured
-  const isDegraded = useMemo(() => {
+  const isDegraded = (() => {
     if (!kyvernoInstalled || kyvernoLoading) return false
     const installedClusters = Object.values(kyvernoStatuses).filter(s => s.installed)
     return installedClusters.length > 0 && installedClusters.every(s => s.totalPolicies === 0)
-  }, [kyvernoInstalled, kyvernoLoading, kyvernoStatuses])
+  })()
 
   const handleTroubleshoot = () => {
     const mission = TROUBLESHOOT_MISSIONS.kyverno
@@ -735,18 +732,15 @@ export function PolicyViolations({ config: _config }: CardConfig) {
       description: mission.description,
       type: 'troubleshoot',
       initialPrompt: mission.prompt,
-      context: {},
-    })
+      context: {} })
   }
 
   // Clusters contributing Kyverno data (must be before early returns to satisfy hooks rules)
-  const participatingClusters = useMemo(() =>
-    Object.values(kyvernoStatuses).filter(s => s.installed).map(s => s.cluster),
-    [kyvernoStatuses],
-  )
+  const participatingClusters = Object.values(kyvernoStatuses).filter(s => s.installed).map(s => s.cluster)
 
   const hasData = violations.length > 0 || kyvernoDemoData
-  useCardLoadingState({ isLoading: kyvernoLoading && !hasData, isRefreshing: kyvernoRefreshing, hasAnyData: hasData, isDemoData: kyvernoDemoData })
+  // #6219: surface kyverno fetch failures.
+  useCardLoadingState({ isLoading: kyvernoLoading && !hasData, isRefreshing: kyvernoRefreshing, hasAnyData: hasData, isDemoData: kyvernoDemoData, isFailed: kyvernoHasErrors })
 
   if (violations.length === 0 && !kyvernoDemoData) {
     // Still scanning — show loading state instead of definitive empty state
@@ -896,8 +890,8 @@ export function PolicyViolations({ config: _config }: CardConfig) {
 
 export function ComplianceScore({ config: _config }: CardConfig) {
   const { t } = useTranslation(['common', 'cards'])
-  const { statuses: kubescapeStatuses, aggregated: kubescapeAgg, isLoading: ksLoading, isDemoData: ksDemoData, installed: ksInstalled, clustersChecked: ksChecked, totalClusters: ksTotal } = useKubescape()
-  const { statuses: kyvernoStatuses, isLoading: kyLoading, isDemoData: kyDemoData, installed: kyInstalled, clustersChecked: kyChecked, totalClusters: kyTotal } = useKyverno()
+  const { statuses: kubescapeStatuses, aggregated: kubescapeAgg, isLoading: ksLoading, isDemoData: ksDemoData, installed: ksInstalled, hasErrors: ksHasErrors, clustersChecked: ksChecked, totalClusters: ksTotal } = useKubescape()
+  const { statuses: kyvernoStatuses, isLoading: kyLoading, isDemoData: kyDemoData, installed: kyInstalled, hasErrors: kyHasErrors, clustersChecked: kyChecked, totalClusters: kyTotal } = useKyverno()
   const { selectedClusters } = useGlobalFilters()
   const { startMission } = useMissions()
   const [showBreakdown, setShowBreakdown] = useState(false)
@@ -952,8 +946,7 @@ export function ComplianceScore({ config: _config }: CardConfig) {
           { name: 'NSA', value: 79 },
           { name: 'PCI', value: 71 },
         ],
-        usingFallback: true,
-      }
+        usingFallback: true }
     }
 
     const avg = Math.round(scores.reduce((sum, s) => sum + s.value, 0) / scores.length)
@@ -987,12 +980,14 @@ export function ComplianceScore({ config: _config }: CardConfig) {
       description: 'Install Kubescape and/or Kyverno for compliance score tracking',
       type: 'deploy',
       initialPrompt: COMPLIANCE_INSTALL_PROMPT,
-      context: {},
-    })
+      context: {} })
   }
 
   const scoreHasData = !usingFallback || isDemoData
-  useCardLoadingState({ isLoading: isLoading && !scoreHasData, hasAnyData: scoreHasData, isDemoData })
+  // #6219: card is failed when both Kubescape and Kyverno had errors
+  // (single-tool failure still produces a meaningful partial score).
+  const scoreFailed = ksHasErrors && kyHasErrors
+  useCardLoadingState({ isLoading: isLoading && !scoreHasData, hasAnyData: scoreHasData, isDemoData, isFailed: scoreFailed })
 
   const scoreCtx = getScoreContext(score)
 
@@ -1128,8 +1123,7 @@ export function ComplianceScore({ config: _config }: CardConfig) {
               totalControls: kubescapeAgg.totalControls,
               passedControls: kubescapeAgg.passedControls,
               failedControls: kubescapeAgg.failedControls,
-              frameworks: kubescapeAgg.frameworks || [],
-            } : undefined}
+              frameworks: kubescapeAgg.frameworks || [] } : undefined}
             kyvernoData={kyvernoBreakdownData}
           />
         </>

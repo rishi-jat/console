@@ -5,7 +5,7 @@ import {
   FileCode, Gauge, AlertCircle, Layers, HardDrive, Globe, Users, Terminal, TrendingUp,
   Gamepad2, Puzzle, Target, Zap, Crown, Ghost, Bird, Rocket, Wand2, Stethoscope,
   MonitorCheck, Monitor, Workflow, Split, Router, BookOpen, Cloudy, Rss, Frame, Wrench, Phone,
-  Clock, Settings,
+  Clock, Settings, BarChart3,
 } from 'lucide-react'
 
 export const CARD_ICONS: Record<string, { icon: ComponentType<{ className?: string }>, color: string }> = {
@@ -122,6 +122,7 @@ export const CARD_ICONS: Record<string, { icon: ComponentType<{ className?: stri
   upgrade_status: { icon: TrendingUp, color: 'text-blue-400' },
   user_management: { icon: Users, color: 'text-purple-400' },
   github_activity: { icon: Activity, color: 'text-purple-400' },
+  issue_activity_chart: { icon: BarChart3, color: 'text-blue-400' },
   kubectl: { icon: Terminal, color: 'text-green-400' },
   weather: { icon: Cloudy, color: 'text-blue-400' },
   stock_market_ticker: { icon: TrendingUp, color: 'text-green-400' },
@@ -207,9 +208,7 @@ export const CARD_ICONS: Record<string, { icon: ComponentType<{ className?: stri
   kube_snake: { icon: Gamepad2, color: 'text-green-400' },
   kube_galaga: { icon: Rocket, color: 'text-blue-400' },
   kube_doom: { icon: Gamepad2, color: 'text-red-400' },
-  kube_craft: { icon: Puzzle, color: 'text-brown-400' },
   kube_chess: { icon: Crown, color: 'text-yellow-400' },
-  kube_craft_3d: { icon: Puzzle, color: 'text-green-400' },
 
   // Kagenti (kagenti-operator) cards
   kagenti_status: { icon: Activity, color: 'text-purple-400' },
@@ -235,6 +234,7 @@ export const CARD_ICONS: Record<string, { icon: ComponentType<{ className?: stri
   kubeflex_status: { icon: Layers, color: 'text-purple-400' },
   k3s_status: { icon: Box, color: 'text-green-400' },
   kubevirt_status: { icon: Monitor, color: 'text-orange-400' },
+  vcluster_status: { icon: Layers, color: 'text-purple-400' },
   multi_tenancy_overview: { icon: Shield, color: 'text-cyan-400' },
   tenant_isolation_setup: { icon: Settings, color: 'text-yellow-400' },
   tenant_topology: { icon: GitBranch, color: 'text-emerald-400' },

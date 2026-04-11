@@ -6,15 +6,25 @@ import { useCachedGPUNodes } from '../../hooks/useCachedData'
 import { useDrillDownActions } from '../../hooks/useDrillDown'
 import { CardClusterFilter } from '../../lib/cards/CardComponents'
 import { useChartFilters } from '../../lib/cards/cardHooks'
+import { RefreshIndicator } from '../ui/RefreshIndicator'
 import { useCardLoadingState } from './CardDataContext'
+import { DynamicCardErrorBoundary } from './DynamicCardErrorBoundary'
 import { Skeleton } from '../ui/Skeleton'
 import { useTranslation } from 'react-i18next'
 import { useDemoMode } from '../../hooks/useDemoMode'
 
-export function ResourceUsage() {
+// #6216: wrapped at the bottom of the file in DynamicCardErrorBoundary so
+// a runtime error in the 252-line component doesn't crash the dashboard.
+function ResourceUsageInternal() {
   const { t } = useTranslation(['cards', 'common'])
-  const { isLoading: clustersLoading, isRefreshing: clustersRefreshing } = useClusters()
-  const { nodes: allGPUNodes, isDemoFallback, isRefreshing: gpuRefreshing } = useCachedGPUNodes()
+  // #6217: destructure lastRefresh so the card can render a freshness
+  // indicator instead of leaving users guessing how stale the data is.
+  // #6271: useClusters returns Date|null; normalize to numeric epoch.
+  const { isLoading: clustersLoading, isRefreshing: clustersRefreshing, lastRefresh: clustersLastRefreshDate } = useClusters()
+  const clustersLastRefresh: number | null = clustersLastRefreshDate instanceof Date
+    ? clustersLastRefreshDate.getTime()
+    : (typeof clustersLastRefreshDate === 'number' ? clustersLastRefreshDate : null)
+  const { nodes: allGPUNodes, isDemoFallback, isRefreshing: gpuRefreshing, lastRefresh: gpuLastRefresh } = useCachedGPUNodes()
   const { drillToResources } = useDrillDownActions()
   const { isDemoMode } = useDemoMode()
 
@@ -27,24 +37,36 @@ export function ResourceUsage() {
     filteredClusters: clusters,
     showClusterFilter,
     setShowClusterFilter,
-    clusterFilterRef,
-  } = useChartFilters({ storageKey: 'resource-usage' })
+    clusterFilterRef } = useChartFilters({ storageKey: 'resource-usage' })
 
   // Filter GPU nodes to match the currently displayed clusters
-  const gpuNodes = useMemo(() => {
+  const gpuNodes = (() => {
     const clusterNames = new Set(clusters.map(c => c.name))
-    return allGPUNodes.filter(n => clusterNames.has(n.cluster.split('/')[0]))
-  }, [allGPUNodes, clusters])
+    return allGPUNodes.filter(n => clusterNames.has((n.cluster ?? '').split('/')[0]))
+  })()
 
-  // Calculate totals from real cluster data
+  // Calculate totals from real cluster data.
+  // For the "used" numerator we prefer metrics-server actual usage (cpuUsageCores /
+  // memoryUsageGB) when it's available for the cluster, and only fall back to
+  // requests (cpuRequestsCores / memoryRequestsGB) when the metrics API hasn't
+  // reported yet. Previously this card was labeled "Resource Usage" but summed
+  // request values — which represents allocation, not usage (issue #6105).
   const totals = useMemo(() => {
     // Sum capacity from all clusters
     const totalCPUs = clusters.reduce((sum, c) => sum + (c.cpuCores || 0), 0)
     const totalMemoryGB = clusters.reduce((sum, c) => sum + (c.memoryGB || 0), 0)
 
-    // Sum requests (allocated resources) from all clusters
-    const usedCPUs = clusters.reduce((sum, c) => sum + (c.cpuRequestsCores || 0), 0)
-    const usedMemoryGB = clusters.reduce((sum, c) => sum + (c.memoryRequestsGB || 0), 0)
+    // Prefer actual usage from metrics-server; fall back to requests per-cluster.
+    const usedCPUs = clusters.reduce((sum, c) => {
+      const actual = c.cpuUsageCores
+      if (typeof actual === 'number' && c.metricsAvailable) return sum + actual
+      return sum + (c.cpuRequestsCores || 0)
+    }, 0)
+    const usedMemoryGB = clusters.reduce((sum, c) => {
+      const actual = c.memoryUsageGB
+      if (typeof actual === 'number' && c.metricsAvailable) return sum + actual
+      return sum + (c.memoryRequestsGB || 0)
+    }, 0)
 
     // Accelerator data by type
     const gpuOnly = gpuNodes.filter(n => !n.acceleratorType || n.acceleratorType === 'GPU')
@@ -54,8 +76,7 @@ export function ResourceUsage() {
 
     const sumAccel = (nodes: typeof gpuNodes) => ({
       total: nodes.reduce((s, n) => s + (n.gpuCount || 0), 0),
-      used: nodes.reduce((s, n) => s + (n.gpuAllocated || 0), 0),
-    })
+      used: nodes.reduce((s, n) => s + (n.gpuAllocated || 0), 0) })
 
     return {
       cpu: { total: totalCPUs, used: Math.round(usedCPUs) },
@@ -63,8 +84,7 @@ export function ResourceUsage() {
       gpu: sumAccel(gpuOnly),
       tpu: sumAccel(tpuOnly),
       aiu: sumAccel(aiuOnly),
-      xpu: sumAccel(xpuOnly),
-    }
+      xpu: sumAccel(xpuOnly) }
   }, [clusters, gpuNodes])
 
   // Open resources drill down showing all clusters
@@ -78,8 +98,7 @@ export function ResourceUsage() {
     isLoading: clustersLoading && !hasData,
     isRefreshing: clustersRefreshing || gpuRefreshing,
     hasAnyData: hasData,
-    isDemoData: isDemoMode || isDemoFallback,
-  })
+    isDemoData: isDemoMode || isDemoFallback })
 
   if (showSkeleton) {
     return (
@@ -149,6 +168,26 @@ export function ResourceUsage() {
               {t('common:common.nClusters', { count: clusters.length })}
             </span>
           )}
+          {/* #6217: freshness indicator. #6244: use the OLDER of cluster
+              and GPU timestamps so the indicator reflects the staler source.
+              #6273: hide the timestamp in demo mode — useCache preserves
+              lastRefresh from prior live sessions, which would show
+              "Updated X ago" against demo data. */}
+          <RefreshIndicator
+            isRefreshing={clustersRefreshing || gpuRefreshing}
+            lastUpdated={(() => {
+              if (isDemoMode || isDemoFallback) return null
+              const cl = typeof clustersLastRefresh === 'number' ? clustersLastRefresh : null
+              const gp = typeof gpuLastRefresh === 'number' ? gpuLastRefresh : null
+              if (cl !== null && gp !== null) return new Date(Math.min(cl, gp))
+              if (cl !== null) return new Date(cl)
+              if (gp !== null) return new Date(gp)
+              return null
+            })()}
+            size="sm"
+            showLabel={true}
+            staleThresholdMinutes={5}
+          />
         </div>
 
         <div className="flex items-center gap-2">
@@ -213,8 +252,7 @@ export function ResourceUsage() {
               <span className="text-2xs text-red-400 mt-0.5">
                 {t('resourceUsage.overcommitted', {
                   used: accel.data.used,
-                  total: accel.data.total,
-                })}
+                  total: accel.data.total })}
               </span>
             )}
           </div>
@@ -240,5 +278,13 @@ export function ResourceUsage() {
         ))}
       </div>
     </div>
+  )
+}
+
+export function ResourceUsage() {
+  return (
+    <DynamicCardErrorBoundary cardId="ResourceUsage">
+      <ResourceUsageInternal />
+    </DynamicCardErrorBoundary>
   )
 }

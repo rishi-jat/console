@@ -1,5 +1,4 @@
 import { Shield, AlertTriangle, User, Network, Server, ChevronRight } from 'lucide-react'
-import { useMemo } from 'react'
 import type { SecurityIssue } from '../../hooks/useMCP'
 import { useCachedSecurityIssues } from '../../hooks/useCachedData'
 import { useDrillDownActions } from '../../hooks/useDrillDown'
@@ -24,48 +23,42 @@ function getDemoSecurityIssues(): SecurityIssue[] {
       cluster: 'eks-prod-us-east-1',
       issue: 'Privileged container',
       severity: 'high',
-      details: 'Container running in privileged mode',
-    },
+      details: 'Container running in privileged mode' },
     {
       name: 'worker-deployment',
       namespace: 'batch',
       cluster: 'vllm-gpu-cluster',
       issue: 'Running as root',
       severity: 'high',
-      details: 'Container running as root user',
-    },
+      details: 'Container running as root user' },
     {
       name: 'nginx-ingress',
       namespace: 'ingress',
       cluster: 'eks-prod-us-east-1',
       issue: 'Host network enabled',
       severity: 'medium',
-      details: 'Pod using host network namespace',
-    },
+      details: 'Pod using host network namespace' },
     {
       name: 'monitoring-agent',
       namespace: 'monitoring',
       cluster: 'gke-staging',
       issue: 'Missing security context',
       severity: 'low',
-      details: 'No security context defined',
-    },
+      details: 'No security context defined' },
     {
       name: 'redis-cache',
       namespace: 'data',
       cluster: 'openshift-prod',
       issue: 'Capabilities not dropped',
       severity: 'medium',
-      details: 'Container not dropping all capabilities',
-    },
+      details: 'Container not dropping all capabilities' },
     {
       name: 'legacy-app',
       namespace: 'legacy',
       cluster: 'vllm-gpu-cluster',
       issue: 'Running as root',
       severity: 'high',
-      details: 'Container running as root user',
-    },
+      details: 'Container running as root user' },
   ]
 }
 
@@ -104,10 +97,10 @@ function SecurityIssuesInternal({ config }: SecurityIssuesProps) {
 
   // Fetch data with caching (stale-while-revalidate pattern)
   // Cache persists to IndexedDB so data shows immediately on navigation/reload
-  const { issues: cachedIssues, isLoading: cachedLoading, isDemoFallback, error: cachedError, isFailed: cachedFailed, consecutiveFailures: cachedFailures, lastRefresh } = useCachedSecurityIssues(clusterConfig, namespaceConfig)
+  const { issues: cachedIssues, isLoading: cachedLoading, isRefreshing: cachedRefreshing, isDemoFallback, error: cachedError, isFailed: cachedFailed, consecutiveFailures: cachedFailures, lastRefresh } = useCachedSecurityIssues(clusterConfig, namespaceConfig)
 
   // Use demo data when in demo mode, otherwise use cached/agent data
-  const rawIssues = useMemo(() => isDemoMode ? getDemoSecurityIssues() : cachedIssues, [isDemoMode, cachedIssues])
+  const rawIssues = isDemoMode ? getDemoSecurityIssues() : cachedIssues
   const isLoading = isDemoMode ? false : cachedLoading
   const error = isDemoMode ? null : cachedError
   const isFailed = isDemoMode ? false : cachedFailed
@@ -120,13 +113,12 @@ function SecurityIssuesInternal({ config }: SecurityIssuesProps) {
   const hasData = rawIssues.length > 0
   const { showSkeleton, showEmptyState } = useCardLoadingState({
     isLoading: isLoading && !hasData,
-    isRefreshing: isDemoMode ? false : cachedLoading && hasData,
+    isRefreshing: isDemoMode ? false : cachedRefreshing,
     isDemoData: isDemoMode || isDemoFallback,
     hasAnyData: hasData,
     isFailed,
     consecutiveFailures,
-    lastRefresh: isDemoMode ? null : lastRefresh,
-  })
+    lastRefresh: isDemoMode ? null : lastRefresh })
 
   const severityOrder: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3, info: 4 }
 
@@ -149,33 +141,26 @@ function SecurityIssuesInternal({ config }: SecurityIssuesProps) {
       availableClusters: availableClustersForFilter,
       showClusterFilter,
       setShowClusterFilter,
-      clusterFilterRef,
-    },
+      clusterFilterRef },
     sorting: {
       sortBy,
       setSortBy,
       sortDirection,
-      setSortDirection,
-    },
+      setSortDirection },
     containerRef,
-    containerStyle,
-  } = useCardData<SecurityIssue, SortByOption>(rawIssues, {
+    containerStyle } = useCardData<SecurityIssue, SortByOption>(rawIssues, {
     filter: {
       searchFields: ['name', 'namespace', 'cluster', 'issue', 'severity', 'details'],
       clusterField: 'cluster',
-      storageKey: 'security-issues',
-    },
+      storageKey: 'security-issues' },
     sort: {
       defaultField: 'severity',
       defaultDirection: 'desc',
       comparators: {
         severity: (a, b) => (severityOrder[a.severity] || 5) - (severityOrder[b.severity] || 5),
         name: (a, b) => a.name.localeCompare(b.name),
-        cluster: (a, b) => (a.cluster || '').localeCompare(b.cluster || ''),
-      },
-    },
-    defaultLimit: 5,
-  })
+        cluster: (a, b) => (a.cluster || '').localeCompare(b.cluster || '') } },
+    defaultLimit: 5 })
 
   const handleIssueClick = (issue: SecurityIssue) => {
     if (!issue.cluster) {
@@ -184,8 +169,7 @@ function SecurityIssuesInternal({ config }: SecurityIssuesProps) {
     }
     drillToPod(issue.cluster, issue.namespace, issue.name, {
       securityIssue: issue.issue,
-      severity: issue.severity,
-    })
+      severity: issue.severity })
   }
 
   const highCount = rawIssues.filter(i => i.severity === 'high').length
@@ -221,6 +205,20 @@ function SecurityIssuesInternal({ config }: SecurityIssuesProps) {
               </div>
             </div>
           ))}
+        </div>
+      </div>
+    )
+  }
+
+  if (isFailed && !isLoading && issues.length === 0) {
+    return (
+      <div className="h-full flex flex-col">
+        <div className="flex-1 flex flex-col items-center justify-center text-center">
+          <div className="w-12 h-12 rounded-full bg-red-500/10 flex items-center justify-center mb-3" title={t('securityIssues.failedToLoad', 'Failed to load security scan')}>
+            <AlertTriangle className="w-6 h-6 text-red-400" />
+          </div>
+          <p className="text-foreground font-medium">{t('securityIssues.failedToLoad', 'Failed to load security scan')}</p>
+          <p className="text-sm text-muted-foreground">{error || t('securityIssues.apiUnavailable', 'Security scan API is unavailable')}</p>
         </div>
       </div>
     )
@@ -340,8 +338,7 @@ function SecurityIssuesInternal({ config }: SecurityIssuesProps) {
                     name: issue.name,
                     namespace: issue.namespace,
                     cluster: issue.cluster || 'default',
-                    status: issue.severity,
-                  }}
+                    status: issue.severity }}
                   issues={[{ name: issue.issue, message: issue.details || issue.issue }]}
                   additionalContext={{ severity: issue.severity, securityIssue: issue.issue }}
                 />

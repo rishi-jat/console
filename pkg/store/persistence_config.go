@@ -15,8 +15,8 @@ import (
 )
 
 const (
-	configDirMode  = 0755
-	configFileMode = 0644
+	configDirMode  = 0700 // Owner read/write/execute only
+	configFileMode = 0600 // Owner read/write only — prevents other users from reading cluster config
 )
 
 // PersistenceConfig holds the configuration for CRD-based persistence
@@ -76,8 +76,16 @@ const (
 	ClusterHealthUnknown     ClusterHealth = "unknown"
 )
 
-// DefaultNamespace is the default namespace for console CRs
-const DefaultNamespace = "kubestellar-console"
+// DefaultNamespace is the default namespace for console CRs.
+// Overridden by POD_NAMESPACE env var when running in-cluster.
+var DefaultNamespace = getDefaultNamespace()
+
+func getDefaultNamespace() string {
+	if ns := os.Getenv("POD_NAMESPACE"); ns != "" {
+		return ns
+	}
+	return "kubestellar-console"
+}
 
 // PersistenceStore manages persistence configuration
 type PersistenceStore struct {
@@ -131,6 +139,18 @@ func (p *PersistenceStore) Load() error {
 
 	if err := json.Unmarshal(data, &p.config); err != nil {
 		return fmt.Errorf("failed to parse persistence config: %w", err)
+	}
+
+	// #6285: a config file containing literal JSON `null` is valid
+	// JSON and causes json.Unmarshal(data, &p.config) to set p.config
+	// to nil, which would panic on the namespace dereference below.
+	// Reset to defaults when that happens.
+	if p.config == nil {
+		p.config = &PersistenceConfig{
+			Enabled:   false,
+			Namespace: DefaultNamespace,
+			SyncMode:  "primary-only",
+		}
 	}
 
 	// Ensure namespace has a default

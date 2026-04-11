@@ -1,10 +1,10 @@
-import { useCallback, useMemo } from 'react'
 import { useClusters, useGPUNodes } from '../../hooks/useMCP'
 import { useCachedLLMdModels } from '../../hooks/useCachedData'
 import { useUniversalStats, createMergedStatValueGetter } from '../../hooks/useUniversalStats'
 import { StatBlockValue } from '../ui/StatsOverview'
 import { DashboardPage } from '../../lib/dashboards/DashboardPage'
 import { getDefaultCards } from '../../config/dashboards'
+import { RotatingTip } from '../ui/RotatingTip'
 import { useLLMdClusters } from '../cards/workload-detection/shared'
 import { StackProvider } from '../../contexts/StackContext'
 import { StackSelector } from '../cards/llmd/StackSelector'
@@ -22,7 +22,7 @@ export function AIML() {
   const { getStatValue: getUniversalStatValue } = useUniversalStats()
 
   // Get GPU cluster names for intelligent LLM-d cluster discovery
-  const gpuClusterNames = useMemo(() => new Set(gpuNodes.map(n => n.cluster)), [gpuNodes])
+  const gpuClusterNames = new Set(gpuNodes.map(n => n.cluster))
 
   // Dynamically discover LLM-d clusters from available reachable clusters
   // Scans for clusters with GPU nodes or AI/ML naming patterns
@@ -44,7 +44,7 @@ export function AIML() {
   const isDemoData = !hasRealData && !gpuLoading && !llmLoading
 
   // Stats value getter for the configurable StatsOverview component
-  const getDashboardStatValue = useCallback((blockId: string): StatBlockValue => {
+  const getDashboardStatValue = (blockId: string): StatBlockValue => {
     switch (blockId) {
       case 'clusters':
         return { value: reachableClusters.length, sublabel: 'clusters', isClickable: false }
@@ -74,12 +74,9 @@ export function AIML() {
       default:
         return { value: '-' }
     }
-  }, [reachableClusters, gpuNodes, totalGPUs, mlWorkloadCount, llmModels, gpuLoading, llmLoading])
+  }
 
-  const getStatValue = useCallback(
-    (blockId: string) => createMergedStatValueGetter(getDashboardStatValue, getUniversalStatValue)(blockId),
-    [getDashboardStatValue, getUniversalStatValue]
-  )
+  const getStatValue = (blockId: string) => createMergedStatValueGetter(getDashboardStatValue, getUniversalStatValue)(blockId)
 
   return (
     <StackProvider>
@@ -87,6 +84,7 @@ export function AIML() {
         title={t('aiml.title')}
         subtitle={t('aiml.subtitle')}
         icon="Brain"
+        rightExtra={<RotatingTip page="ai-ml" />}
         storageKey={AIML_CARDS_KEY}
         defaultCards={DEFAULT_AIML_CARDS}
         statsType="compute"
@@ -99,8 +97,7 @@ export function AIML() {
         isDemoData={isDemoData}
         emptyState={{
           title: t('aiml.emptyStateTitle'),
-          description: t('aiml.emptyStateDescription'),
-        }}
+          description: t('aiml.emptyStateDescription') }}
         headerExtra={<StackSelector />}
       >
         {error && (

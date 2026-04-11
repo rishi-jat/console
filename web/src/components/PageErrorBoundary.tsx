@@ -69,27 +69,32 @@ export class PageErrorBoundary extends Component<Props, State> {
           <h2 className="text-lg font-semibold text-foreground mb-2">
             {i18next.t('common:pageError.title', 'This page encountered an error')}
           </h2>
-          <p className="text-sm text-muted-foreground mb-2 max-w-md">
+          <div className="text-sm text-muted-foreground mb-2 max-w-md">
             {i18next.t(
               'common:pageError.description',
               'Something went wrong while rendering this page. You can try again, go back to the dashboard, or reload.',
             )}
-          </p>
+          </div>
           {this.state.error && (
-            <p className="text-xs text-muted-foreground/70 font-mono mb-6 break-all max-w-lg">
+            // `break-words` avoids splitting words like "undefined" mid-letter
+            // (see issue #5902). `break-all` was the previous class and caused
+            // single-character lines when error messages contained long tokens.
+            <div className="text-xs text-muted-foreground/70 font-mono mb-6 break-words whitespace-pre-wrap max-w-lg">
               {this.state.error.message}
-            </p>
+            </div>
           )}
           <div className="flex items-center gap-3">
             <button
               onClick={this.handleRecover}
               className="px-4 py-2 bg-secondary hover:bg-secondary/80 text-foreground rounded-lg text-sm font-medium transition-colors"
+              aria-label="Try rendering the page again"
             >
               {i18next.t('common:pageError.tryAgain', 'Try again')}
             </button>
             <button
               onClick={this.handleGoHome}
               className="px-4 py-2 bg-secondary hover:bg-secondary/80 text-foreground rounded-lg text-sm font-medium transition-colors flex items-center gap-2"
+              aria-label="Go back to the dashboard"
             >
               <ArrowLeft className="w-4 h-4" aria-hidden="true" />
               {i18next.t('common:pageError.goHome', 'Dashboard')}
@@ -97,6 +102,7 @@ export class PageErrorBoundary extends Component<Props, State> {
             <button
               onClick={this.handleReload}
               className="px-4 py-2 bg-purple-500 hover:bg-purple-600 text-white rounded-lg text-sm font-medium transition-colors flex items-center gap-2"
+              aria-label="Reload the page"
             >
               <RefreshCw className="w-4 h-4" aria-hidden="true" />
               {i18next.t('common:pageError.reload', 'Reload')}

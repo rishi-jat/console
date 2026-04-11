@@ -10,7 +10,7 @@
  * - Demo fallback when no clusters are connected
  */
 
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { useClusters } from './useMCP'
 import { kubectlProxy } from '../lib/kubectlProxy'
 import { settledWithConcurrency } from '../lib/utils/concurrency'
@@ -134,21 +134,27 @@ async function fetchSingleCluster(cluster: string): Promise<RBACFinding[]> {
   const findings: RBACFinding[] = []
 
   try {
-    // Fetch ClusterRoleBindings
-    const crbResult = await kubectlProxy.exec(
-      ['get', 'clusterrolebindings', '-o', 'json'],
-      { context: cluster, timeout: FETCH_TIMEOUT_MS }
-    )
+    // Fetch all three RBAC resources concurrently — they are independent reads (#4852)
+    const [crbResult, crResult, rbResult] = await Promise.all([
+      kubectlProxy.exec(
+        ['get', 'clusterrolebindings', '-o', 'json'],
+        { context: cluster, timeout: FETCH_TIMEOUT_MS }
+      ),
+      kubectlProxy.exec(
+        ['get', 'clusterroles', '-o', 'json'],
+        { context: cluster, timeout: FETCH_TIMEOUT_MS }
+      ),
+      kubectlProxy.exec(
+        ['get', 'rolebindings', '-A', '-o', 'json'],
+        { context: cluster, timeout: FETCH_TIMEOUT_MS }
+      ),
+    ])
+
     if (crbResult.exitCode !== 0 || !crbResult.output) return findings
 
     const crbData = JSON.parse(crbResult.output)
     const clusterRoleBindings: ClusterRoleBinding[] = crbData.items || []
 
-    // Fetch ClusterRoles for rule analysis
-    const crResult = await kubectlProxy.exec(
-      ['get', 'clusterroles', '-o', 'json'],
-      { context: cluster, timeout: FETCH_TIMEOUT_MS }
-    )
     const clusterRoleMap = new Map<string, ClusterRole>()
     if (crResult.exitCode === 0 && crResult.output) {
       const crData = JSON.parse(crResult.output)
@@ -157,11 +163,6 @@ async function fetchSingleCluster(cluster: string): Promise<RBACFinding[]> {
       }
     }
 
-    // Fetch RoleBindings across all namespaces
-    const rbResult = await kubectlProxy.exec(
-      ['get', 'rolebindings', '-A', '-o', 'json'],
-      { context: cluster, timeout: FETCH_TIMEOUT_MS }
-    )
     const roleBindings: RoleBinding[] = []
     if (rbResult.exitCode === 0 && rbResult.output) {
       const rbData = JSON.parse(rbResult.output)
@@ -189,8 +190,7 @@ async function fetchSingleCluster(cluster: string): Promise<RBACFinding[]> {
             subjectKind,
             risk: 'critical',
             description: 'cluster-admin binding — full cluster access',
-            binding: bindingName,
-          })
+            binding: bindingName })
           continue
         }
 
@@ -203,8 +203,7 @@ async function fetchSingleCluster(cluster: string): Promise<RBACFinding[]> {
             subjectKind,
             risk: 'high',
             description: `Wildcard verb on secrets via ${roleName}`,
-            binding: bindingName,
-          })
+            binding: bindingName })
           continue
         }
 
@@ -217,8 +216,7 @@ async function fetchSingleCluster(cluster: string): Promise<RBACFinding[]> {
             subjectKind,
             risk: 'high',
             description: `Default ServiceAccount has elevated privileges via ${roleName}`,
-            binding: bindingName,
-          })
+            binding: bindingName })
           continue
         }
 
@@ -231,8 +229,7 @@ async function fetchSingleCluster(cluster: string): Promise<RBACFinding[]> {
             subjectKind,
             risk: 'medium',
             description: `Wide list/watch access on all resources via ${roleName}`,
-            binding: bindingName,
-          })
+            binding: bindingName })
         }
       }
     }
@@ -249,8 +246,7 @@ async function fetchSingleCluster(cluster: string): Promise<RBACFinding[]> {
           subjectKind: toSubjectKind(subject.kind),
           risk: 'low',
           description: `${rb.roleRef.name} role in namespace ${rb.metadata.namespace}`,
-          binding: `RoleBinding/${rb.metadata.name}`,
-        })
+          binding: `RoleBinding/${rb.metadata.name}` })
       }
     }
   } catch (err) {
@@ -287,14 +283,13 @@ export function useRBACFindings() {
     cachedSnapshot?.findings || []
   )
   const [isLoading, setIsLoading] = useState(!cachedSnapshot)
+  const [isRefreshing, setIsRefreshing] = useState(false)
+  const [consecutiveFailures, setConsecutiveFailures] = useState(0)
   const [error, setError] = useState<string | null>(null)
   const fetchInProgress = useRef(false)
   const initialLoadDone = useRef(!!cachedSnapshot)
 
-  const clusters = useMemo(() =>
-    allClusters.filter(c => c.reachable === true).map(c => c.name),
-    [allClusters]
-  )
+  const clusters = allClusters.filter(c => c.reachable === true).map(c => c.name)
 
   const refetch = useCallback(async () => {
     if (clusters.length === 0) {
@@ -305,7 +300,11 @@ export function useRBACFindings() {
     fetchInProgress.current = true
 
     try {
-      if (!initialLoadDone.current) setIsLoading(true)
+      if (!initialLoadDone.current) {
+        setIsLoading(true)
+      } else {
+        setIsRefreshing(true)
+      }
       setError(null)
 
       const allFindings: RBACFinding[] = []
@@ -330,9 +329,13 @@ export function useRBACFindings() {
       saveToCache(allFindings)
       initialLoadDone.current = true
       setIsLoading(false)
+      setIsRefreshing(false)
+      setConsecutiveFailures(0)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to fetch RBAC data')
       setIsLoading(false)
+      setIsRefreshing(false)
+      setConsecutiveFailures(prev => prev + 1)
     } finally {
       fetchInProgress.current = false
     }
@@ -343,6 +346,8 @@ export function useRBACFindings() {
     if (isDemoMode) {
       setFindings(DEMO_FINDINGS)
       setIsLoading(false)
+      setIsRefreshing(false)
+      setConsecutiveFailures(0)
       setError(null)
       initialLoadDone.current = true
       return
@@ -361,6 +366,8 @@ export function useRBACFindings() {
       clearCache()
       setFindings([])
       setIsLoading(true)
+      setIsRefreshing(false)
+      setConsecutiveFailures(0)
       setError(null)
       initialLoadDone.current = false
     })
@@ -385,8 +392,9 @@ export function useRBACFindings() {
   return {
     findings,
     isLoading,
+    isRefreshing,
+    consecutiveFailures,
     error,
     isDemoData: isDemoMode,
-    refetch,
-  }
+    refetch }
 }

@@ -1,4 +1,4 @@
-import { useState, useMemo, useCallback } from 'react'
+import { useState, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useCachedNodes } from '../../hooks/useCachedData'
 import { StatusBadge } from '../ui/StatusBadge'
@@ -7,6 +7,13 @@ import { useCardLoadingState } from './CardDataContext'
 import { useDemoMode } from '../../hooks/useDemoMode'
 
 type ConditionFilter = 'all' | 'healthy' | 'cordoned' | 'pressure'
+
+/** Confirmation dialog state for cordon/uncordon actions */
+interface PendingAction {
+  nodeName: string
+  cluster: string
+  action: 'cordon' | 'uncordon'
+}
 
 export function NodeConditions() {
   const { t } = useTranslation('cards')
@@ -21,13 +28,14 @@ export function NodeConditions() {
     hasAnyData: hasData,
     isDemoData: isDemoMode || isDemoFallback,
     isFailed,
-    consecutiveFailures,
-  })
+    consecutiveFailures })
 
   const [filter, setFilter] = useState<ConditionFilter>('all')
   const [actionPending, setActionPending] = useState<string | null>(null)
+  const [confirmAction, setConfirmAction] = useState<PendingAction | null>(null)
+  const [actionError, setActionError] = useState<string | null>(null)
 
-  const summary = useMemo(() => {
+  const summary = (() => {
     const cordoned = nodes.filter(n => n.unschedulable)
     const pressure = nodes.filter(n => {
       const conditions = n.conditions || []
@@ -41,7 +49,7 @@ export function NodeConditions() {
       return ready && (ready as { status: string }).status === 'True' && !n.unschedulable
     })
     return { total: nodes.length, healthy: healthy.length, cordoned: cordoned.length, pressure: pressure.length }
-  }, [nodes])
+  })()
 
   const filtered = useMemo(() => {
     switch (filter) {
@@ -65,29 +73,32 @@ export function NodeConditions() {
     }
   }, [nodes, filter])
 
-  const handleCordon = useCallback(async (nodeName: string, cluster: string) => {
-    setActionPending(nodeName)
-    try {
-      await execute(cluster, ['cordon', nodeName])
-    } catch {
-      // Ignore kubectl errors (connection failures, timeouts) — they are
-      // expected when the local agent is unavailable and must not surface
-      // as unhandled promise rejections from the onClick handler.
-    } finally {
-      setActionPending(null)
-    }
-  }, [execute])
+  /** Show confirmation dialog before executing cordon/uncordon */
+  const requestAction = (nodeName: string, cluster: string, action: 'cordon' | 'uncordon') => {
+    setActionError(null)
+    setConfirmAction({ nodeName, cluster, action })
+  }
 
-  const handleUncordon = useCallback(async (nodeName: string, cluster: string) => {
+  /** Execute the confirmed cordon/uncordon action */
+  const executeConfirmedAction = async () => {
+    if (!confirmAction) return
+    const { nodeName, cluster, action } = confirmAction
+    setConfirmAction(null)
     setActionPending(nodeName)
+    setActionError(null)
     try {
-      await execute(cluster, ['uncordon', nodeName])
-    } catch {
-      // Same rationale as handleCordon above.
+      await execute(cluster, [action, nodeName])
+    } catch (err) {
+      const message = err instanceof Error ? err.message : `Failed to ${action} node`
+      setActionError(`${action} ${nodeName}: ${message}`)
     } finally {
       setActionPending(null)
     }
-  }, [execute])
+  }
+
+  const cancelAction = () => {
+    setConfirmAction(null)
+  }
 
   if (isLoading && nodes.length === 0) {
     return (
@@ -101,6 +112,50 @@ export function NodeConditions() {
 
   return (
     <div className="space-y-2 p-1">
+      {/* Confirmation dialog for cordon/uncordon */}
+      {confirmAction && (
+        <div className="p-2 rounded-lg bg-yellow-500/10 border border-yellow-500/30 text-xs space-y-2">
+          <div className="font-medium text-yellow-300">
+            {t('nodeConditions.confirmTitle', {
+              action: confirmAction.action === 'cordon' ? t('nodeConditions.cordon') : t('nodeConditions.uncordon'),
+              node: confirmAction.nodeName })}
+          </div>
+          <div className="text-muted-foreground">
+            {confirmAction.action === 'cordon'
+              ? t('nodeConditions.confirmCordonDescription')
+              : t('nodeConditions.confirmUncordonDescription')}
+          </div>
+          <div className="flex gap-2 justify-end">
+            <button
+              onClick={cancelAction}
+              className="px-2 py-1 rounded bg-muted/50 hover:bg-muted text-muted-foreground transition-colors"
+            >
+              {t('nodeConditions.cancel')}
+            </button>
+            <button
+              onClick={executeConfirmedAction}
+              className={`px-2 py-1 rounded transition-colors ${
+                confirmAction.action === 'cordon'
+                  ? 'bg-yellow-500/20 hover:bg-yellow-500/30 text-yellow-300'
+                  : 'bg-green-500/20 hover:bg-green-500/30 text-green-300'
+              }`}
+            >
+              {confirmAction.action === 'cordon' ? t('nodeConditions.cordon') : t('nodeConditions.uncordon')}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Error toast for failed actions */}
+      {actionError && (
+        <div className="p-2 rounded-lg bg-red-500/10 border border-red-500/30 text-xs text-red-400 flex items-center justify-between">
+          <span>{actionError}</span>
+          <button onClick={() => setActionError(null)} className="ml-2 text-red-300 hover:text-red-200">
+            ✕
+          </button>
+        </div>
+      )}
+
       <div className="flex gap-2 text-xs">
         {(['all', 'healthy', 'cordoned', 'pressure'] as ConditionFilter[]).map(f => {
           const count = f === 'all' ? summary.total : summary[f]
@@ -108,14 +163,12 @@ export function NodeConditions() {
             all: 'bg-muted/50 text-foreground',
             healthy: 'bg-green-500/10 text-green-400',
             cordoned: 'bg-yellow-500/10 text-yellow-400',
-            pressure: 'bg-red-500/10 text-red-400',
-          }
+            pressure: 'bg-red-500/10 text-red-400' }
           const filterLabels: Record<ConditionFilter, string> = {
             all: t('nodeConditions.filterAll'),
             healthy: t('nodeConditions.filterHealthy'),
             cordoned: t('nodeConditions.filterCordoned'),
-            pressure: t('nodeConditions.filterPressure'),
-          }
+            pressure: t('nodeConditions.filterPressure') }
           return (
             <button
               key={f}
@@ -162,10 +215,11 @@ export function NodeConditions() {
                 {node.cluster && (
                   <button
                     disabled={actionPending === node.name}
-                    onClick={() => node.unschedulable
-                      ? handleUncordon(node.name, node.cluster!)
-                      : handleCordon(node.name, node.cluster!)
-                    }
+                    onClick={() => requestAction(
+                      node.name,
+                      node.cluster!,
+                      node.unschedulable ? 'uncordon' : 'cordon'
+                    )}
                     className="ml-1 text-xs px-1.5 py-0.5 rounded bg-muted/50 hover:bg-muted text-muted-foreground transition-colors disabled:opacity-50"
                   >
                     {actionPending === node.name ? '...' : node.unschedulable ? t('nodeConditions.uncordon') : t('nodeConditions.cordon')}
