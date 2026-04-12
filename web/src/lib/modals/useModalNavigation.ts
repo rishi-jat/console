@@ -2,6 +2,32 @@ import { useState, useEffect, useCallback } from 'react'
 import { UseModalNavigationOptions, UseModalNavigationResult } from './types'
 
 /**
+ * #6749-B (Copilot on PR #6746) — Module-level stable no-op ref object
+ * used as a fallback when a `useModal` caller omits `modalRef`/`backdropRef`.
+ *
+ * A single shared `{ current: null }` singleton is safe here because
+ * `useModalBackdropClose` and `useModalFocusTrap` gate their behavior on
+ * the `enabled` flag (`!!backdropRef && enableBackdropClose` and
+ * `!!modalRef && enableFocusTrap`), so when a caller omits the real ref
+ * the hook short-circuits and never reads or writes `.current`. The
+ * shared object therefore can't be trampled by another consumer.
+ *
+ * The previous code created a fresh `{ current: null }` object literal
+ * inside `useModal` on every render. Both `useModalBackdropClose` and
+ * `useModalFocusTrap` include `ref` in their effect dep arrays, so the
+ * effects re-ran on every render when the caller omitted a ref —
+ * detaching and reattaching event listeners hundreds of times during
+ * streaming renders. The module-level singleton makes that identity
+ * stable for free, with no per-component `useMemo` cost.
+ *
+ * #6758 (Copilot on PR #6755) — The previous comment claimed a
+ * module-level singleton but the implementation used `useMemo`. The
+ * module-level form actually achieves the stated intent and is cheaper,
+ * so this file now matches its header comment.
+ */
+const NOOP_REF: React.RefObject<HTMLElement | null> = { current: null }
+
+/**
  * useModalNavigation - Keyboard navigation hook for modals
  *
  * Provides standardized keyboard navigation:
@@ -206,17 +232,25 @@ export function useModal({
     enableBackspace,
     disableBodyScroll })
 
-  // Backdrop close
-  if (backdropRef && enableBackdropClose) {
-    // eslint-disable-next-line react-hooks/rules-of-hooks
-    useModalBackdropClose(backdropRef, isOpen, onClose)
-  }
-
-  // Focus trap
-  if (modalRef && enableFocusTrap) {
-    // eslint-disable-next-line react-hooks/rules-of-hooks
-    useModalFocusTrap(modalRef, isOpen)
-  }
+  // #6717 — Always call useModalBackdropClose and useModalFocusTrap
+  // unconditionally so React's rules-of-hooks invariant holds when callers
+  // toggle `enableBackdropClose` / `enableFocusTrap` / ref props across
+  // renders. The behavior is gated inside each hook via the `isOpen` flag:
+  // when `false`, the hook short-circuits and installs no listeners.
+  //
+  // Callers that pass no ref get the module-level NOOP_REF singleton so
+  // the hook signature is satisfied without allocating a fresh object on
+  // every render. See the file-header note on #6749-B / #6758 for why
+  // sharing is safe here.
+  useModalBackdropClose(
+    backdropRef ?? NOOP_REF,
+    isOpen && !!backdropRef && enableBackdropClose,
+    onClose,
+  )
+  useModalFocusTrap(
+    modalRef ?? NOOP_REF,
+    isOpen && !!modalRef && enableFocusTrap,
+  )
 }
 
 /**

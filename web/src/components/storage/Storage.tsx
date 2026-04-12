@@ -1,8 +1,10 @@
 import { useState, useEffect, useRef } from 'react'
-import { Database, ExternalLink, AlertCircle } from 'lucide-react'
+import { Database, AlertCircle } from 'lucide-react'
 import { BaseModal, useModalState } from '../../lib/modals'
 import { useUniversalStats, createMergedStatValueGetter } from '../../hooks/useUniversalStats'
-import { useClusters, usePVCs, PVC } from '../../hooks/useMCP'
+import { useClusters } from '../../hooks/useMCP'
+import type { PVC } from '../../hooks/useMCP'
+import { useCachedPVCs } from '../../hooks/useCachedData'
 import { useGlobalFilters } from '../../hooks/useGlobalFilters'
 import { useDrillDownActions } from '../../hooks/useDrillDown'
 import { StatBlockValue } from '../ui/StatsOverview'
@@ -19,10 +21,9 @@ interface PVCListModalProps {
   pvcs: PVC[]
   title: string
   statusFilter?: 'Bound' | 'Pending' | 'all'
-  onSelectPVC: (cluster: string, namespace: string, name: string) => void
 }
 
-function PVCListModal({ isOpen, onClose, pvcs, title, statusFilter = 'all', onSelectPVC }: PVCListModalProps) {
+function PVCListModal({ isOpen, onClose, pvcs, title, statusFilter = 'all' }: PVCListModalProps) {
   const { t } = useTranslation()
   const [searchQuery, setSearchQuery] = useState('')
 
@@ -81,8 +82,8 @@ function PVCListModal({ isOpen, onClose, pvcs, title, statusFilter = 'all', onSe
             {filteredPVCs.map((pvc, idx) => (
               <div
                 key={`${pvc.cluster}-${pvc.namespace}-${pvc.name}-${idx}`}
-                onClick={() => pvc.cluster && onSelectPVC(pvc.cluster, pvc.namespace, pvc.name)}
-                className="glass p-3 rounded-lg cursor-pointer hover:bg-secondary/50 transition-colors"
+                className="glass p-3 rounded-lg transition-colors"
+                title="PVC drilldown not available"
               >
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-3">
@@ -103,7 +104,6 @@ function PVCListModal({ isOpen, onClose, pvcs, title, statusFilter = 'all', onSe
                   </div>
                   <div className="flex items-center gap-2">
                     {pvc.cluster && <ClusterBadge cluster={pvc.cluster} size="sm" />}
-                    <ExternalLink className="w-4 h-4 text-muted-foreground" />
                   </div>
                 </div>
               </div>
@@ -125,9 +125,9 @@ export function Storage() {
   const {
     selectedClusters: globalSelectedClusters,
     isAllClustersSelected } = useGlobalFilters()
-  const { pvcs, error: pvcsError } = usePVCs()
+  const { pvcs, error: pvcsError } = useCachedPVCs()
   const error = clustersError || pvcsError
-  const { drillToPVC, drillToResources } = useDrillDownActions()
+  const { drillToResources } = useDrillDownActions()
   const { getStatValue: getUniversalStatValue } = useUniversalStats()
 
   // PVC List Modal state
@@ -157,9 +157,10 @@ export function Storage() {
     boundPVCs: filteredPVCs.filter(p => p.status === 'Bound').length,
     pendingPVCs: filteredPVCs.filter(p => p.status === 'Pending').length }
 
-  // Check if we have actual data (not just loading state)
+  // Check if we have actual data (not just loading state) — storage data is valid
+  // regardless of nodeCount (#6808)
   const hasActualData = filteredClusters.some(c =>
-    c.reachable !== false && c.storageGB !== undefined && c.nodeCount !== undefined && c.nodeCount > 0
+    c.reachable !== false && (c.storageGB !== undefined || pvcs.length > 0)
   )
 
   // Cache the last known good stats to show during refresh
@@ -257,7 +258,7 @@ export function Storage() {
         hasData={hasDataToShow}
         emptyState={{
           title: 'Storage Dashboard',
-          description: 'Add cards to monitor PersistentVolumes, StorageClasses, and storage utilization across your clusters.' }}
+          description: 'Add cards to monitor PVCs, StorageClasses, and storage utilization across your clusters.' }}
       >
         {/* Error Display */}
         {error && (
@@ -278,10 +279,6 @@ export function Storage() {
         pvcs={filteredPVCs}
         title={pvcModalFilter === 'all' ? 'All PVCs' : pvcModalFilter === 'Bound' ? 'Bound PVCs' : 'Pending PVCs'}
         statusFilter={pvcModalFilter}
-        onSelectPVC={(cluster, namespace, name) => {
-          closePVCModal()
-          drillToPVC(cluster, namespace, name)
-        }}
       />
     </>
   )

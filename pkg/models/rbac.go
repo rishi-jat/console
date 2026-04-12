@@ -45,7 +45,10 @@ type OpenShiftUser struct {
 	Identities []string `json:"identities,omitempty"`
 	Groups     []string `json:"groups,omitempty"`
 	Cluster    string   `json:"cluster"`
-	CreatedAt  string   `json:"createdAt,omitempty"`
+	// CreatedAt is a pointer so that `omitempty` actually omits it when unset.
+	// With a value-type time.Time, the JSON encoder never treats a zero-value
+	// struct as empty and would emit "0001-01-01T00:00:00Z". See issue #6759.
+	CreatedAt *time.Time `json:"createdAt,omitempty"`
 }
 
 // K8sRole represents a Kubernetes Role or ClusterRole
@@ -80,7 +83,9 @@ type K8sServiceAccount struct {
 	Cluster   string   `json:"cluster"`
 	Secrets   []string `json:"secrets,omitempty"`
 	Roles     []string `json:"roles,omitempty"`
-	CreatedAt string   `json:"createdAt,omitempty"`
+	// CreatedAt is a pointer so that `omitempty` actually omits it when unset.
+	// See OpenShiftUser.CreatedAt and issue #6759.
+	CreatedAt *time.Time `json:"createdAt,omitempty"`
 }
 
 // ClusterPermissions represents current user's permissions on a cluster
@@ -140,7 +145,7 @@ type AuditLogEntry struct {
 	TargetType string    `json:"target_type"` // console_user, service_account, role_binding
 	TargetID   string    `json:"target_id"`
 	Details    string    `json:"details,omitempty"`
-	CreatedAt  time.Time `json:"created_at"`
+	CreatedAt  time.Time `json:"createdAt"`
 }
 
 // CanIRequest represents a request to check if user can perform an action
@@ -182,7 +187,7 @@ type NamespaceDetails struct {
 	Cluster   string            `json:"cluster"`
 	Status    string            `json:"status"`
 	Labels    map[string]string `json:"labels,omitempty"`
-	CreatedAt string            `json:"created_at"`
+	CreatedAt time.Time         `json:"createdAt"`
 }
 
 // CreateNamespaceRequest represents a request to create a namespace

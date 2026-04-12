@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, useRef, useEffect, ReactNode } from 'react'
+import { createContext, useContext, useMemo, useState, useRef, useEffect, ReactNode } from 'react'
 import type { AgentInfo, AgentsListPayload, AgentSelectedPayload, ChatStreamPayload } from '../types/agent'
 import { AgentCapabilityToolExec } from '../types/agent'
 import { getDemoMode } from './useDemoMode'
@@ -169,11 +169,40 @@ export interface SavedMissionUpdates {
 const MissionContext = createContext<MissionContextValue | null>(null)
 
 const MISSIONS_STORAGE_KEY = 'kc_missions'
+/**
+ * #6668 — Window (ms) during which a `storage` event for MISSIONS_STORAGE_KEY
+ * is treated as an echo of our own write and ignored. Real browsers do not
+ * fire storage events in the same tab that made the write, so this is only
+ * a guard against test shims / polyfills. Kept tight so genuine cross-tab
+ * writes arriving within a few ms of a local write are still honored.
+ */
+const CROSS_TAB_ECHO_IGNORE_MS = 50
 const UNREAD_MISSIONS_KEY = 'kc_unread_missions'
 const SELECTED_AGENT_KEY = 'kc_selected_agent'
 
 /** Delay before auto-reconnecting interrupted missions after WS opens */
 const MISSION_RECONNECT_DELAY_MS = 500
+/**
+ * Maximum age (ms) a disconnected mission may have before auto-resume is
+ * considered unsafe (#6371). Agents purge sessions after a short idle
+ * window, so resuming a mission whose last update was hours ago is very
+ * likely to hit a GONE/not_found session on the backend — or worse, land
+ * the user's prompt in a disjointed new thread. Past this threshold the
+ * mission is transitioned to `failed` with an actionable message so the
+ * user can explicitly retry instead of the agent silently replaying a
+ * half-finished prompt. 30 minutes is conservative: it covers lunch/
+ * meeting gaps while still protecting against overnight reconnects.
+ */
+const MISSION_RECONNECT_MAX_AGE_MS = 30 * 60 * 1000
+/**
+ * issue 6429 — Cap how many prior messages we re-append to the prompt on
+ * reconnect. Long-running missions can accumulate hundreds of turns; some
+ * agents (notably ones with 8k–32k token budgets) reject the payload
+ * outright with HTTP 413. We always keep the most recent
+ * MAX_RESENT_MESSAGES items (which always include the last user message
+ * that is re-sent separately) and drop anything older.
+ */
+const MAX_RESENT_MESSAGES = 20
 /** Initial delay (ms) before auto-reconnecting WebSocket after close */
 const WS_RECONNECT_INITIAL_DELAY_MS = 1_000
 /** Maximum delay (ms) between reconnection attempts (backoff cap) */
@@ -270,7 +299,7 @@ function loadMissions(): Mission[] {
           ...m,
           createdAt: new Date(m.createdAt),
           updatedAt: new Date(m.updatedAt),
-          messages: m.messages.map(msg => ({
+          messages: (m.messages ?? []).map(msg => ({
             ...msg,
             timestamp: new Date(msg.timestamp)
           }))
@@ -325,7 +354,17 @@ function loadMissions(): Mission[] {
       })
     }
   } catch (e) {
-    console.error('Failed to load missions from localStorage:', e)
+    // issue 6437 — If the persisted payload is unparseable (the previous
+    // saveMissions pass may have been interrupted mid-write, or quota
+    // pressure corrupted it), fully clear the key instead of leaving a
+    // broken entry that will keep crashing every load. The user loses
+    // their history, which is strictly better than an unusable app.
+    console.error('[Missions] Failed to parse kc_missions, clearing:', e)
+    try {
+      localStorage.removeItem(MISSIONS_STORAGE_KEY)
+    } catch {
+      // If removeItem itself throws (e.g., private mode), nothing we can do.
+    }
   }
 
   // In demo mode, seed with orbit demo missions so the feature is visible
@@ -395,7 +434,9 @@ function loadUnreadMissionIds(): Set<string> {
   try {
     const stored = localStorage.getItem(UNREAD_MISSIONS_KEY)
     if (stored) {
-      return new Set(JSON.parse(stored))
+      const parsed = JSON.parse(stored)
+      if (!Array.isArray(parsed)) return new Set()
+      return new Set(parsed)
     }
   } catch (e) {
     console.error('Failed to load unread missions from localStorage:', e)
@@ -426,41 +467,101 @@ export function MissionProvider({ children }: { children: ReactNode }) {
   const [defaultAgent, setDefaultAgent] = useState<string | null>(null)
   const [agentsLoading, setAgentsLoading] = useState(false)
 
+  // #6667 — Tracks whether the provider has unmounted. All async completion
+  // handlers (WebSocket onclose, scheduled reconnect timers, fetch .then
+  // callbacks, etc.) must check this before calling setState, or React
+  // emits "cannot update state on unmounted component" warnings and in the
+  // worst case schedules a new reconnect setTimeout after the provider has
+  // been torn down. Set to true in the main cleanup effect below.
+  const unmountedRef = useRef(false)
+  // #6668 — Timestamp of the most recent local write to MISSIONS_STORAGE_KEY.
+  // Used by the storage event listener to suppress echoes of our own write
+  // in environments that (incorrectly) deliver same-tab storage events.
+  const lastWrittenAtRef = useRef<number>(0)
   const wsRef = useRef<WebSocket | null>(null)
   const pendingRequests = useRef<Map<string, string>>(new Map()) // requestId -> missionId
   // Track last stream timestamp per mission to detect tool-use gaps (for creating new chat bubbles)
   const lastStreamTimestamp = useRef<Map<string, number>>(new Map()) // missionId -> timestamp
   // Track cancel acknowledgment timeouts — missionId -> timeout handle
   const cancelTimeouts = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
+  /**
+   * Mission IDs for which cancellation has been requested by the user.
+   *
+   * This ref is set synchronously at the very top of `cancelMission` so that
+   * a terminal WebSocket message (result / stream-done) arriving in the same
+   * event-loop tick can still observe the cancel intent even if React has not
+   * yet committed the 'cancelling' status transition (#6370). Without this
+   * ref, the race between `cancelMission`'s `setMissions` update and the
+   * result handler's `setMissions` update could leave the mission stuck in
+   * 'completed' instead of transitioning cancelling → cancelled.
+   *
+   * Entries are cleared when `finalizeCancellation` runs or when a retry
+   * reuses the mission ID via `executeMission`.
+   */
+  const cancelIntents = useRef<Set<string>>(new Set())
   // Track waiting_input watchdog timers — missionId -> timeout handle (#5936).
   // Prevents missions from getting stuck in 'waiting_input' indefinitely if
   // the backend never delivers a final result message.
   const waitingInputTimeouts = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
-  // Ref to always hold the latest missions state — avoids stale closure in sendMessage (#3322)
+  // Refs to always hold the latest values — avoids stale closures in callbacks.
+  // #6789 — Ref writes belong in useEffect, not the component body, to avoid
+  // impure render functions in React concurrent mode.
   const missionsRef = useRef<Mission[]>(missions)
-  missionsRef.current = missions
-  // Refs to always hold the latest activeMissionId and isSidebarOpen — avoids stale closures in markMissionAsUnread
   const activeMissionIdRef = useRef(activeMissionId)
-  activeMissionIdRef.current = activeMissionId
   const isSidebarOpenRef = useRef(isSidebarOpen)
-  isSidebarOpenRef.current = isSidebarOpen
-  // Refs to always hold the latest selectedAgent and defaultAgent — avoids stale closures in startMission/executeMission (#4228)
   const selectedAgentRef = useRef(selectedAgent)
-  selectedAgentRef.current = selectedAgent
   const defaultAgentRef = useRef(defaultAgent)
-  defaultAgentRef.current = defaultAgent
+  useEffect(() => { missionsRef.current = missions }, [missions])
+  useEffect(() => { activeMissionIdRef.current = activeMissionId }, [activeMissionId])
+  useEffect(() => { isSidebarOpenRef.current = isSidebarOpen }, [isSidebarOpen])
+  useEffect(() => { selectedAgentRef.current = selectedAgent }, [selectedAgent])
+  useEffect(() => { defaultAgentRef.current = defaultAgent }, [defaultAgent])
   // Ref to always hold the latest handleAgentMessage — avoids reconnecting WebSocket when the handler changes
   const handleAgentMessageRef = useRef<(message: { id: string; type: string; payload?: unknown }) => void>(() => {})
   // Ref to track pending WebSocket reconnection timeout so it can be cleared on unmount (#3318)
   const wsReconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   // Tracks consecutive reconnection attempts for exponential backoff (#3870)
   const wsReconnectAttempts = useRef(0)
+  /**
+   * #6375 — Flips true only after the first application-layer message has
+   * been received on the current WebSocket. Used to gate the exponential
+   * backoff reset. A pure transport `onopen` is NOT enough: corporate WAFs
+   * can let the TCP/TLS handshake through but drop the WebSocket upgrade
+   * frame, causing `onopen` to fire and `onclose` to fire in the same tick.
+   * Without this guard, `wsReconnectAttempts` was reset on every `onopen`
+   * and the backoff never grew past the initial delay.
+   */
+  const connectionEstablished = useRef(false)
+  /**
+   * #6376 — Set of missionIds currently executing a background tool call.
+   * While a mission has an in-flight tool (tool_exec / tool_use / tool_call
+   * frame observed but no matching tool_result yet), the inactivity
+   * watchdog is paused for that mission. Kubernetes tool calls can legally
+   * take several minutes (waiting on a LoadBalancer, a long kubectl wait,
+   * etc.) and failing the mission mid-tool would leave the cluster in a
+   * partially-mutated state while the agent keeps running server-side.
+   */
+  const toolsInFlight = useRef<Map<string, number>>(new Map()) // missionId -> openToolCount
+  /**
+   * #6378 — Monotonic counter per mission used to build unique React keys
+   * when a streaming message is split into a new bubble after STREAM_GAP_THRESHOLD_MS.
+   * Two splits within the same millisecond previously collided on
+   * `msg-${Date.now()}` and caused React key warnings + rendering glitches.
+   */
+  const streamSplitCounter = useRef<Map<string, number>>(new Map())
   const STREAM_GAP_THRESHOLD_MS = 8000 // If >8s gap between stream chunks, create new message bubble (tool-use gap)
 
   // Maximum number of WebSocket send retries before giving up
   const WS_SEND_MAX_RETRIES = 3
   // Delay between WebSocket send retries in milliseconds
   const WS_SEND_RETRY_DELAY_MS = 1000
+
+  // #6629 — Track in-flight wsSend retry timers so they can be cleared on
+  // unmount. Without this, a provider unmount while a retry was still
+  // pending would leak the setTimeout handle and could call
+  // `wsRef.current.send` on a dying socket (or worse, call the user-supplied
+  // `onFailure` after the component tree had already gone away).
+  const wsSendRetryTimers = useRef<Set<ReturnType<typeof setTimeout>>>(new Set())
 
   /**
    * Send a message over the WebSocket with retry logic.
@@ -477,7 +578,12 @@ export function MissionProvider({ children }: { children: ReactNode }) {
       }
       if (retries < WS_SEND_MAX_RETRIES) {
         retries++
-        setTimeout(trySend, WS_SEND_RETRY_DELAY_MS)
+        // #6629 — ref-tracked so unmount cleanup can cancel pending retries.
+        const handle = setTimeout(() => {
+          wsSendRetryTimers.current.delete(handle)
+          trySend()
+        }, WS_SEND_RETRY_DELAY_MS)
+        wsSendRetryTimers.current.add(handle)
       } else {
         console.error('[Missions] WebSocket send failed after retries — socket not open')
         onFailure?.()
@@ -486,10 +592,111 @@ export function MissionProvider({ children }: { children: ReactNode }) {
     trySend()
   }
 
-  // Save missions whenever they change
+  // Save missions whenever they change.
+  //
+  // #6668 — Cross-tab overwrite guard. Previously, two tabs each running
+  // their own MissionProvider would each unconditionally write their local
+  // state to `kc_missions` on every change. Tab A completes a mission and
+  // writes; Tab B's next render also writes its (older) state, erasing
+  // Tab A's completion. We mark our own writes with `lastWrittenAt` so
+  // the storage listener below can ignore echoes of our own write.
   useEffect(() => {
+    lastWrittenAtRef.current = Date.now()
     saveMissions(missions)
   }, [missions])
+
+  // #6668 — Listen for cross-tab mission updates. When another tab writes
+  // to `kc_missions`, re-load missions from storage so the completion or
+  // dismissal made in that tab is visible here too. The storage event does
+  // NOT fire in the same tab that made the write, so there is no echo
+  // loop. `lastWrittenAtRef` is still consulted as a belt-and-suspenders
+  // guard against pathological environments (test shims, polyfills) that
+  // echo their own writes.
+  useEffect(() => {
+    const onStorage = (e: StorageEvent) => {
+      if (e.key !== MISSIONS_STORAGE_KEY) return
+      // Ignore events fired within CROSS_TAB_ECHO_IGNORE_MS of our own
+      // write — guards against environments that echo storage events.
+      // Applied BEFORE the newValue null-check so our own last-resort
+      // `localStorage.removeItem(kc_missions)` on quota error doesn't
+      // round-trip and clear our in-memory state.
+      const sinceWrite = Date.now() - (lastWrittenAtRef.current ?? 0)
+      if (sinceWrite < CROSS_TAB_ECHO_IGNORE_MS) return
+      if (unmountedRef.current) return
+      // #6758 (Copilot on PR #6755) — When another tab calls
+      // `localStorage.removeItem(kc_missions)` (for example as a
+      // last-resort clear after a QuotaExceededError), `e.newValue` is
+      // `null`. The old code silently dropped that event and left this
+      // tab's local state out of sync with storage. Treat a remote
+      // removal as a remote reset: clear local missions to match.
+      //
+      // #6762 (Copilot on PR #6760) — A remote reset must also clear
+      // every piece of state that is logically derivative of `missions`;
+      // otherwise stale entries keep pointing at missions that no longer
+      // exist. Specifically:
+      //   - `unreadMissionIds` — IDs here reference mission IDs; leaving
+      //     them populated produces a non-zero `unreadMissionCount` badge
+      //     for missions that were just cleared.
+      //   - `activeMissionId` — a pointer into `missions`; must be
+      //     cleared so the sidebar / detail view doesn't dangle on a
+      //     deleted mission.
+      //   - `cancelTimeouts` (ref) — timeout handles keyed by mission ID
+      //     from in-flight cancel requests; the missions they reference
+      //     are gone, so clear them to avoid leaked timers firing
+      //     against non-existent state.
+      //   - `pendingRequests` (ref) — requestId → missionId map for
+      //     in-flight WS requests; the target missions are gone.
+      //   - `lastStreamTimestamp` (ref) — per-mission streaming gap
+      //     tracker, also keyed by mission ID.
+      //
+      // Persistent UI state (sidebar open / minimized / full-screen,
+      // selected agent, default agent) is intentionally NOT reset — it
+      // is not derivative of `missions` and should survive a remote
+      // mission wipe.
+      if (e.newValue === null) {
+        try {
+          setMissions([])
+          // #6767 — `new Set()` defaults to `Set<any>`; keep type-safety by
+          // matching the `Set<string>` declaration of `unreadMissionIds`.
+          setUnreadMissionIds(new Set<string>())
+          setActiveMissionId(null)
+          // #6767 — Clear ALL mission-derived refs, not just the three from
+          // #6762. Any ref keyed by missionId references missions that were
+          // just wiped; leaving them populated leaks timers and/or makes
+          // future messages target stale mission IDs.
+          for (const timeout of cancelTimeouts.current.values()) {
+            clearTimeout(timeout)
+          }
+          cancelTimeouts.current.clear()
+          // #6767 — Timeout handles must be cleared individually before
+          // dropping the Map, otherwise the watchdog fires against a
+          // non-existent mission.
+          for (const timeout of waitingInputTimeouts.current.values()) {
+            clearTimeout(timeout)
+          }
+          waitingInputTimeouts.current.clear()
+          cancelIntents.current.clear()
+          pendingRequests.current.clear()
+          lastStreamTimestamp.current.clear()
+          toolsInFlight.current.clear()
+          streamSplitCounter.current.clear()
+        } catch (err) {
+          // #6767 — Message is issue-agnostic; this branch now covers
+          // #6758, #6762, and #6767 follow-ups.
+          console.warn('[Missions] Cross-tab remote reset detected — failed to clear local mission state to match:', err)
+        }
+        return
+      }
+      try {
+        const reloaded = loadMissions()
+        setMissions(reloaded)
+      } catch (err) {
+        console.warn('[Missions] issue 6668 — failed to reload from cross-tab write:', err)
+      }
+    }
+    window.addEventListener('storage', onStorage)
+    return () => window.removeEventListener('storage', onStorage)
+  }, [])
 
   // Save unread IDs whenever they change
   useEffect(() => {
@@ -513,6 +720,19 @@ export function MissionProvider({ children }: { children: ReactNode }) {
       setMissions(prev => {
         const hasIssue = prev.some(m => {
           if (m.status !== 'running') return false
+          // #6376 — pause inactivity check while a background tool call is
+          // in flight. Long-running Kubernetes operations (wait for LB,
+          // kubectl wait, long helm install) can legitimately exceed the
+          // 90s stream-silence window, and failing the mission mid-tool
+          // leaves the cluster partially mutated while the agent keeps
+          // working server-side.
+          const openTools = toolsInFlight.current.get(m.id) ?? 0
+          if (openTools > 0) {
+            // Still enforce the hard 5-minute total timeout, but not the
+            // stream-silence timeout.
+            if ((now - new Date(m.updatedAt).getTime()) > MISSION_TIMEOUT_MS) return true
+            return false
+          }
           if ((now - new Date(m.updatedAt).getTime()) > MISSION_TIMEOUT_MS) return true
           const lastStreamTs = lastStreamTimestamp.current.get(m.id)
           if (lastStreamTs && (now - lastStreamTs) > MISSION_INACTIVITY_TIMEOUT_MS) return true
@@ -525,7 +745,10 @@ export function MissionProvider({ children }: { children: ReactNode }) {
 
           const elapsed = now - new Date(m.updatedAt).getTime()
           const lastStreamTs = lastStreamTimestamp.current.get(m.id)
-          const isInactive = !!lastStreamTs && (now - lastStreamTs) > MISSION_INACTIVITY_TIMEOUT_MS
+          const openTools = toolsInFlight.current.get(m.id) ?? 0
+          // #6376 — see comment above: while a tool call is in flight, only
+          // the total 5-minute timeout can fire, not the stream-silence one.
+          const isInactive = openTools === 0 && !!lastStreamTs && (now - lastStreamTs) > MISSION_INACTIVITY_TIMEOUT_MS
           const isTimedOut = elapsed > MISSION_TIMEOUT_MS
 
           if (!isTimedOut && !isInactive) return m
@@ -584,6 +807,14 @@ export function MissionProvider({ children }: { children: ReactNode }) {
     if (getDemoMode()) {
       return Promise.reject(new Error('Agent unavailable in demo mode'))
     }
+    // #6667 — Refuse to start a new connection if the provider has already
+    // unmounted. Without this guard, a setAgentsLoading(true) call below
+    // would fire on a torn-down component. Can happen when an `onclose`
+    // handler schedules a reconnect timer just before unmount; the timer
+    // still fires after the cleanup effect has run.
+    if (unmountedRef.current) {
+      return Promise.reject(new Error('MissionProvider unmounted'))
+    }
 
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       return Promise.resolve()
@@ -610,12 +841,19 @@ export function MissionProvider({ children }: { children: ReactNode }) {
       }, WS_CONNECTION_TIMEOUT_MS)
 
       try {
+        // #6375 — arm the "not yet established" guard for this socket.
+        // The backoff is reset later, after the first application-layer
+        // message actually arrives, not here.
+        connectionEstablished.current = false
         wsRef.current = new WebSocket(LOCAL_AGENT_WS_URL)
 
         wsRef.current.onopen = () => {
           clearTimeout(timeout)
-          // Reset reconnection backoff on successful connection (#3870)
-          wsReconnectAttempts.current = 0
+          // NOTE: Do NOT reset wsReconnectAttempts here. Corporate WAFs can
+          // let the TCP/TLS handshake through and still drop the WebSocket
+          // upgrade frame, causing onopen → onclose in the same event-loop
+          // tick. The backoff is reset in handleAgentMessage on the first
+          // real application-layer frame (#6375).
           // Fetch available agents on connect
           fetchAgents()
 
@@ -628,6 +866,10 @@ export function MissionProvider({ children }: { children: ReactNode }) {
           // Missions that have already had one reconnect attempt — don't
           // replay the prompt again; fail them instead (#5930).
           const missionsToFailDuplicate: string[] = []
+          // Missions whose last update was so long ago that the backend
+          // session is almost certainly gone. Don't auto-resume these —
+          // mark them as needing a manual restart (#6371).
+          const missionsToMarkStale: string[] = []
 
           setMissions(prev => {
             const candidates = prev.filter(m =>
@@ -637,9 +879,14 @@ export function MissionProvider({ children }: { children: ReactNode }) {
             if (candidates.length > 0) {
               // Split candidates into first-attempt (safe to replay) vs
               // already-attempted (unsafe — would duplicate execution on
-              // non-idempotent agents, see #5930).
+              // non-idempotent agents, see #5930) vs stale (backend session
+              // has very likely expired, see #6371).
+              const now = Date.now()
               for (const m of candidates) {
-                if (m.context?.reconnectAttempted) {
+                const ageMs = now - new Date(m.updatedAt).getTime()
+                if (ageMs > MISSION_RECONNECT_MAX_AGE_MS) {
+                  missionsToMarkStale.push(m.id)
+                } else if (m.context?.reconnectAttempted) {
                   missionsToFailDuplicate.push(m.id)
                 } else {
                   missionsToReconnect.push(m)
@@ -650,6 +897,29 @@ export function MissionProvider({ children }: { children: ReactNode }) {
               // so a subsequent reconnect won't replay the prompt again.
               return prev.map(m => {
                 if (!m.context?.needsReconnect) return m
+                if (missionsToMarkStale.includes(m.id)) {
+                  // #6384 item 2 (dup of #6380) — rely on status 'failed' +
+                  // the explicit system message to prompt the user to retry.
+                  // A separate `needsRestart` flag was never read anywhere,
+                  // so carrying it here was dead state.
+                  return {
+                    ...m,
+                    status: 'failed' as MissionStatus,
+                    currentStep: undefined,
+                    updatedAt: new Date(),
+                    context: {
+                      ...m.context,
+                      needsReconnect: false },
+                    messages: [
+                      ...m.messages,
+                      {
+                        id: `msg-reconnect-stale-${m.id}-${Date.now()}`,
+                        role: 'system' as const,
+                        content: `**Mission session expired**\n\nThe connection to the agent was lost more than ${Math.round(MISSION_RECONNECT_MAX_AGE_MS / 60_000)} minutes ago. The agent has likely purged this session, so auto-resume is unsafe — it could crash the agent or land your prompt in a disjointed thread.\n\n**Click Retry Mission** to start a fresh session with the same prompt.`,
+                        timestamp: new Date() }
+                    ]
+                  }
+                }
                 if (missionsToFailDuplicate.includes(m.id)) {
                   return {
                     ...m,
@@ -677,10 +947,30 @@ export function MissionProvider({ children }: { children: ReactNode }) {
             return prev
           })
 
-          // Side effect: schedule reconnection OUTSIDE the state updater
-          if (missionsToReconnect.length > 0) {
+          // Side effect: schedule reconnection OUTSIDE the state updater.
+          // #6832 — Deduplicate by mission ID. React StrictMode may invoke the
+          // state updater twice, pushing the same mission into the array twice.
+          // Without dedup, two wsSend calls fire per reconnecting mission.
+          const seenIds = new Set<string>()
+          const dedupedMissions = missionsToReconnect.filter(m => {
+            if (seenIds.has(m.id)) return false
+            seenIds.add(m.id)
+            return true
+          })
+          if (dedupedMissions.length > 0) {
+            // #6837 — Optimistically seed toolsInFlight for every resumed
+            // mission so the inactivity watchdog knows a tool *may* be
+            // running. Without this, a tool_result arriving for a tool whose
+            // tool_start was lost (pre-reconnect) would decrement from 0,
+            // and the watchdog would be active during a legitimately
+            // long-running tool call. The count resets to the real value
+            // once the first tool_start or tool_result frame arrives.
+            const OPTIMISTIC_TOOLS_IN_FLIGHT = 1
+            for (const mission of dedupedMissions) {
+              toolsInFlight.current.set(mission.id, OPTIMISTIC_TOOLS_IN_FLIGHT)
+            }
             setTimeout(() => {
-              missionsToReconnect.forEach(mission => {
+              dedupedMissions.forEach(mission => {
                 // Find the last user message to re-send
                 const userMessages = mission.messages.filter(msg => msg.role === 'user')
                 const lastUserMessage = userMessages[userMessages.length - 1]
@@ -697,12 +987,39 @@ export function MissionProvider({ children }: { children: ReactNode }) {
                   const requestId = `claude-reconnect-${Date.now()}-${mission.id}`
                   pendingRequests.current.set(requestId, mission.id)
 
-                  // Build history from all messages except system messages
-                  const history = mission.messages
+                  // Build history from all messages except system messages.
+                  // issue 6429 — Cap at MAX_RESENT_MESSAGES to avoid HTTP 413
+                  // against small-context agents. Keep the most recent items;
+                  // older turns are dropped with a warning.
+                  //
+                  // issue 6444(A) — Backends (see pkg/agent/provider_claudecode.go
+                  // buildPromptWithHistory) concatenate `history` then append
+                  // `prompt`. If the last user message is included in BOTH
+                  // `history` and `prompt`, it's seen twice by the model.
+                  // Exclude the trailing user turn from `history` so `prompt`
+                  // is the single source of truth for the new message.
+                  const fullHistory = mission.messages
                     .filter(msg => msg.role === 'user' || msg.role === 'assistant')
                     .map(msg => ({
                       role: msg.role,
                       content: msg.content }))
+                  // Drop the trailing user message if it matches the one being
+                  // re-sent as `prompt` (it is, by construction, since we took
+                  // the last user message from the same list).
+                  const historyWithoutLastUser = (() => {
+                    for (let i = fullHistory.length - 1; i >= 0; i--) {
+                      if (fullHistory[i].role === 'user') {
+                        return [...fullHistory.slice(0, i), ...fullHistory.slice(i + 1)]
+                      }
+                    }
+                    return fullHistory
+                  })()
+                  const history = historyWithoutLastUser.slice(-MAX_RESENT_MESSAGES)
+                  if (historyWithoutLastUser.length > MAX_RESENT_MESSAGES) {
+                    console.warn(
+                      `[Missions] issue 6429 — truncated reconnect history from ${historyWithoutLastUser.length} to ${MAX_RESENT_MESSAGES} messages to avoid oversized payload`,
+                    )
+                  }
 
                   const mId = mission.id
                   wsSend(JSON.stringify({
@@ -740,6 +1057,13 @@ export function MissionProvider({ children }: { children: ReactNode }) {
         wsRef.current.onclose = () => {
           clearTimeout(timeout)
           wsRef.current = null
+          // #6667 — If the provider has already unmounted, short-circuit
+          // everything below: do NOT set state, do NOT schedule a
+          // reconnect timer. The cleanup effect will have already cleared
+          // timers and nulled handlers, but `onclose` can still fire during
+          // teardown if the close was initiated here and the runtime
+          // delivers the event in the same tick.
+          if (unmountedRef.current) return
           setAgentsLoading(false) // Stop loading spinner on disconnect
           // Don't clear agents - keep them cached for display
           // Users can still see available agents even if temporarily disconnected
@@ -759,6 +1083,12 @@ export function MissionProvider({ children }: { children: ReactNode }) {
             )
             wsReconnectTimer.current = setTimeout(() => {
               wsReconnectTimer.current = null
+              // #6667 — Belt-and-suspenders: re-check unmount status when
+              // the timer fires in case the cleanup effect ran between
+              // scheduling and firing. `ensureConnection` also checks
+              // this, but bailing here avoids an extra rejected promise
+              // in the console.
+              if (unmountedRef.current) return
               ensureConnection().catch((err: unknown) => {
                 console.error('[Missions] WebSocket reconnection failed:', err)
               })
@@ -769,6 +1099,14 @@ export function MissionProvider({ children }: { children: ReactNode }) {
               'Will retry on next user interaction.',
             )
           }
+
+          // #6836 — Cancel pending wsSend retry timers so they don't fire
+          // on the dead socket. The main unmount effect also clears these,
+          // but onclose fires on transient disconnects (not just unmount).
+          for (const handle of wsSendRetryTimers.current) {
+            clearTimeout(handle)
+          }
+          wsSendRetryTimers.current.clear()
 
           // Transient disconnect handling (#5929): instead of failing running
           // missions immediately, mark them with needsReconnect so that the
@@ -823,6 +1161,16 @@ The WebSocket connection to the agent at \`${LOCAL_AGENT_WS_URL}\` was lost and 
         }
 
         wsRef.current.onerror = () => {
+          // #6440 — Architecture note for future readers who wonder why this
+          // sweeper doesn't filter by `agentId`: the console uses a SINGLE
+          // WebSocket connection to a SINGLE kc-agent process. There is no
+          // per-agent sub-connection and no `agentId` field on Mission
+          // objects. When this WS errors, by definition every in-flight
+          // mission on it is affected, so scoping the sweep by pending
+          // request (done below since #5851) is the correct granularity.
+          // If the backend ever grows a true multi-agent fan-out, the sweep
+          // must be re-scoped by agent — but until then, narrowing further
+          // would be incorrect, not safer.
           clearTimeout(timeout)
           // Forcibly close the socket and clear the ref to prevent zombie
           // connections. Nullify onclose first so the close doesn't trigger
@@ -858,6 +1206,31 @@ The WebSocket connection to the agent at \`${LOCAL_AGENT_WS_URL}\` was lost and 
             }
             pendingRequests.current.clear()
           }
+          // #6377 — belt-and-suspenders: always clear any lingering
+          // pendingRequests entries on a hard error, even if the size === 0
+          // branch above wasn't entered. Late responses from the dead
+          // socket must not be misattributed.
+          pendingRequests.current.clear()
+          // #6836 — Cancel pending wsSend retry timers on error so they
+          // don't fire on the dead/closed socket.
+          for (const handle of wsSendRetryTimers.current) {
+            clearTimeout(handle)
+          }
+          wsSendRetryTimers.current.clear()
+          // #6376 — drop any tool-in-flight tracking for the dead socket;
+          // the agent will re-report status after the reconnect.
+          toolsInFlight.current.clear()
+          // #6410 — also clear the remaining per-mission tracking state so
+          // nothing is carried over from the dead socket. `waitingInputTimeouts`
+          // holds real setTimeout handles and must be clearTimeout'd first
+          // (just `.clear()` would leak the timers and they could fire after
+          // reconnect, flipping missions to `failed`).
+          for (const t of waitingInputTimeouts.current.values()) {
+            clearTimeout(t)
+          }
+          waitingInputTimeouts.current.clear()
+          lastStreamTimestamp.current.clear()
+          streamSplitCounter.current.clear()
           setAgentsLoading(false)
           reject(new Error('CONNECTION_FAILED'))
         }
@@ -941,6 +1314,8 @@ The WebSocket connection to the agent at \`${LOCAL_AGENT_WS_URL}\` was lost and 
       clearTimeout(timeout)
       cancelTimeouts.current.delete(missionId)
     }
+    // #6370 — clear the cancel intent now that we're finalizing.
+    cancelIntents.current.delete(missionId)
 
     // Purge ALL pending request IDs that map to this mission so that late
     // responses (from earlier failed or in-flight requests) are dropped at
@@ -949,12 +1324,21 @@ The WebSocket connection to the agent at \`${LOCAL_AGENT_WS_URL}\` was lost and 
       if (mId === missionId) pendingRequests.current.delete(reqId)
     }
     lastStreamTimestamp.current.delete(missionId)
+    streamSplitCounter.current.delete(missionId) // #6410 — terminal state cleanup
+    toolsInFlight.current.delete(missionId) // #6410 — terminal state cleanup
     clearWaitingInputTimeout(missionId) // #5936
 
-    setMissions(prev => prev.map(m =>
-      m.id === missionId && m.status === 'cancelling' ? {
+    setMissions(prev => prev.map(m => {
+      if (m.id !== missionId) return m
+      // Accept any non-terminal status here (not just 'cancelling') because
+      // the cancel intent may have been recorded synchronously while the
+      // 'cancelling' state transition was still queued (#6370). We never
+      // overwrite a completed/failed/cancelled mission — those are the
+      // true terminal states.
+      if (m.status === 'completed' || m.status === 'failed' || m.status === 'cancelled') return m
+      return {
         ...m,
-        status: 'cancelled',
+        status: 'cancelled' as MissionStatus,
         currentStep: undefined,
         updatedAt: new Date(),
         messages: [
@@ -965,18 +1349,28 @@ The WebSocket connection to the agent at \`${LOCAL_AGENT_WS_URL}\` was lost and 
             content: message,
             timestamp: new Date() }
         ]
-      } : m
-    ))
+      }
+    }))
   }
 
   // Handle messages from the agent
   const handleAgentMessage = (message: { id: string; type: string; payload?: unknown }) => {
+    // #6375 — First real application-layer frame on this socket means the
+    // WebSocket upgrade succeeded all the way through any intermediaries.
+    // Only now is it safe to reset the reconnection backoff. Transport-level
+    // `onopen` is not sufficient because some WAFs complete the TCP handshake
+    // and silently drop the WS upgrade frame, causing onopen → onclose in the
+    // same tick and a backoff-reset storm.
+    if (!connectionEstablished.current) {
+      connectionEstablished.current = true
+      wsReconnectAttempts.current = 0
+    }
     // Handle agent-related messages (no mission ID needed)
     if (message.type === 'agents_list') {
       const payload = message.payload as AgentsListPayload
       // Sanitize agent metadata — strip interactive prompt artifacts that leak
       // from terminal-based agents (e.g. copilot-cli) into description fields (#5482).
-      const sanitizedAgents = payload.agents.map(agent => ({
+      const sanitizedAgents = (payload.agents ?? []).map(agent => ({
         ...agent,
         description: stripInteractiveArtifacts(agent.description),
         displayName: stripInteractiveArtifacts(agent.displayName),
@@ -987,17 +1381,18 @@ The WebSocket connection to the agent at \`${LOCAL_AGENT_WS_URL}\` was lost and 
       // If persisted is 'none' but an agent IS available, auto-select it
       // so AI mode is on by default when the agent is present.
       const persisted = localStorage.getItem(SELECTED_AGENT_KEY)
-      const hasAvailableAgent = payload.agents.some(a => a.available)
-      const persistedAvailable = persisted && persisted !== 'none' && payload.agents.some(a => a.name === persisted && a.available)
+      const agents = payload.agents ?? []
+      const hasAvailableAgent = agents.some(a => a.available)
+      const persistedAvailable = persisted && persisted !== 'none' && agents.some(a => a.name === persisted && a.available)
 
       // When auto-selecting, prefer agents that execute commands directly over
       // agents that only suggest commands (e.g. copilot-cli). Interactive/suggest-only
       // agents produce terminal prompts instead of executing missions (#3609, #5481).
       const INTERACTIVE_AGENTS = new Set(['copilot-cli', 'gh-copilot'])
       const bestAvailable = hasAvailableAgent
-        ? (payload.agents.find(a => a.available && ((a.capabilities ?? 0) & AgentCapabilityToolExec) !== 0 && !INTERACTIVE_AGENTS.has(a.name))?.name
-          || payload.agents.find(a => a.available && !INTERACTIVE_AGENTS.has(a.name))?.name
-          || payload.agents.find(a => a.available)?.name
+        ? (agents.find(a => a.available && ((a.capabilities ?? 0) & AgentCapabilityToolExec) !== 0 && !INTERACTIVE_AGENTS.has(a.name))?.name
+          || agents.find(a => a.available && !INTERACTIVE_AGENTS.has(a.name))?.name
+          || agents.find(a => a.available)?.name
           || null)
         : null
       // Filter the backend's defaultAgent if it is interactive — fall through to
@@ -1007,8 +1402,12 @@ The WebSocket connection to the agent at \`${LOCAL_AGENT_WS_URL}\` was lost and 
         : null
       const resolved = persistedAvailable ? persisted : (payload.selected || safeDefaultAgent || bestAvailable)
       setSelectedAgent(resolved)
-      // If we restored a persisted agent that differs from the server's selection, tell the server
+      // If we restored a persisted agent that differs from the server's selection, tell the server.
+      // #6831 — Persist the selection to localStorage at send time (not just on
+      // agent_selected ack) so a connection drop between send and ack doesn't
+      // silently revert the user's preferred agent on the next reconnect.
       if (persistedAvailable && persisted !== payload.selected && wsRef.current?.readyState === WebSocket.OPEN) {
+        localStorage.setItem(SELECTED_AGENT_KEY, persisted)
         wsRef.current.send(JSON.stringify({
           id: `select-agent-${Date.now()}`,
           type: 'select_agent',
@@ -1045,6 +1444,39 @@ The WebSocket connection to the agent at \`${LOCAL_AGENT_WS_URL}\` was lost and 
     const missionId = pendingRequests.current.get(message.id)
     if (!missionId) return
 
+    // #6376 — Track background tool-call lifecycle so the inactivity watchdog
+    // can pause while a long-running Kubernetes tool is in flight. The agent
+    // protocol actually surfaces tool lifecycle events as `type: 'progress'`
+    // frames with tool metadata in the payload (see `onProgress` in
+    // pkg/agent/server_ai.go). A tool-start frame has `payload.tool` set and
+    // no `payload.output`; a tool-result frame has `payload.tool` set AND
+    // `payload.output` populated (truncated stdout). Count each shape as +1
+    // or -1 respectively. Earlier revisions of this code keyed on
+    // `tool_exec`/`tool_use`/`tool_call`/`tool_result`/`tool_done` message
+    // types that never reach the frontend — that branch was dead code.
+    if (message.type === 'progress') {
+      const progressPayload = (message.payload ?? {}) as {
+        tool?: string
+        output?: string
+      }
+      if (progressPayload.tool) {
+        if (progressPayload.output) {
+          // Tool completed — decrement.
+          const prevCount = toolsInFlight.current.get(missionId) ?? 0
+          const next = Math.max(0, prevCount - 1)
+          if (next === 0) toolsInFlight.current.delete(missionId)
+          else toolsInFlight.current.set(missionId, next)
+        } else {
+          // Tool started — increment.
+          const prevCount = toolsInFlight.current.get(missionId) ?? 0
+          toolsInFlight.current.set(missionId, prevCount + 1)
+        }
+        // Bump last stream timestamp so a tool that fires right at the edge
+        // of the silence window doesn't trip the watchdog on the next interval.
+        lastStreamTimestamp.current.set(missionId, Date.now())
+      }
+    }
+
     setMissions(prev => prev.map(m => {
       if (m.id !== missionId) return m
 
@@ -1054,6 +1486,27 @@ The WebSocket connection to the agent at \`${LOCAL_AGENT_WS_URL}\` was lost and 
       // (#4499, #5935).
       if (m.status === 'failed' || m.status === 'completed' || m.status === 'cancelled') {
         pendingRequests.current.delete(message.id)
+        return m
+      }
+
+      // #6370 — If cancellation has been REQUESTED (even if the 'cancelling'
+      // state transition has not yet been committed by React), treat any
+      // terminal message as implicit cancel confirmation. Without this the
+      // result handler below could race with `cancelMission`'s state update
+      // and overwrite the cancellation intent with a 'completed' status.
+      if (cancelIntents.current.has(missionId)) {
+        const isTerminalMessage =
+          message.type === 'result' ||
+          message.type === 'error' ||
+          (message.type === 'stream' && (message.payload as { done?: boolean })?.done)
+        if (isTerminalMessage) {
+          pendingRequests.current.delete(message.id)
+          finalizeCancellation(missionId, 'Mission cancelled by user.')
+          return m
+        }
+        // Non-terminal stream chunks while a cancel is in flight: drop them
+        // so we don't flash the latest chunk into the UI right before the
+        // mission transitions to 'cancelled'.
         return m
       }
 
@@ -1124,8 +1577,12 @@ The WebSocket connection to the agent at \`${LOCAL_AGENT_WS_URL}\` was lost and 
           lastStreamTimestamp.current.delete(missionId)
         }
 
-        if (lastMsg?.role === 'assistant' && !payload.done && m.status === 'running' && !hasGap) {
-          // Append to existing assistant message mid-stream (no gap detected)
+        if (lastMsg?.role === 'assistant' && !payload.done && (m.status === 'running' || m.status === 'waiting_input') && !hasGap) {
+          // Append to existing assistant message mid-stream (no gap detected).
+          // #6829 — Also allow appending when status is 'waiting_input': if
+          // stream_done arrived before the final content chunk (out-of-order
+          // delivery), the mission is already 'waiting_input' but we must still
+          // append the late chunk instead of creating a split bubble.
           return {
             ...m,
             status: 'running' as MissionStatus,
@@ -1138,7 +1595,14 @@ The WebSocket connection to the agent at \`${LOCAL_AGENT_WS_URL}\` was lost and 
             ]
           }
         } else if (!payload.done && payload.content) {
-          // First chunk OR gap detected - create new assistant message
+          // First chunk OR gap detected - create new assistant message.
+          // #6378 — Include a monotonic per-mission split counter in the key
+          // so two splits within the same millisecond (timer resolution on
+          // some platforms is 1ms; two chunks coming back-to-back after a
+          // tool-use gap is common) don't collide on Date.now() alone and
+          // trigger React "duplicate key" warnings + rendering glitches.
+          const splitIndex = (streamSplitCounter.current.get(missionId) ?? 0) + 1
+          streamSplitCounter.current.set(missionId, splitIndex)
           return {
             ...m,
             status: 'running' as MissionStatus,
@@ -1148,7 +1612,7 @@ The WebSocket connection to the agent at \`${LOCAL_AGENT_WS_URL}\` was lost and 
             messages: [
               ...m.messages,
               {
-                id: `msg-${Date.now()}`,
+                id: `msg-${Date.now()}-s${splitIndex}`,
                 role: 'assistant' as const,
                 content: payload.content,
                 timestamp: new Date(),
@@ -1194,6 +1658,10 @@ The WebSocket connection to the agent at \`${LOCAL_AGENT_WS_URL}\` was lost and 
         const payload = message.payload as ChatStreamPayload | { content?: string; output?: string }
         pendingRequests.current.delete(message.id)
         clearWaitingInputTimeout(missionId) // #5936 — result received, cancel watchdog
+        // #6410 — mission reached terminal state; drop its per-mission tracking.
+        streamSplitCounter.current.delete(missionId)
+        toolsInFlight.current.delete(missionId)
+        lastStreamTimestamp.current.delete(missionId)
         markMissionAsUnread(missionId)
 
         // Extract token usage if available
@@ -1282,6 +1750,10 @@ The WebSocket connection to the agent at \`${LOCAL_AGENT_WS_URL}\` was lost and 
         const payload = message.payload as { code?: string; message?: string }
         pendingRequests.current.delete(message.id)
         clearWaitingInputTimeout(missionId) // #5936 — terminal error, cancel watchdog
+        // #6410 — mission reached terminal state; drop its per-mission tracking.
+        streamSplitCounter.current.delete(missionId)
+        toolsInFlight.current.delete(missionId)
+        lastStreamTimestamp.current.delete(missionId)
         emitMissionError(m.type, payload.code || 'unknown', payload.message)
 
         // Create helpful error message based on error code
@@ -1512,6 +1984,15 @@ The WebSocket connection to the agent at \`${LOCAL_AGENT_WS_URL}\` was lost and 
         return
       }
 
+      // #6384 item 1 (dup of #6381) — if the user clicked Cancel while
+      // preflight was running, honor the cancel instead of firing the
+      // request off to the agent. Without this guard, executeMission would
+      // race with cancelMission and the mission would end up in 'running'
+      // despite a cancel being in flight.
+      if (cancelIntents.current.has(missionId)) {
+        finalizeCancellation(missionId, 'Mission cancelled by user before execution started.')
+        return
+      }
       // Preflight passed — proceed to send to agent
       executeMission(missionId, enhancedPrompt, params)
     }).catch((err) => {
@@ -1594,6 +2075,22 @@ The WebSocket connection to the agent at \`${LOCAL_AGENT_WS_URL}\` was lost and 
     enhancedPrompt: string,
     params: { context?: Record<string, unknown>; type?: string },
   ) => {
+    // #6384 item 1 (dup of #6381) — if a cancel intent is already set for
+    // this missionId we must not clear it and proceed to send. This
+    // scenario happens when the user clicks Cancel after preflightAndExecute
+    // kicked off but before executeMission started sending to the agent.
+    // Finalize the cancel and return without contacting the backend.
+    if (cancelIntents.current.has(missionId)) {
+      finalizeCancellation(missionId, 'Mission cancelled by user before execution started.')
+      return
+    }
+    // A retry may reuse a missionId that had a previous cancel intent;
+    // only clear stale entries once we've confirmed no cancel is pending
+    // (#6370). `retryPreflight` and `runSavedMission` route back through
+    // `preflightAndExecute`, which checks above; `startMission` reaches
+    // this point with a fresh mission ID and an empty cancelIntents entry.
+    cancelIntents.current.delete(missionId)
+
     // Send to agent
     ensureConnection().then(() => {
       const requestId = `claude-${Date.now()}`
@@ -1865,6 +2362,12 @@ Install the console locally with the KubeStellar Console agent to use AI mission
     // Guard against double-cancel: if already cancelling, don't schedule another timeout
     if (cancelTimeouts.current.has(missionId)) return
 
+    // #6370 — Mark the cancel intent synchronously BEFORE any state update or
+    // backend call. This is the authoritative signal for the message handler:
+    // any terminal message arriving after this point will be routed through
+    // `finalizeCancellation` instead of transitioning to 'completed'.
+    cancelIntents.current.add(missionId)
+
     // Pending missions have never been sent to the backend yet (preflight
     // check is still running, or ensureConnection has not resolved). We can
     // short-circuit here and finalize the mission as cancelled without
@@ -2084,6 +2587,9 @@ Install the console locally with the KubeStellar Console agent to use AI mission
       if (mId === missionId) pendingRequests.current.delete(reqId)
     }
     lastStreamTimestamp.current.delete(missionId)
+    // #6410 — mission is being removed from UI; drop per-mission tracking.
+    streamSplitCounter.current.delete(missionId)
+    toolsInFlight.current.delete(missionId)
     setMissions(prev => prev.filter(m => m.id !== missionId))
     if (activeMissionId === missionId) {
       setActiveMissionId(null)
@@ -2218,54 +2724,163 @@ Install the console locally with the KubeStellar Console agent to use AI mission
   // and clear any pending cancel acknowledgment timeouts
   useEffect(() => {
     const cancelTimeoutsRef = cancelTimeouts.current
+    const cancelIntentsRef = cancelIntents.current
+    const pendingRequestsRef = pendingRequests.current
+    const toolsInFlightRef = toolsInFlight.current
+    const lastStreamTimestampRef = lastStreamTimestamp.current
+    const streamSplitCounterRef = streamSplitCounter.current
+    const waitingInputTimeoutsRef = waitingInputTimeouts.current
+    const wsSendRetryTimersRef = wsSendRetryTimers.current
     return () => {
+      // #6667 — Mark provider as unmounted BEFORE clearing timers, so any
+      // in-flight async callback that races cleanup sees this flag and
+      // bails without touching React state.
+      unmountedRef.current = true
       if (wsReconnectTimer.current) {
         clearTimeout(wsReconnectTimer.current)
         wsReconnectTimer.current = null
       }
+      // #6629 — Cancel any in-flight wsSend retry timers so they don't
+      // fire on an unmounted provider or touch a dying socket.
+      for (const handle of wsSendRetryTimersRef) {
+        clearTimeout(handle)
+      }
+      wsSendRetryTimersRef.clear()
       // Clear all cancel acknowledgment timeouts
       for (const timeout of cancelTimeoutsRef.values()) {
         clearTimeout(timeout)
       }
       cancelTimeoutsRef.clear()
-      wsRef.current?.close()
+      // Clear any lingering cancel intents (#6370)
+      cancelIntentsRef.clear()
+      // #6377 — drop pendingRequests so closures over the handler don't
+      // pin mission IDs after the provider unmounts. Without this, mounting
+      // and unmounting the provider in tests or Storybook leaks a growing
+      // Map keyed by stale request IDs.
+      pendingRequestsRef.clear()
+      toolsInFlightRef.clear()
+      lastStreamTimestampRef.clear()
+      streamSplitCounterRef.clear()
+      // Clear waiting_input watchdogs so they don't fire after unmount
+      for (const t of waitingInputTimeoutsRef.values()) {
+        clearTimeout(t)
+      }
+      waitingInputTimeoutsRef.clear()
+      // #6410 — nullify handlers BEFORE close(). `onclose` is what schedules
+      // reconnection (see `wsReconnectTimer.current = setTimeout(...)` in
+      // ensureConnection); if we don't detach it, an unmounted provider can
+      // still enqueue reconnect attempts after tear-down. Detach the other
+      // handlers too so late events from the dying socket can't touch state
+      // on an unmounted component.
+      const dyingWs = wsRef.current
+      if (dyingWs) {
+        dyingWs.onopen = null
+        dyingWs.onmessage = null
+        dyingWs.onerror = null
+        dyingWs.onclose = null
+        dyingWs.close()
+      }
     }
   }, [])
 
+  // #6730 — Memoize the context value so consumers of MissionContext don't
+  // re-render on every render of MissionProvider. Prior to this fix, the
+  // inline object literal created a fresh reference on every parent render,
+  // which cascaded through every component that reads the context (the
+  // MissionSidebar layout, every card that queries `activeMission`, the
+  // global header, etc.) and caused visible jank on sidebar toggle and
+  // during message streaming (#6737 reproduced as a side effect).
+  //
+  // The mutation handlers (startMission, sendMessage, toggleSidebar, …) are
+  // plain function declarations inside this component, so they're recreated
+  // on every render. Rather than convert all ~20 of them to useCallback
+  // (which also doesn't help unless their own deps are stable), we stash
+  // them in a ref and expose stable proxy functions that forward to the
+  // latest implementation. The proxies themselves have identity lifetime
+  // equal to the provider, so the memo below only invalidates when real
+  // state changes.
+  const handlersRef = useRef({
+    startMission, saveMission, runSavedMission, updateSavedMission, sendMessage,
+    retryPreflight, cancelMission, dismissMission, renameMission, rateMission,
+    setActiveMission, markMissionAsRead, selectAgent, connectToAgent,
+    toggleSidebar, openSidebar, closeSidebar, minimizeSidebar, expandSidebar,
+    handleSetFullScreen })
+  handlersRef.current = {
+    startMission, saveMission, runSavedMission, updateSavedMission, sendMessage,
+    retryPreflight, cancelMission, dismissMission, renameMission, rateMission,
+    setActiveMission, markMissionAsRead, selectAgent, connectToAgent,
+    toggleSidebar, openSidebar, closeSidebar, minimizeSidebar, expandSidebar,
+    handleSetFullScreen }
+  // Stable proxies. Created once via useMemo with an empty dep array; every
+  // call forwards to the currently-live handler on `handlersRef.current`.
+  const stableHandlers = useMemo(() => ({
+    startMission: (...args: Parameters<typeof startMission>) =>
+      handlersRef.current.startMission(...args),
+    saveMission: (...args: Parameters<typeof saveMission>) =>
+      handlersRef.current.saveMission(...args),
+    runSavedMission: (...args: Parameters<typeof runSavedMission>) =>
+      handlersRef.current.runSavedMission(...args),
+    updateSavedMission: (...args: Parameters<typeof updateSavedMission>) =>
+      handlersRef.current.updateSavedMission(...args),
+    sendMessage: (...args: Parameters<typeof sendMessage>) =>
+      handlersRef.current.sendMessage(...args),
+    retryPreflight: (...args: Parameters<typeof retryPreflight>) =>
+      handlersRef.current.retryPreflight(...args),
+    cancelMission: (...args: Parameters<typeof cancelMission>) =>
+      handlersRef.current.cancelMission(...args),
+    dismissMission: (...args: Parameters<typeof dismissMission>) =>
+      handlersRef.current.dismissMission(...args),
+    renameMission: (...args: Parameters<typeof renameMission>) =>
+      handlersRef.current.renameMission(...args),
+    rateMission: (...args: Parameters<typeof rateMission>) =>
+      handlersRef.current.rateMission(...args),
+    setActiveMission: (...args: Parameters<typeof setActiveMission>) =>
+      handlersRef.current.setActiveMission(...args),
+    markMissionAsRead: (...args: Parameters<typeof markMissionAsRead>) =>
+      handlersRef.current.markMissionAsRead(...args),
+    selectAgent: (...args: Parameters<typeof selectAgent>) =>
+      handlersRef.current.selectAgent(...args),
+    connectToAgent: (...args: Parameters<typeof connectToAgent>) =>
+      handlersRef.current.connectToAgent(...args),
+    toggleSidebar: () => handlersRef.current.toggleSidebar(),
+    openSidebar: () => handlersRef.current.openSidebar(),
+    closeSidebar: () => handlersRef.current.closeSidebar(),
+    minimizeSidebar: () => handlersRef.current.minimizeSidebar(),
+    expandSidebar: () => handlersRef.current.expandSidebar(),
+    setFullScreen: (fullScreen: boolean) =>
+      handlersRef.current.handleSetFullScreen(fullScreen),
+  }), [])
+
+  const contextValue = useMemo(() => ({
+    missions,
+    activeMission,
+    isSidebarOpen,
+    isSidebarMinimized,
+    isFullScreen,
+    unreadMissionCount: unreadMissionIds.size,
+    unreadMissionIds,
+    agents,
+    selectedAgent,
+    defaultAgent,
+    agentsLoading,
+    isAIDisabled: selectedAgent === 'none' || !selectedAgent,
+    ...stableHandlers,
+  }), [
+    missions,
+    activeMission,
+    isSidebarOpen,
+    isSidebarMinimized,
+    isFullScreen,
+    unreadMissionIds,
+    agents,
+    selectedAgent,
+    defaultAgent,
+    agentsLoading,
+    stableHandlers,
+  ])
+
   return (
-    <MissionContext.Provider value={{
-      missions,
-      activeMission,
-      isSidebarOpen,
-      isSidebarMinimized,
-      isFullScreen,
-      unreadMissionCount: unreadMissionIds.size,
-      unreadMissionIds,
-      agents,
-      selectedAgent,
-      defaultAgent,
-      agentsLoading,
-      isAIDisabled: selectedAgent === 'none' || !selectedAgent,
-      startMission,
-      saveMission,
-      runSavedMission,
-      updateSavedMission,
-      sendMessage,
-      retryPreflight,
-      cancelMission,
-      dismissMission,
-      renameMission,
-      rateMission,
-      setActiveMission,
-      markMissionAsRead,
-      selectAgent,
-      connectToAgent,
-      toggleSidebar,
-      openSidebar,
-      closeSidebar,
-      minimizeSidebar,
-      expandSidebar,
-      setFullScreen: handleSetFullScreen }}>
+    <MissionContext.Provider value={contextValue}>
       {children}
     </MissionContext.Provider>
   )

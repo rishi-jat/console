@@ -12,6 +12,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"regexp"
 	"strconv"
@@ -30,6 +31,110 @@ import (
 
 // githubAPITimeout is the timeout for HTTP requests to the GitHub API.
 const githubAPITimeout = 10 * time.Second
+
+// maxClientPageLimit is the largest page size a client may request on any
+// list endpoint that routes through parsePageParams (feedback, RBAC user
+// listing, dashboards, swaps). #6601/#6602: the handler rejects anything
+// above this with HTTP 400.
+//
+// #6621: this is intentionally aligned to store.maxSQLLimit. Previously this
+// was 2000 while the store clamped to 1000, so a client could ask for 1500
+// and silently get 1000 rows back with no indication the page had been
+// truncated. Keeping both ceilings at the same value means a request for
+// more rows than the store can return is rejected up front with a clear
+// 400 instead of being silently clamped. If the store ceiling is ever
+// raised, raise this in lockstep.
+//
+// #6644: name/comment were previously feedback-specific, but parsePageParams
+// is reused by non-feedback handlers. Renamed to maxClientPageLimit and
+// scoped the comment to all list endpoints.
+const maxClientPageLimit = 1000
+
+// parsePageParams reads `limit` and `offset` query params with defense against
+// malformed or oversized requests. Returns (limit, offset, err).
+//
+// Semantics (#6621):
+//   - limit absent       → returns 0 so the store applies its default.
+//   - limit malformed    → HTTP 400 "invalid limit" (non-integer or negative).
+//   - limit > ceiling    → HTTP 400 "limit too large" (exceeds
+//     maxClientPageLimit, which is aligned to the store ceiling).
+//   - offset absent      → returns 0.
+//   - offset malformed   → HTTP 400 "invalid offset".
+//
+// #6598-#6602.
+func parsePageParams(c *fiber.Ctx) (int, int, error) {
+	limit := 0
+	if raw := c.Query("limit"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 0 {
+			return 0, 0, fiber.NewError(fiber.StatusBadRequest, "invalid limit")
+		}
+		if n > maxClientPageLimit {
+			return 0, 0, fiber.NewError(fiber.StatusBadRequest, "limit too large")
+		}
+		limit = n
+	}
+	offset := 0
+	if raw := c.Query("offset"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 0 {
+			return 0, 0, fiber.NewError(fiber.StatusBadRequest, "invalid offset")
+		}
+		offset = n
+	}
+	return limit, offset, nil
+}
+
+// resolveGitHubAPIBase returns the API base URL, honoring GITHUB_URL for GHE.
+// Returned value has no trailing slash. For public github.com, returns
+// "https://api.github.com". For GHE (e.g. GITHUB_URL=https://github.example.com),
+// returns "https://github.example.com/api/v3" per GHE conventions.
+//
+// #6591: Previously, any non-empty GITHUB_URL that didn't literally contain
+// "api.github.com" was treated as GHE and had "/api/v3" appended. An operator
+// who set the natural vanity value GITHUB_URL=https://github.com ended up with
+// https://github.com/api/v3, which doesn't exist — github.com's API lives at
+// api.github.com. Recognize public github.com (with or without scheme, with
+// or without www.) as a special case.
+func resolveGitHubAPIBase() string {
+	raw := strings.TrimSpace(os.Getenv("GITHUB_URL"))
+	if raw == "" {
+		return githubAPIBase
+	}
+	// Special case: public github.com → api.github.com. Handle bare hosts
+	// ("github.com") as well as fully-qualified URLs ("https://github.com").
+	if host, err := extractHost(raw); err == nil {
+		switch host {
+		case "github.com", "www.github.com", "api.github.com":
+			return "https://api.github.com"
+		}
+	}
+	// Otherwise assume GitHub Enterprise Server: <base>/api/v3.
+	trimmed := strings.TrimRight(raw, "/")
+	if strings.HasSuffix(trimmed, "/api/v3") {
+		return trimmed
+	}
+	return trimmed + "/api/v3"
+}
+
+// extractHost parses a GITHUB_URL value (which may be a bare host like
+// "github.com" or a full URL like "https://ghe.example.com/foo") and returns
+// the lowercased hostname. It is tolerant of missing schemes.
+func extractHost(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", fmt.Errorf("empty URL")
+	}
+	// url.Parse treats bare hosts as Path, so inject a scheme if missing.
+	if !strings.Contains(raw, "://") {
+		raw = "https://" + raw
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", err
+	}
+	return strings.ToLower(u.Hostname()), nil
+}
 
 // screenshotUploadTimeout is a longer timeout for uploading base64 screenshots
 // to GitHub via the Contents API, which can be slow for large images.
@@ -160,13 +265,24 @@ func (h *FeedbackHandler) CreateFeatureRequest(c *fiber.Ctx) error {
 	issueNumber, _, ssResult, err := h.createGitHubIssueInRepo(request, user, h.repoOwner, targetRepoName, input.Screenshots)
 	if err != nil {
 		slog.Error("[Feedback] failed to create GitHub issue", "error", err)
-		// Clean up the orphaned database record
-		h.store.CloseFeatureRequest(request.ID, false)
+		// Clean up the orphaned database record. Log but don't fail the
+		// outer error path on cleanup failure — the upstream GitHub error
+		// is the useful signal to return.
+		if cErr := h.store.CloseFeatureRequest(request.ID, false); cErr != nil {
+			slog.Warn("[Feedback] failed to close orphaned feature request",
+				"request_id", request.ID, "error", cErr)
+		}
 		return fiber.NewError(fiber.StatusBadGateway, fmt.Sprintf("Failed to create GitHub issue: %v", err))
 	}
 	request.GitHubIssueNumber = &issueNumber
 	request.Status = models.RequestStatusOpen
-	h.store.UpdateFeatureRequest(request)
+	// UpdateFeatureRequest writes user-visible state (issue number, status).
+	// A failure here means the client will see stale data — return 500.
+	if err := h.store.UpdateFeatureRequest(request); err != nil {
+		slog.Error("[Feedback] failed to persist GitHub issue number",
+			"request_id", request.ID, "issue", issueNumber, "error", err)
+		return fiber.NewError(fiber.StatusInternalServerError, "Failed to persist feature request state")
+	}
 
 	// Create notification for the user
 	notifTitle := "Request Submitted"
@@ -183,7 +299,10 @@ func (h *FeedbackHandler) CreateFeatureRequest(c *fiber.Ctx) error {
 		Message:          fmt.Sprintf("Your %s request '%s' has been submitted.", request.RequestType, request.Title),
 		ActionURL:        actionURL,
 	}
-	h.store.CreateNotification(notification)
+	if err := h.store.CreateNotification(notification); err != nil {
+		slog.Warn("[Feedback] failed to create issue notification",
+			"user", userID, "request_id", request.ID, "error", err)
+	}
 
 	// Return the request with screenshot upload status so the frontend can
 	// display an accurate message instead of always claiming success.
@@ -204,7 +323,12 @@ func (h *FeedbackHandler) CreateFeatureRequest(c *fiber.Ctx) error {
 func (h *FeedbackHandler) ListFeatureRequests(c *fiber.Ctx) error {
 	userID := middleware.GetUserID(c)
 
-	requests, err := h.store.GetUserFeatureRequests(userID)
+	limit, offset, err := parsePageParams(c)
+	if err != nil {
+		return err
+	}
+
+	requests, err := h.store.GetUserFeatureRequests(userID, limit, offset)
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, "Failed to list feature requests")
 	}
@@ -272,11 +396,35 @@ type QueueItem struct {
 	UpdatedAt         string `json:"updated_at,omitempty"`
 }
 
+// QueueItemCount — minimal shape returned by ListAllFeatureRequests when
+// count_only=true. Only the navbar badge (and the closed-request set it
+// filters against) consumes this path, so we serialize just id + status
+// instead of every QueueItem field as empty strings.
+//
+// PR #6573 item E — a standalone struct is preferable to sprinkling
+// ,omitempty on QueueItem because the full QueueItem shape is consumed
+// by the queue UI which DOES want zero-value title/description rendered
+// as "" (blurred placeholder for untriaged items), not omitted entirely.
+type QueueItemCount struct {
+	ID     string `json:"id"`
+	Status string `json:"status"`
+}
+
 // ListAllFeatureRequests returns all issues from GitHub as a queue
 // For untriaged issues that don't belong to the current user, title and description are redacted
 // Frontend will display these with blur effect
+//
+// PR #6518 item G — supports `?count_only=true` which returns a minimal
+// payload of just {id, status} pairs for every queue item. The navbar
+// FeatureRequestButton only needs closed-request IDs (to filter notifications
+// for the badge count) and does not render titles/descriptions/bodies on
+// mount, so requesting the full queue on every page load wastes bandwidth
+// and CPU. The lean response still requires the GitHub round-trip (we need
+// each issue's current status/labels) but avoids serializing bodies, titles,
+// and user-blurring logic the client doesn't consume.
 func (h *FeedbackHandler) ListAllFeatureRequests(c *fiber.Ctx) error {
 	userID := middleware.GetUserID(c)
+	countOnly := c.Query("count_only") == "true"
 
 	// Get current user's GitHub login for ownership comparison
 	user, _ := h.store.GetUser(userID)
@@ -319,7 +467,10 @@ func (h *FeedbackHandler) ListAllFeatureRequests(c *fiber.Ctx) error {
 
 	// Convert to queue items
 	// Note: preview URLs are fetched on-demand via CheckPreviewStatus endpoint
+	// PR #6573 item E — countOnly returns []QueueItemCount (id + status only)
+	// instead of a []QueueItem full of empty strings. See QueueItemCount type.
 	queueItems := make([]QueueItem, 0, len(taggedIssues))
+	queueItemCounts := make([]QueueItemCount, 0, len(taggedIssues))
 	for _, tagged := range taggedIssues {
 		issue := tagged.GitHubIssue
 		// Determine status based on labels
@@ -387,6 +538,18 @@ func (h *FeedbackHandler) ListAllFeatureRequests(c *fiber.Ctx) error {
 		// Check if issue was closed by the current user (the one viewing the queue)
 		closedByUser := issue.State == "closed" && issue.ClosedBy != nil && issue.ClosedBy.Login == currentGitHubLogin
 
+		// PR #6518 item G / #6573 item E — count_only responses carry only
+		// id + status, no titles or bodies. The client uses these to compute
+		// the navbar badge (which filters notifications by the set of
+		// closed-request IDs); nothing else is needed for that path.
+		if countOnly {
+			queueItemCounts = append(queueItemCounts, QueueItemCount{
+				ID:     fmt.Sprintf("gh-%s-%d", tagged.TargetRepo, issue.Number),
+				Status: status,
+			})
+			continue
+		}
+
 		queueItems = append(queueItems, QueueItem{
 			ID:                fmt.Sprintf("gh-%s-%d", tagged.TargetRepo, issue.Number),
 			UserID:            fmt.Sprintf("gh-%d", issue.User.ID),
@@ -406,6 +569,9 @@ func (h *FeedbackHandler) ListAllFeatureRequests(c *fiber.Ctx) error {
 		})
 	}
 
+	if countOnly {
+		return c.JSON(queueItemCounts)
+	}
 	return c.JSON(queueItems)
 }
 
@@ -422,12 +588,16 @@ func (h *FeedbackHandler) CheckPreviewStatus(c *fiber.Ctx) error {
 		return c.JSON(fiber.Map{"status": "unavailable", "message": "GitHub not configured"})
 	}
 
-	client := &http.Client{Timeout: githubAPITimeout}
+	// Reuse the shared package-level client (connection pooling, keep-alive).
+	// Previously a new client was created per request which defeated pooling.
+	client := h.httpClient
 
-	// Query GitHub Deployments API for the Netlify deploy preview environment
+	// Query GitHub Deployments API for the Netlify deploy preview environment.
+	// Honor GITHUB_URL for GitHub Enterprise deployments.
 	envName := fmt.Sprintf("deploy-preview-%d", prNumber)
-	deploymentsURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/deployments?environment=%s&per_page=1",
-		h.repoOwner, h.repoName, envName)
+	apiBase := resolveGitHubAPIBase()
+	deploymentsURL := fmt.Sprintf("%s/repos/%s/%s/deployments?environment=%s&per_page=1",
+		apiBase, h.repoOwner, h.repoName, envName)
 
 	req, err := http.NewRequest("GET", deploymentsURL, nil)
 	if err != nil {
@@ -458,8 +628,8 @@ func (h *FeedbackHandler) CheckPreviewStatus(c *fiber.Ctx) error {
 	}
 
 	// Fetch the latest status for this deployment
-	statusesURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/deployments/%d/statuses?per_page=1",
-		h.repoOwner, h.repoName, deployments[0].ID)
+	statusesURL := fmt.Sprintf("%s/repos/%s/%s/deployments/%d/statuses?per_page=1",
+		apiBase, h.repoOwner, h.repoName, deployments[0].ID)
 
 	req2, err := http.NewRequest("GET", statusesURL, nil)
 	if err != nil {
@@ -702,7 +872,11 @@ func (h *FeedbackHandler) fetchGitHubIssuesFromRepo(githubLogin string, repoName
 
 // listLocalFeatureRequests falls back to local database when GitHub is unavailable
 func (h *FeedbackHandler) listLocalFeatureRequests(c *fiber.Ctx, userID uuid.UUID) error {
-	requests, err := h.store.GetAllFeatureRequests()
+	limit, offset, err := parsePageParams(c)
+	if err != nil {
+		return err
+	}
+	requests, err := h.store.GetAllFeatureRequests(limit, offset)
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, "Failed to list feature requests")
 	}

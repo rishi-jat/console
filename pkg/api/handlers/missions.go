@@ -7,6 +7,9 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
+	"os"
+	"path"
 	"strings"
 	"sync"
 	"time"
@@ -21,15 +24,32 @@ const (
 	missionsMaxBodyBytes = 10 * 1024 * 1024 // 10MB
 	missionsMaxPathLen   = 512              // max length for path/ref parameters
 
-	// forkHeadSHAMaxRetries is the number of attempts to resolve the fork's HEAD SHA
-	// after fork creation, since GitHub may not have the ref ready immediately.
+	// missionsGitHubShareMaxBytes bounds the JSON payload accepted by
+	// ShareToGitHub. The GitHub Contents API accepts base64 file content;
+	// anything larger than ~1 MiB of encoded content is almost certainly
+	// abusive (we are sharing kc-mission JSON docs, not binaries). Reject
+	// oversize payloads with 413 instead of buffering up to
+	// missionsMaxBodyBytes and holding an http client goroutine for 30s
+	// (see #6419).
+	missionsGitHubShareMaxBytes = 1 * 1024 * 1024 // 1 MiB
+
+	// forkHeadSHAMaxRetries bounds how many times we poll for the fork's HEAD
+	// SHA after fork creation, since GitHub may not have the ref ready
+	// immediately. The retry budget below is deliberately tight — the handler
+	// is synchronous and must not hold a goroutine for longer than a user is
+	// willing to wait on an HTTP request (see #6420). With an initial backoff
+	// of 1s and a 1.5x multiplier, 5 attempts fit inside ~10s wall time
+	// (1 + 1.5 + 2.25 + 3.375 ~= 8.1s of sleep). A true fix would make the
+	// fork flow asynchronous (202 Accepted + poll endpoint), but that
+	// requires frontend changes tracked separately.
 	forkHeadSHAMaxRetries = 5
-	// forkHeadSHAInitialBackoff is the initial delay before the first retry when
-	// polling for the fork's HEAD SHA.
+	// forkHeadSHAInitialBackoff is the initial delay before the first retry
+	// when polling for the fork's HEAD SHA.
 	forkHeadSHAInitialBackoff = 1 * time.Second
-	// forkHeadSHABackoffMultiplier is the factor by which the backoff delay increases
-	// on each retry attempt.
-	forkHeadSHABackoffMultiplier = 2
+	// forkHeadSHABackoffMultiplier is the factor by which the backoff delay
+	// increases on each retry attempt. Uses a float multiplier so the total
+	// wait time stays bounded under ~10s (#6420).
+	forkHeadSHABackoffMultiplier = 1.5
 
 	// missionsCacheTTL is how long cached GitHub API responses are considered fresh.
 	// Directory listings and file contents change infrequently (console-kb is updated
@@ -43,10 +63,97 @@ const (
 	missionsCacheStaleTTL = 1 * time.Hour
 
 	// missionsCacheMaxEntries is the maximum number of entries in the response cache.
-	// Each entry stores a directory listing or file body. This prevents unbounded
-	// memory growth from deep directory traversals.
+	// Each entry stores a directory listing or file body.
 	missionsCacheMaxEntries = 256
+
+	// missionsValidateMaxBytes is a tighter payload cap for ValidateMission.
+	// Mission JSON documents are small structured metadata — legitimate payloads
+	// are well under 1 MiB. Accepting the full missionsMaxBodyBytes (10 MiB) for
+	// json.Unmarshal invites deeply-nested payloads that stress the decoder.
+	// Reject oversize validate requests early with 413 (#6820).
+	missionsValidateMaxBytes = 1 * 1024 * 1024 // 1 MiB
+
+	// slackMaxTextBytes is the maximum allowed size for the Text field in a
+	// SlackShareRequest. Slack messages are typically short; 10 KB is more
+	// than enough for any legitimate use. Without this cap a caller could
+	// POST up to missionsMaxBodyBytes (10 MiB) of text that gets forwarded
+	// to Slack, buffering the full payload in-process (#6817).
+	slackMaxTextBytes = 10 * 1024 // 10 KB
+
+	// missionsCacheMaxBytes bounds the TOTAL byte size of all cache entries,
+	// not just the entry count. Without this bound an attacker could fill
+	// missionsCacheMaxEntries slots with ~10 MiB file bodies each (the
+	// per-request missionsMaxBodyBytes cap), pushing ~2.5 GiB into resident
+	// memory (#6417). 256 MiB is a reasonable ceiling: large enough to hold
+	// the entire kubestellar/console-kb repo (~tens of MiB) with headroom,
+	// small enough that a single process footprint stays predictable.
+	missionsCacheMaxBytes = 256 * 1024 * 1024 // 256 MiB
 )
+
+// missionsDefaultShareRepos is the built-in allowlist of repositories that
+// ShareToGitHub will create PRs against. Operators can extend this via the
+// KC_ALLOWED_SHARE_REPOS environment variable (comma-separated list of
+// `owner/repo` entries). #6439 — without an allowlist, a misbehaving client
+// could point the handler at any repository the user's PAT has write access
+// to, using the console's UI as a confused-deputy PR-creation service.
+// console-kb is the canonical destination because shared missions land in the
+// community mission library (the same repo GetMissionFile reads from).
+var missionsDefaultShareRepos = []string{
+	"kubestellar/console-kb",
+}
+
+// allowedShareRepoEnvVar is the environment variable name operators use to
+// extend the built-in share-repo allowlist at runtime without a code change.
+const allowedShareRepoEnvVar = "KC_ALLOWED_SHARE_REPOS"
+
+// resolveAllowedShareRepos returns the effective allowlist of `owner/repo`
+// destinations for ShareToGitHub. The built-in defaults are always included;
+// any entries from KC_ALLOWED_SHARE_REPOS are appended. Empty/whitespace
+// entries are ignored.
+func resolveAllowedShareRepos() []string {
+	allowed := make([]string, 0, len(missionsDefaultShareRepos)+1)
+	allowed = append(allowed, missionsDefaultShareRepos...)
+	if extra := os.Getenv(allowedShareRepoEnvVar); extra != "" {
+		for _, r := range strings.Split(extra, ",") {
+			r = strings.TrimSpace(r)
+			if r != "" {
+				allowed = append(allowed, r)
+			}
+		}
+	}
+	return allowed
+}
+
+// isRepoAllowedForShare reports whether the given `owner/repo` string is on
+// the effective ShareToGitHub allowlist.
+//
+// #6453(B) — Comparison is case-INSENSITIVE. GitHub itself treats owner/repo
+// slugs as case-insensitive in both URLs and API calls, so we do the same here
+// to be forgiving of operator casing in KC_ALLOWED_SHARE_REPOS (e.g. a value
+// of `Kubestellar/Console-KB` will still match a request for
+// `kubestellar/console-kb`). Previously the check was exact-match, which was
+// stricter than GitHub's own handling and caused spurious 400s. See also
+// isRepoAllowedForShareWithList for the path that avoids re-parsing the env
+// var on every call.
+func isRepoAllowedForShare(repo string) bool {
+	return isRepoAllowedForShareWithList(repo, resolveAllowedShareRepos())
+}
+
+// isRepoAllowedForShareWithList is the inner, list-accepting form of
+// isRepoAllowedForShare. #6453(A) — ShareToGitHub resolves the allowlist once
+// per request and passes it through to this function for the membership check
+// AND for the error-response payload, avoiding a double call to
+// resolveAllowedShareRepos() (which re-parses KC_ALLOWED_SHARE_REPOS and could
+// observe a different value between calls if the env changes mid-request).
+func isRepoAllowedForShareWithList(repo string, allowed []string) bool {
+	repoLower := strings.ToLower(repo)
+	for _, a := range allowed {
+		if repoLower == strings.ToLower(a) {
+			return true
+		}
+	}
+	return false
+}
 
 // missionsCacheEntry holds a cached GitHub API response (directory listing or file content).
 type missionsCacheEntry struct {
@@ -57,15 +164,23 @@ type missionsCacheEntry struct {
 }
 
 // missionsResponseCache is a concurrency-safe in-memory cache for GitHub API responses.
-// The cache key is the full request URL. Entries are evicted when the cache exceeds
-// missionsCacheMaxEntries (oldest-first eviction).
+// The cache key is the full request URL. Entries are evicted (oldest-first) when
+// either the entry count exceeds missionsCacheMaxEntries or the total byte size
+// exceeds missionsCacheMaxBytes (#6417).
+// #6841 — insertOrder tracks keys in insertion order for O(1) oldest-key lookup
+// during eviction, replacing the previous O(n) map scan.
 type missionsResponseCache struct {
-	mu      sync.RWMutex
-	entries map[string]*missionsCacheEntry
+	mu          sync.RWMutex
+	entries     map[string]*missionsCacheEntry
+	insertOrder []string
+	totalBytes  int
 }
 
 // get returns a cached entry if it exists and is within the given TTL.
 // Returns nil if no entry exists or the entry is expired.
+//
+// #6822 — Returns a shallow copy of the entry so callers cannot mutate
+// the shared cache data after the read lock is released.
 func (c *missionsResponseCache) get(key string, ttl time.Duration) *missionsCacheEntry {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -76,11 +191,14 @@ func (c *missionsResponseCache) get(key string, ttl time.Duration) *missionsCach
 	if time.Since(entry.fetchedAt) > ttl {
 		return nil
 	}
-	return entry
+	cp := *entry
+	return &cp
 }
 
 // getStale returns a cached entry even if expired, as long as it is within staleTTL.
 // Used to serve stale data when GitHub rate-limits us — better than an error.
+//
+// #6822 — Returns a shallow copy (same rationale as get).
 func (c *missionsResponseCache) getStale(key string, staleTTL time.Duration) *missionsCacheEntry {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -91,52 +209,148 @@ func (c *missionsResponseCache) getStale(key string, staleTTL time.Duration) *mi
 	if time.Since(entry.fetchedAt) > staleTTL {
 		return nil
 	}
-	return entry
+	cp := *entry
+	return &cp
 }
 
-// set stores a response in the cache, evicting the oldest entry if the cache is full.
+// evictOldestLocked removes the single oldest entry from the cache.
+// Returns true if an entry was evicted.
+//
+// REQUIRES: c.mu held in WRITE mode by the caller (#6821).
+//
+// Currently called only from set(), which acquires c.mu.Lock() before
+// invoking this method. Any new call-site MUST hold the write lock —
+// this function reads and modifies c.entries, c.insertOrder, and
+// c.totalBytes without further synchronisation.
+//
+// #6841 — Uses the insertOrder slice for O(1) oldest-key lookup instead of
+// scanning the entire map on every eviction.
+func (c *missionsResponseCache) evictOldestLocked() bool {
+	for len(c.insertOrder) > 0 {
+		oldestKey := c.insertOrder[0]
+		c.insertOrder = c.insertOrder[1:]
+		if prev, ok := c.entries[oldestKey]; ok {
+			c.totalBytes -= len(prev.body)
+			delete(c.entries, oldestKey)
+			return true
+		}
+		// Key was already deleted (e.g. overwritten by set); skip to next.
+	}
+	return false
+}
+
+// set stores a response in the cache, evicting older entries until both the
+// entry-count cap (missionsCacheMaxEntries) and the byte-size cap
+// (missionsCacheMaxBytes) are satisfied (#6417). A single entry larger than
+// the byte cap is rejected rather than evicting the entire cache to make room.
 func (c *missionsResponseCache) set(key string, entry *missionsCacheEntry) {
+	entrySize := len(entry.body)
+	// Reject pathological single entries that would blow the byte cap on their own.
+	if entrySize > missionsCacheMaxBytes {
+		return
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	// Evict oldest entry if at capacity (simple strategy: find oldest and remove it)
-	if len(c.entries) >= missionsCacheMaxEntries {
-		var oldestKey string
-		var oldestTime time.Time
-		for k, v := range c.entries {
-			if oldestKey == "" || v.fetchedAt.Before(oldestTime) {
-				oldestKey = k
-				oldestTime = v.fetchedAt
-			}
-		}
-		if oldestKey != "" {
-			delete(c.entries, oldestKey)
+	// If the key already exists, account for its old size before replacing.
+	// Note: we do NOT remove from insertOrder here; evictOldestLocked skips
+	// stale entries that are no longer in the map.
+	if prev, ok := c.entries[key]; ok {
+		c.totalBytes -= len(prev.body)
+		delete(c.entries, key)
+	}
+	// Evict oldest entries until both caps will be satisfied after insertion.
+	for len(c.entries) >= missionsCacheMaxEntries || c.totalBytes+entrySize > missionsCacheMaxBytes {
+		if !c.evictOldestLocked() {
+			break
 		}
 	}
 	c.entries[key] = entry
+	c.insertOrder = append(c.insertOrder, key)
+	c.totalBytes += entrySize
 }
 
 // sanitizePath validates and sanitizes a file path parameter.
-// SECURITY: Blocks path traversal (../) and dangerous characters.
-func sanitizePath(path string) (string, error) {
-	if len(path) > missionsMaxPathLen {
+//
+// SECURITY (#6418): The naive version of this function used
+// `strings.Contains(rawPath, "..")` to block traversal, but Fiber's c.Query
+// URL-decodes exactly once. An attacker sending %252e%252e%252f gets one
+// decode from Fiber down to %2e%2e%2f, which does NOT contain the literal
+// string ".." and so bypassed the check. The raw string was then forwarded
+// into a fmt.Sprintf'd GitHub URL where a downstream consumer could decode
+// it a second time into ../ and escape the /missions/ base directory.
+//
+// The hardened version URL-decodes the input one extra time (matching the
+// worst-case double-decoding downstream), runs path.Clean on it, and
+// rejects any result that still contains a traversal component.
+func sanitizePath(raw string) (string, error) {
+	if len(raw) > missionsMaxPathLen {
 		return "", fmt.Errorf("path exceeds maximum length of %d", missionsMaxPathLen)
 	}
-	// Block path traversal
-	if strings.Contains(path, "..") {
-		return "", fmt.Errorf("path traversal (..) is not allowed")
+	// Decode repeatedly until the string stops changing. Fiber's c.Query
+	// has already decoded once before we see the value; an attacker who
+	// knows this can defeat a naive single-pass check by double- or
+	// triple-encoding (%252e → %2e → .). Iterating until a fixed point
+	// catches arbitrary nesting. Bound the iteration count so a
+	// pathological input cannot spin forever.
+	const maxDecodeIterations = 5
+	decoded := raw
+	for i := 0; i < maxDecodeIterations; i++ {
+		next, err := url.QueryUnescape(decoded)
+		if err != nil {
+			return "", fmt.Errorf("invalid path encoding")
+		}
+		if next == decoded {
+			break
+		}
+		decoded = next
+	}
+	// If the input required the maximum number of decode passes and is
+	// still changing, it's pathologically nested — reject outright.
+	if next, err := url.QueryUnescape(decoded); err == nil && next != decoded {
+		return "", fmt.Errorf("invalid path encoding")
+	}
+	// Normalize forward and backslash variants — Windows-style separators
+	// should never appear in a GitHub content path, but decoded %5c would
+	// produce them and some downstream callers treat them as separators.
+	if strings.ContainsAny(decoded, "\\") {
+		return "", fmt.Errorf("path contains invalid character")
 	}
 	// Block null bytes
-	if strings.ContainsRune(path, 0) {
+	if strings.ContainsRune(decoded, 0) {
 		return "", fmt.Errorf("path contains null bytes")
 	}
 	// Block shell metacharacters and control characters
-	for _, ch := range path {
-		if ch < 0x20 || ch == '`' || ch == '$' || ch == '|' || ch == ';' || ch == '&' || ch == '\\' {
+	for _, ch := range decoded {
+		if ch < 0x20 || ch == '`' || ch == '$' || ch == '|' || ch == ';' || ch == '&' {
 			return "", fmt.Errorf("path contains invalid character")
 		}
 	}
-	// Normalize leading slash
-	return strings.TrimPrefix(path, "/"), nil
+	// Detect traversal explicitly before path.Clean — path.Clean would
+	// silently collapse "../etc/passwd" to "etc/passwd" and hide the
+	// escape attempt from any post-clean check. Split on slash and reject
+	// if any segment is exactly ".." (the only form that walks up a
+	// directory in POSIX path semantics after decoding).
+	for _, seg := range strings.Split(decoded, "/") {
+		if seg == ".." {
+			return "", fmt.Errorf("path traversal (..) is not allowed")
+		}
+	}
+	// Belt-and-suspenders: path.Clean as a second-pass canonicalizer
+	// catches adjacent-slash artifacts and leading "./". We anchor on
+	// "/" so that a cleaned result of "/" maps back to the empty root.
+	cleaned := path.Clean("/" + decoded)
+	// After Clean, the literal ".." substring should never survive unless
+	// the attacker smuggled something pathological (e.g. ".../...//").
+	if strings.Contains(cleaned, "..") {
+		return "", fmt.Errorf("path traversal (..) is not allowed")
+	}
+	// Strip the leading slash we added for path.Clean; empty path (root of
+	// console-kb) is valid and maps to the repo root listing.
+	result := strings.TrimPrefix(cleaned, "/")
+	if result == "." {
+		result = ""
+	}
+	return result, nil
 }
 
 // sanitizeRef validates a git ref (branch/tag) parameter.
@@ -219,6 +433,9 @@ func (h *MissionsHandler) githubGet(url string, clientToken string) (*http.Respo
 	// retry without auth — the target repo is public
 	if hasToken && (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusNotFound) {
 		slog.Info("[missions] GitHub token returned error, retrying without auth", "status", resp.StatusCode, "url", url)
+		// #6823 — Drain the body before closing so the underlying TCP
+		// connection is returned to the pool for reuse (HTTP/1.1 keep-alive).
+		io.Copy(io.Discard, resp.Body) //nolint:errcheck // best-effort drain
 		resp.Body.Close()
 		retryReq, err := http.NewRequest("GET", url, nil)
 		if err != nil {
@@ -306,22 +523,30 @@ func (h *MissionsHandler) BrowseConsoleKB(c *fiber.Ctx) error {
 		return c.Status(resp.StatusCode).JSON(fiber.Map{"error": "GitHub API error", "status": resp.StatusCode, "code": code})
 	}
 
-	// GitHub returns type:"dir", frontend expects type:"directory" — transform
+	// GitHub returns type:"dir", frontend expects type:"directory" — transform.
+	// #6818 — If the path points to a file (not a directory), GitHub returns a
+	// JSON object instead of an array. json.Unmarshal into a slice will fail.
+	// Previously the handler forwarded the raw GitHub body, which has a
+	// different shape ({name, path, type:"file", content, ...}) than the
+	// normalized [{name, path, type, size}] the frontend expects — causing
+	// BrowseMissions to crash when it tries to .map() over an object. Return
+	// a structured 400 error instead, and skip the cache so subsequent
+	// requests with the corrected path aren't penalized.
 	var ghEntries []map[string]interface{}
 	if err := json.Unmarshal(body, &ghEntries); err != nil {
-		c.Set("Content-Type", "application/json")
-		return c.Send(body)
+		return c.Status(400).JSON(fiber.Map{
+			"error": "path is a file, not a directory",
+			"code":  "not_a_directory",
+		})
 	}
 
 	// Files and directories to hide from the browser UI — infrastructure
 	// and metadata entries that are not missions and would confuse users.
+	// #6421 — Any dot-prefixed entry is hidden by the dotfile check below,
+	// so this map only needs to cover non-dot files.
 	hiddenFiles := map[string]bool{
-		".gitkeep":         true,
 		"index.json":       true,
 		"search-state.json": true,
-	}
-	hiddenDirs := map[string]bool{
-		".github": true,
 	}
 
 	var entries []fiber.Map
@@ -335,11 +560,10 @@ func (h *MissionsHandler) BrowseConsoleKB(c *fiber.Ctx) error {
 		if entryType == "file" && hiddenFiles[name] {
 			continue
 		}
-		// Skip internal directories (e.g. .github)
-		if entryType == "directory" && hiddenDirs[name] {
-			continue
-		}
-		// Skip dotfiles/dotdirs not explicitly listed above
+		// #6421 — Skip any dotfile/dotdir (standard hidden-entry convention).
+		// This is intentionally exhaustive rather than an allowlist so that
+		// newly-added infrastructure dirs (.gitlab, .vscode, .well-known…)
+		// don't leak into the mission browser UI automatically.
 		if strings.HasPrefix(name, ".") {
 			continue
 		}
@@ -481,7 +705,9 @@ func (h *MissionsHandler) ValidateMission(c *fiber.Ctx) error {
 	if len(body) == 0 {
 		return c.Status(400).JSON(fiber.Map{"valid": false, "errors": []string{"empty body"}})
 	}
-	if len(body) > missionsMaxBodyBytes {
+	// Use the tighter missionsValidateMaxBytes instead of the general
+	// missionsMaxBodyBytes — mission JSON metadata is always small (#6820).
+	if len(body) > missionsValidateMaxBytes {
 		return c.Status(413).JSON(fiber.Map{"valid": false, "errors": []string{"payload too large"}})
 	}
 
@@ -515,6 +741,67 @@ type SlackShareRequest struct {
 	Text       string `json:"text"`
 }
 
+// validSlackWebhookHost is the ONLY host a Slack incoming webhook URL may
+// point at. Any other host is a potential SSRF target (see #6416).
+const validSlackWebhookHost = "hooks.slack.com"
+
+// validSlackWebhookPathPrefix is the required path prefix for a real Slack
+// incoming webhook — anything else is either a misconfiguration or an
+// attempt to proxy the request elsewhere.
+const validSlackWebhookPathPrefix = "/services/"
+
+// validateSlackWebhookURL parses the given URL and enforces a strict
+// allowlist: HTTPS only, host MUST equal hooks.slack.com (no subdomain or
+// userinfo tricks), and path MUST start with /services/. Returns an error
+// describing the rejection reason, or nil if the URL is safe.
+//
+// SECURITY (#6416): The previous check used
+// `strings.HasPrefix(url, "https://hooks.slack.com/")` which accepted
+// several bypass shapes depending on how URL parsers canonicalize the
+// request:
+//   - `https://hooks.slack.com/@attacker.evil/` — rejected by prefix but
+//     the HasPrefix check is still structural, not semantic, so any
+//     addition of URL grammar (userinfo, fragments, etc.) risks bypass
+//     when the parser normalizes.
+//   - `https://hooks.slack.com\\@attacker.evil/` — backslash is a
+//     separator in some parsers (WHATWG) but not Go's net/url, producing
+//     host mismatches across components.
+//   - `https://hooks.slack.com/` followed by an open redirect path — not
+//     strictly an SSRF but exfiltrates the webhook token.
+//
+// Parsing explicitly and comparing parsed.Host to the literal allowed
+// host eliminates the whole class of prefix-based bypasses.
+func validateSlackWebhookURL(rawURL string) error {
+	if rawURL == "" {
+		return fmt.Errorf("webhook URL is required")
+	}
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("webhook URL is not a valid URL")
+	}
+	if parsed.Scheme != "https" {
+		return fmt.Errorf("webhook URL must use https")
+	}
+	// User info (user:pass@host) is never valid for a Slack webhook and is
+	// the most common SSRF smuggling shape — reject outright.
+	if parsed.User != nil {
+		return fmt.Errorf("webhook URL must not include userinfo")
+	}
+	// Host must match EXACTLY; no subdomains, no suffix tricks. Hostname()
+	// strips any port, which Slack never uses, but we guard against that
+	// below anyway by rejecting non-empty Port().
+	if parsed.Hostname() != validSlackWebhookHost {
+		return fmt.Errorf("webhook URL host must be %s", validSlackWebhookHost)
+	}
+	if parsed.Port() != "" {
+		return fmt.Errorf("webhook URL must not specify a port")
+	}
+	if !strings.HasPrefix(parsed.Path, validSlackWebhookPathPrefix) {
+		return fmt.Errorf("webhook URL path must begin with %s", validSlackWebhookPathPrefix)
+	}
+	return nil
+}
+
 // ShareToSlack posts a message to a Slack webhook.
 // POST /api/missions/share/slack
 func (h *MissionsHandler) ShareToSlack(c *fiber.Ctx) error {
@@ -522,11 +809,17 @@ func (h *MissionsHandler) ShareToSlack(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": "invalid request body"})
 	}
-	if req.WebhookURL == "" || !strings.HasPrefix(req.WebhookURL, "https://hooks.slack.com/") {
-		return c.Status(400).JSON(fiber.Map{"error": "invalid or missing webhook URL"})
+	if err := validateSlackWebhookURL(req.WebhookURL); err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": err.Error()})
 	}
 	if req.Text == "" {
 		return c.Status(400).JSON(fiber.Map{"error": "text is required"})
+	}
+	// #6817 — Cap outbound Slack message size. Without this, a caller can
+	// POST a multi-MB text body that gets serialized into the Slack webhook
+	// payload and buffered in-process.
+	if len(req.Text) > slackMaxTextBytes {
+		return c.Status(400).JSON(fiber.Map{"error": fmt.Sprintf("text exceeds maximum size (%d bytes)", slackMaxTextBytes)})
 	}
 
 	payload, err := json.Marshal(map[string]string{"text": req.Text})
@@ -546,6 +839,10 @@ func (h *MissionsHandler) ShareToSlack(c *fiber.Ctx) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		// #6817 — Drain the response body before returning so the underlying
+		// TCP connection can be reused by the transport pool. defer Close()
+		// alone does not guarantee the body is fully consumed.
+		_, _ = io.Copy(io.Discard, resp.Body)
 		return c.Status(502).JSON(fiber.Map{"error": fmt.Sprintf("slack returned status %d", resp.StatusCode)})
 	}
 	return c.JSON(fiber.Map{"success": true})
@@ -570,12 +867,48 @@ func (h *MissionsHandler) ShareToGitHub(c *fiber.Ctx) error {
 		return c.Status(401).JSON(fiber.Map{"error": "X-GitHub-Token header is required"})
 	}
 
+	// #6419 — Reject oversized payloads before parsing. A misbehaving or
+	// malicious client could post up to missionsMaxBodyBytes (10 MiB) of
+	// base64-encoded content, which the handler would then hold in memory
+	// while making 4 sequential GitHub API calls (fork, ref, commit, PR)
+	// with missionsAPITimeout (30s) each — pinning a goroutine for up to
+	// two minutes per request. Cap the share endpoint at
+	// missionsGitHubShareMaxBytes (1 MiB), which is more than enough for
+	// a kc-mission-v1 JSON document.
+	if len(c.Body()) > missionsGitHubShareMaxBytes {
+		return c.Status(fiber.StatusRequestEntityTooLarge).JSON(fiber.Map{
+			"error":   "payload too large",
+			"maxSize": missionsGitHubShareMaxBytes,
+		})
+	}
+
 	var req GitHubShareRequest
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": "invalid request body"})
 	}
 	if req.Repo == "" || req.FilePath == "" || req.Content == "" || req.Branch == "" {
 		return c.Status(400).JSON(fiber.Map{"error": "repo, filePath, content, and branch are required"})
+	}
+
+	// SECURITY #6439 — Enforce an allowlist on req.Repo. Without this, a
+	// misbehaving client could supply any owner/repo value and use the
+	// handler as a confused-deputy PR-creation service against whatever
+	// repositories the caller's PAT can write to. The default allowlist
+	// contains only `kubestellar/console-kb` (the canonical destination for
+	// shared missions); operators can append more via KC_ALLOWED_SHARE_REPOS.
+	//
+	// #6453(A) — Resolve the allowlist exactly ONCE per request and reuse it
+	// for both the membership check and the error-response payload. The
+	// previous version called resolveAllowedShareRepos() twice on the reject
+	// path, duplicating env parsing and creating a small race window where
+	// the error message could disagree with the check if KC_ALLOWED_SHARE_REPOS
+	// changed between the two calls.
+	allowedShareRepos := resolveAllowedShareRepos()
+	if !isRepoAllowedForShareWithList(req.Repo, allowedShareRepos) {
+		return c.Status(400).JSON(fiber.Map{
+			"error":         "repo is not on the share allowlist",
+			"allowed_repos": allowedShareRepos,
+		})
 	}
 
 	// SECURITY: Validate path and branch to prevent traversal/injection
@@ -608,8 +941,8 @@ func (h *MissionsHandler) ShareToGitHub(c *fiber.Ctx) error {
 		return c.Status(502).JSON(fiber.Map{"error": "failed to decode fork response"})
 	}
 	forkFullName, _ := forkData["full_name"].(string)
-	if forkFullName == "" {
-		return c.Status(502).JSON(fiber.Map{"error": "fork response missing full_name"})
+	if forkFullName == "" || !strings.Contains(forkFullName, "/") {
+		return c.Status(502).JSON(fiber.Map{"error": "fork response missing or malformed full_name"})
 	}
 
 	// Detect the target repo's default branch (e.g. "main", "master", or custom).
@@ -622,6 +955,30 @@ func (h *MissionsHandler) ShareToGitHub(c *fiber.Ctx) error {
 		}
 	} else if db, ok := forkData["default_branch"].(string); ok && db != "" {
 		defaultBranch = db
+	}
+
+	// #6795 — If neither parent nor fork carried default_branch, query the
+	// upstream repo directly so we don't assume "main" for repos that use
+	// "master", "trunk", etc.
+	if defaultBranch == "main" {
+		upstreamURL := fmt.Sprintf("%s/repos/%s", h.githubAPIURL, req.Repo)
+		upstreamReq, err := http.NewRequest("GET", upstreamURL, nil)
+		if err == nil {
+			upstreamReq.Header.Set("Authorization", "Bearer "+token)
+			upstreamReq.Header.Set("Accept", "application/vnd.github.v3+json")
+			upstreamResp, err := h.httpClient.Do(upstreamReq)
+			if err == nil {
+				defer upstreamResp.Body.Close()
+				if upstreamResp.StatusCode == http.StatusOK {
+					var repoData map[string]interface{}
+					if json.NewDecoder(upstreamResp.Body).Decode(&repoData) == nil {
+						if db, ok := repoData["default_branch"].(string); ok && db != "" {
+							defaultBranch = db
+						}
+					}
+				}
+			}
+		}
 	}
 
 	// Step 2: Get HEAD SHA from fork's default branch, then create new branch ref.
@@ -658,16 +1015,36 @@ func (h *MissionsHandler) ShareToGitHub(c *fiber.Ctx) error {
 			}
 		}
 
-		// If this is not the last attempt, wait before retrying
+		// If this is not the last attempt, wait before retrying.
+		// Use select with context cancellation so the retry is
+		// abortable when the client disconnects (#6819).
 		if attempt < forkHeadSHAMaxRetries-1 {
 			slog.Info("[missions] fork HEAD SHA not yet available, retrying",
 				"attempt", attempt+1, "maxRetries", forkHeadSHAMaxRetries, "status", mainRefResp.StatusCode, "backoff", backoff)
-			time.Sleep(backoff)
-			backoff *= forkHeadSHABackoffMultiplier
+			select {
+			case <-time.After(backoff):
+				// backoff elapsed, continue to next attempt
+			case <-c.UserContext().Done():
+				return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+					"error": "request cancelled while waiting for fork to initialize",
+					"code":  "request_cancelled",
+				})
+			}
+			backoff = time.Duration(float64(backoff) * forkHeadSHABackoffMultiplier)
 		}
 	}
 	if headSHA == "" {
-		return c.Status(502).JSON(fiber.Map{"error": fmt.Sprintf("could not resolve HEAD SHA for fork's %s branch after retries", defaultBranch)})
+		// #6420 — After exhausting the retry budget, return 504 Gateway
+		// Timeout instead of 502. 504 is the correct status for "upstream
+		// didn't respond in time"; 502 implies the upstream returned an
+		// error response, which isn't the case here (we got 404 or 200
+		// without an object SHA). The frontend should retry this specific
+		// error (eventual consistency) rather than surfacing it as a hard
+		// failure.
+		return c.Status(fiber.StatusGatewayTimeout).JSON(fiber.Map{
+			"error": fmt.Sprintf("could not resolve HEAD SHA for fork's %s branch after retries; GitHub fork is still initializing — retry in a few seconds", defaultBranch),
+			"code":  "fork_not_ready",
+		})
 	}
 
 	refURL := fmt.Sprintf("%s/repos/%s/git/refs", h.githubAPIURL, forkFullName)
@@ -690,7 +1067,11 @@ func (h *MissionsHandler) ShareToGitHub(c *fiber.Ctx) error {
 	}
 	defer branchResp.Body.Close()
 	if branchResp.StatusCode < 200 || branchResp.StatusCode >= 300 {
-		// 422 (Unprocessable Entity) means the branch already exists, which is acceptable
+		// 422 (Unprocessable Entity) means the branch already exists, which is acceptable.
+		// #6835 — Eagerly drain the response body so the underlying HTTP/1.1
+		// connection is returned to the pool immediately instead of waiting for
+		// the deferred Close at function return (which may be 3+ HTTP calls later).
+		io.Copy(io.Discard, branchResp.Body) //nolint:errcheck // best-effort drain
 		if branchResp.StatusCode != http.StatusUnprocessableEntity {
 			return c.Status(502).JSON(fiber.Map{"error": fmt.Sprintf("GitHub branch creation failed with status %d", branchResp.StatusCode)})
 		}
@@ -712,6 +1093,7 @@ func (h *MissionsHandler) ShareToGitHub(c *fiber.Ctx) error {
 	}
 	fileReq.Header.Set("Authorization", "Bearer "+token)
 	fileReq.Header.Set("Accept", "application/vnd.github.v3+json")
+	fileReq.Header.Set("Content-Type", "application/json") // #6842 — required by GitHub Contents API
 	fileResp, err := h.httpClient.Do(fileReq)
 	if err != nil {
 		return c.Status(502).JSON(fiber.Map{"error": "failed to commit file"})

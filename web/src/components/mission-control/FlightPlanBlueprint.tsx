@@ -513,7 +513,7 @@ export function FlightPlanBlueprint({
   onMoveProject,
   installedProjects = new Set() }: FlightPlanBlueprintProps) {
   const svgId = useId().replace(/:/g, '')
-  const { clusters } = useClusters()
+  const { clusters, error: clustersError } = useClusters()
 
   // Filter out explicitly unhealthy clusters and redistribute orphaned projects to healthy ones
   const healthyState = useMemo(() => {
@@ -549,7 +549,13 @@ export function FlightPlanBlueprint({
     return { ...state, assignments }
   }, [state, clusters])
 
-  const layout = computeLayout(healthyState)
+  // #6731 — Memoize layout computation. Previously this ran on every render,
+  // and computeLayout traverses every assignment × project to produce node
+  // positions, dependency edges, and phase timelines — expensive enough to
+  // show up on the main-thread profiler during sidebar toggles and message
+  // streaming. `healthyState` is itself memoized, so this re-runs only when
+  // the underlying state.assignments / state.projects / clusters change.
+  const layout = useMemo(() => computeLayout(healthyState), [healthyState])
   const [infoPanel, setInfoPanel] = useState<InfoPanelData | null>(null)
   const [stickyPanel, setStickyPanel] = useState<InfoPanelData | null>(
     () => ({ kind: 'deployMode' as const, mode: state.deployMode, phases: state.phases })
@@ -867,8 +873,17 @@ export function FlightPlanBlueprint({
         </div>
       </div>
 
+      {/* Error banner when cluster data fails to load (issue 6772) */}
+      {/* TODO: error banner will activate once useClusters() propagates fetch errors */}
+      {clustersError && (
+        <div className="mx-6 mt-2 p-2 rounded-lg bg-red-500/20 border border-red-500/50 flex items-center gap-2 text-xs text-red-400">
+          <Shield className="w-3.5 h-3.5 flex-shrink-0" />
+          <span>Cluster data unavailable: {clustersError}</span>
+        </div>
+      )}
+
       {/* Main content: SVG left + Info panel right */}
-      <div className="flex-1 flex overflow-hidden">
+      <div className="flex-1 flex flex-col md:flex-row overflow-hidden">
         {/* SVG Blueprint */}
         <div className="flex-1 p-4 overflow-hidden relative">
           {/* Zoom & sidebar controls */}
@@ -926,7 +941,7 @@ export function FlightPlanBlueprint({
 
           <div
             ref={svgContainerRef}
-            className="w-full h-full overflow-auto"
+            className="w-full max-w-full h-full overflow-x-auto overflow-y-auto"
             style={{ cursor: zoom > 1 ? 'grab' : 'default' }}
             onMouseDown={handlePanStart}
           >

@@ -39,7 +39,10 @@ func NewRBACHandler(s store.Store, k8sClient *k8s.MultiClusterClient) *RBACHandl
 	return &RBACHandler{store: s, k8sClient: k8sClient}
 }
 
-// ListConsoleUsers returns all console users.
+// ListConsoleUsers returns a page of console users. Supports limit/offset
+// query params via parsePageParams (#6595); a response may therefore be a
+// partial page. Absent limit yields the store default page size.
+//
 // SECURITY: Restricted to admin users to prevent non-admin users from
 // enumerating all user records (#5458).
 func (h *RBACHandler) ListConsoleUsers(c *fiber.Ctx) error {
@@ -56,7 +59,15 @@ func (h *RBACHandler) ListConsoleUsers(c *fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusForbidden, "Admin access required")
 	}
 
-	users, err := h.store.ListUsers()
+	// #6595: bound the read. ?limit=&offset= follow the same contract as the
+	// feedback list endpoints (see parsePageParams). Absent limit → store
+	// default; malformed/oversized limit → HTTP 400.
+	limit, offset, err := parsePageParams(c)
+	if err != nil {
+		return err
+	}
+
+	users, err := h.store.ListUsers(limit, offset)
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, "Failed to list users")
 	}
@@ -364,6 +375,21 @@ func (h *RBACHandler) GetClusterPermissions(c *fiber.Ctx) error {
 
 // CreateServiceAccount creates a new service account (cluster-admin only)
 func (h *RBACHandler) CreateServiceAccount(c *fiber.Ctx) error {
+	// #6860: Console-level authorization — only admin users may create
+	// service accounts. Without this, any authenticated console user could
+	// create SAs via the backend's privileged kubeconfig identity.
+	userID := middleware.GetUserID(c)
+	currentUser, err := h.store.GetUser(userID)
+	if err != nil || currentUser == nil {
+		return fiber.NewError(fiber.StatusUnauthorized, "Unauthorized")
+	}
+	if currentUser.Role != models.UserRoleAdmin {
+		slog.Warn("[rbac] SECURITY: non-admin attempted to create service account",
+			"user_id", currentUser.ID,
+			"github_login", currentUser.GitHubLogin)
+		return fiber.NewError(fiber.StatusForbidden, "Console admin role required")
+	}
+
 	if h.k8sClient == nil {
 		return fiber.NewError(fiber.StatusServiceUnavailable, "Kubernetes client not available")
 	}
@@ -373,16 +399,25 @@ func (h *RBACHandler) CreateServiceAccount(c *fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusBadRequest, "Invalid request body")
 	}
 
-	if req.Name == "" || req.Namespace == "" || req.Cluster == "" {
-		return fiber.NewError(fiber.StatusBadRequest, "Name, namespace, and cluster are required")
+	// #6627: explicit field-level validation. Previously only non-empty
+	// checks were performed; a malformed name would be passed to the
+	// apiserver and return an opaque 500.
+	if err := validateDNSLabel("name", req.Name); err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, err.Error())
+	}
+	if err := validateDNSLabel("namespace", req.Namespace); err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, err.Error())
+	}
+	if err := validateClusterName("cluster", req.Cluster); err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, err.Error())
 	}
 
 	ctx, cancel := context.WithTimeout(c.Context(), rbacWriteTimeout)
 	defer cancel()
 
-	// Check if user has cluster-admin access
-	isAdmin, err := h.k8sClient.CheckClusterAdminAccess(ctx, req.Cluster)
-	if err != nil || !isAdmin {
+	// Check if user has cluster-admin access via Kubernetes RBAC too
+	isAdmin, kerr := h.k8sClient.CheckClusterAdminAccess(ctx, req.Cluster)
+	if kerr != nil || !isAdmin {
 		return fiber.NewError(fiber.StatusForbidden, "Cluster admin access required")
 	}
 
@@ -397,6 +432,21 @@ func (h *RBACHandler) CreateServiceAccount(c *fiber.Ctx) error {
 
 // CreateRoleBinding creates a new role binding (cluster-admin only)
 func (h *RBACHandler) CreateRoleBinding(c *fiber.Ctx) error {
+	// #6859: Console-level authorization — only admin users may create
+	// role bindings. Without this, any authenticated console user could
+	// escalate privileges via the backend's privileged kubeconfig identity.
+	userID := middleware.GetUserID(c)
+	currentUser, err := h.store.GetUser(userID)
+	if err != nil || currentUser == nil {
+		return fiber.NewError(fiber.StatusUnauthorized, "Unauthorized")
+	}
+	if currentUser.Role != models.UserRoleAdmin {
+		slog.Warn("[rbac] SECURITY: non-admin attempted to create role binding",
+			"user_id", currentUser.ID,
+			"github_login", currentUser.GitHubLogin)
+		return fiber.NewError(fiber.StatusForbidden, "Console admin role required")
+	}
+
 	if h.k8sClient == nil {
 		return fiber.NewError(fiber.StatusServiceUnavailable, "Kubernetes client not available")
 	}
@@ -406,8 +456,53 @@ func (h *RBACHandler) CreateRoleBinding(c *fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusBadRequest, "Invalid request body")
 	}
 
-	if req.Name == "" || req.Cluster == "" || req.RoleName == "" || req.SubjectName == "" {
-		return fiber.NewError(fiber.StatusBadRequest, "Missing required fields")
+	// #6627: explicit field-level validation. Previously only non-empty
+	// checks existed; empty subjectKind, out-of-range lengths, and invalid
+	// DNS labels were all silently accepted.
+	if err := validateDNSLabel("name", req.Name); err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, err.Error())
+	}
+	if err := validateClusterName("cluster", req.Cluster); err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, err.Error())
+	}
+	if err := validateRoleName("roleName", req.RoleName); err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, err.Error())
+	}
+	// Namespace is empty for ClusterRoleBindings — only validate if present.
+	if req.Namespace != "" {
+		if err := validateDNSLabel("namespace", req.Namespace); err != nil {
+			return fiber.NewError(fiber.StatusBadRequest, err.Error())
+		}
+	}
+	// roleKind, subjectKind must be one of the known Kubernetes kinds.
+	if err := validateEnum("roleKind", req.RoleKind, []string{"Role", "ClusterRole"}); err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, err.Error())
+	}
+	if err := validateEnum("subjectKind", string(req.SubjectKind), []string{"User", "Group", "ServiceAccount"}); err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, err.Error())
+	}
+	// subjectName has different rules for SAs vs users/groups. For SA we
+	// enforce DNS label; for users/groups we only require non-empty +
+	// reasonable length since they can contain emails, colons, etc.
+	if req.SubjectKind == models.K8sSubjectServiceAccount {
+		if err := validateDNSLabel("subjectName", req.SubjectName); err != nil {
+			return fiber.NewError(fiber.StatusBadRequest, err.Error())
+		}
+		// #6675 Copilot followup: subjectNamespace is REQUIRED for
+		// ServiceAccount subjects per Kubernetes RBAC. Previously we
+		// only validated it when present, so a missing namespace could
+		// slip through and fail later at the apiserver with a generic
+		// error.
+		if err := validateDNSLabel("subjectNamespace", req.SubjectNS); err != nil {
+			return fiber.NewError(fiber.StatusBadRequest, err.Error())
+		}
+	} else {
+		if req.SubjectName == "" {
+			return fiber.NewError(fiber.StatusBadRequest, "subjectName is required")
+		}
+		if len(req.SubjectName) > maxK8sDNSSubdomainLen {
+			return fiber.NewError(fiber.StatusBadRequest, "subjectName too long")
+		}
 	}
 
 	ctx, cancel := context.WithTimeout(c.Context(), rbacWriteTimeout)

@@ -374,7 +374,7 @@ export function AgentSelector({ compact = false, className = '' }: AgentSelector
         aria-haspopup="listbox"
         aria-expanded={isOpen}
         className={cn(
-          'flex items-center gap-2 px-3 py-1.5 rounded-lg border transition-colors',
+          'flex items-center gap-2 px-3 py-1.5 min-h-[44px] rounded-lg border transition-colors',
           'bg-secondary/50 border-border hover:bg-secondary',
           isOpen && 'ring-1 ring-primary'
         )}
@@ -402,7 +402,7 @@ export function AgentSelector({ compact = false, className = '' }: AgentSelector
           ref={panelRef}
           role="listbox"
           aria-label={t('agent.selectAgent')}
-          className="fixed z-dropdown w-96 max-h-[calc(100vh-8rem)] rounded-lg bg-card border border-border shadow-lg overflow-hidden flex flex-col"
+          className="fixed z-floating w-96 max-h-[calc(100vh-8rem)] rounded-lg bg-card border border-border shadow-lg overflow-hidden flex flex-col"
           style={{ top: dropdownPos.top, right: dropdownPos.right }}
           onKeyDown={(e) => {
             if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return

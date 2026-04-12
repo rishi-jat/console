@@ -49,35 +49,33 @@ export function UnifiedDashboard({
   config,
   statsData,
   className = '' }: UnifiedDashboardProps) {
-  // Card state - load from localStorage or use config defaults
+  // Tab state (for dashboards with tabs) — needed by the cards initializer
+  // to route persistence differently in tab-mode dashboards.
+  const hasTabs = (config.tabs?.length ?? 0) > 0
+
+  // Card state - load from localStorage or use config defaults.
+  //
+  // #6710 — Distinguish "never persisted" (no key in storage) from
+  // "explicitly empty" ([]). A user who removed every card should see an
+  // empty dashboard after reload, not a restored default layout. We only
+  // fall back to `config.cards` when the storage slot is missing entirely.
   const [cards, setCards] = useState<DashboardCardPlacement[]>(() => {
     if (config.storageKey) {
       try {
         const stored = localStorage.getItem(config.storageKey)
-        if (stored) {
+        if (stored !== null) {
           const parsed = JSON.parse(stored)
-          if (Array.isArray(parsed) && parsed.length > 0) {
+          if (Array.isArray(parsed)) {
             return parsed
           }
         }
       } catch {
-        // Ignore parse errors
+        // Ignore parse errors — fall through to defaults
       }
     }
     return config.cards
   })
 
-  // Tab state (for dashboards with tabs)
-  const hasTabs = (config.tabs?.length ?? 0) > 0
-
-  // Prefetch card chunks for this dashboard so React.lazy() resolves instantly
-  useEffect(() => {
-    // Prefetch cards for all tabs (not just active) so tab switching is instant
-    const allCards = hasTabs && config.tabs
-      ? config.tabs.flatMap(t => t.cards)
-      : cards
-    prefetchCardChunks(allCards.map(c => c.cardType))
-  }, [cards, hasTabs, config.tabs])
   const [activeTabId, setActiveTabId] = useState<string>(() => {
     if (!config.tabs || config.tabs.length === 0) return ''
     // Default to first non-disabled tab
@@ -85,12 +83,52 @@ export function UnifiedDashboard({
     return firstEnabled?.id ?? config.tabs[0].id
   })
 
+  // #6709 — Per-tab card state. Tab-mode dashboards used to read cards from
+  // `config.tabs[activeTabId].cards` but mutated the separate flat `cards`
+  // state, so add/remove/configure appeared to do nothing. We keep a local
+  // `tabCards` map keyed by tab id, seeded from `config.tabs`, and route
+  // mutations through it when `hasTabs` is true.
+  //
+  // #6749-A (Copilot on PR #6746) — Per-tab persistence. Previously the
+  // persistence effect short-circuited entirely when `hasTabs` was true,
+  // so tab-mode add/remove/reorder/configure changes were lost on reload.
+  // We now persist each tab's cards to its own localStorage slot keyed as
+  // `${storageKey}::tab::${tabId}::cards` and seed `tabCards` from those
+  // slots on mount when they exist. Non-tab dashboards keep using the
+  // original `storageKey`.
+  const [tabCards, setTabCards] = useState<Record<string, DashboardCardPlacement[]>>(() => {
+    if (!config.tabs) return {}
+    const initial: Record<string, DashboardCardPlacement[]> = {}
+    for (const t of config.tabs) {
+      let seeded: DashboardCardPlacement[] | null = null
+      if (config.storageKey) {
+        try {
+          const slot = `${config.storageKey}::tab::${t.id}::cards`
+          const raw = localStorage.getItem(slot)
+          if (raw !== null) {
+            const parsed = JSON.parse(raw)
+            if (Array.isArray(parsed)) seeded = parsed
+          }
+        } catch {
+          // Ignore parse errors — fall through to config defaults
+        }
+      }
+      initial[t.id] = seeded ?? t.cards ?? []
+    }
+    return initial
+  })
+
+  // Prefetch card chunks for this dashboard so React.lazy() resolves instantly
+  useEffect(() => {
+    // Prefetch cards for all tabs (not just active) so tab switching is instant
+    const allCards = hasTabs
+      ? Object.values(tabCards).flat()
+      : cards
+    prefetchCardChunks(allCards.map(c => c.cardType))
+  }, [cards, hasTabs, tabCards])
+
   // Get cards for the active tab (or all cards if no tabs)
-  const activeCards = (() => {
-    if (!hasTabs) return cards
-    const activeTab = config.tabs?.find(t => t.id === activeTabId)
-    return activeTab?.cards ?? []
-  })()
+  const activeCards = hasTabs ? (tabCards[activeTabId] ?? []) : cards
 
   // Loading state
   const [isLoading, setIsLoading] = useState(false)
@@ -101,30 +139,70 @@ export function UnifiedDashboard({
   const [isConfigureCardModalOpen, setIsConfigureCardModalOpen] = useState(false)
   const [cardToEdit, setCardToEdit] = useState<ConfigurableCard | null>(null)
 
-  // Persist cards to localStorage when they change
+  // Persist cards to localStorage when they change.
+  //
+  // #6710 — Persist on EVERY change, including when `cards` is empty. The
+  // previous `cards.length > 0` guard caused "remove all cards → reload"
+  // to restore defaults because we never wrote `[]` to storage.
   useEffect(() => {
-    if (config.storageKey && cards.length > 0) {
+    // Skip flat-cards persistence for tab-mode dashboards — tab-mode uses
+    // per-tab slots, handled by the effect below (#6749-A).
+    if (hasTabs) return
+    if (config.storageKey) {
       try {
         localStorage.setItem(config.storageKey, JSON.stringify(cards))
       } catch {
         // Ignore storage errors
       }
     }
-  }, [cards, config.storageKey])
+  }, [cards, config.storageKey, hasTabs])
+
+  // #6749-A — Persist per-tab cards to their own storage slots so tab-mode
+  // mutations survive a reload. Without this, the add/remove/reorder
+  // handlers wired through `mutateActiveCards` would update in-memory
+  // `tabCards` only, and the next mount would re-seed from `config.tabs`
+  // and erase the user's customization.
+  useEffect(() => {
+    if (!hasTabs) return
+    if (!config.storageKey) return
+    for (const [tabId, placements] of Object.entries(tabCards)) {
+      try {
+        const slot = `${config.storageKey}::tab::${tabId}::cards`
+        localStorage.setItem(slot, JSON.stringify(placements))
+      } catch {
+        // Ignore storage errors
+      }
+    }
+  }, [tabCards, config.storageKey, hasTabs])
+
+  // #6709 — Helper that mutates either the active tab's cards or the flat
+  // `cards` state, depending on dashboard mode. All card mutators go
+  // through this so tab-mode dashboards stay in sync.
+  const mutateActiveCards = (
+    updater: (prev: DashboardCardPlacement[]) => DashboardCardPlacement[]
+  ) => {
+    if (hasTabs) {
+      setTabCards((prev) => ({
+        ...prev,
+        [activeTabId]: updater(prev[activeTabId] ?? []) }))
+    } else {
+      setCards(updater)
+    }
+  }
 
   // Handle card reorder
   const handleReorder = (newCards: DashboardCardPlacement[]) => {
-    setCards(newCards)
+    mutateActiveCards(() => newCards)
   }
 
   // Handle card removal
   const handleRemoveCard = (cardId: string) => {
-    setCards((prev) => prev.filter((c) => c.id !== cardId))
+    mutateActiveCards((prev) => prev.filter((c) => c.id !== cardId))
   }
 
   // Handle card configuration
   const handleConfigureCard = (cardId: string) => {
-    const card = cards.find((c) => c.id === cardId)
+    const card = activeCards.find((c) => c.id === cardId)
     if (card) {
       setCardToEdit({
         id: card.id,
@@ -151,7 +229,7 @@ export function UnifiedDashboard({
 
   // Handle adding cards from AddCardModal
   const handleAddCards = (newCards: CardSuggestion[]) => {
-    setCards((prev) => {
+    mutateActiveCards((prev) => {
       const additions: DashboardCardPlacement[] = newCards.map((card, index) => ({
         id: `${card.type}-${Date.now()}-${index}`,
         cardType: card.type,
@@ -170,7 +248,7 @@ export function UnifiedDashboard({
 
   // Handle saving card configuration
   const handleSaveCardConfig = (cardId: string, newConfig: Record<string, unknown>, title?: string) => {
-    setCards((prev) =>
+    mutateActiveCards((prev) =>
       prev.map((card) =>
         card.id === cardId
           ? {
@@ -190,6 +268,32 @@ export function UnifiedDashboard({
     if (config.storageKey) {
       try {
         localStorage.removeItem(config.storageKey)
+        // #6758 — Also clear per-tab card slots written by the effect
+        // at line ~165. Without this, Reset would restore the flat
+        // `cards` state but leave stale tab-mode placements in
+        // localStorage, which would reseed on the next mount and
+        // silently undo the reset for tab-mode dashboards.
+        const tabSlotPrefix = `${config.storageKey}::tab::`
+        const tabSlotSuffix = '::cards'
+        const keysToRemove: string[] = []
+        for (let i = 0; i < localStorage.length; i++) {
+          const k = localStorage.key(i)
+          if (k && k.startsWith(tabSlotPrefix) && k.endsWith(tabSlotSuffix)) {
+            keysToRemove.push(k)
+          }
+        }
+        for (const k of keysToRemove) {
+          localStorage.removeItem(k)
+        }
+        // Also clear the in-memory tabCards so the reset is visible
+        // immediately without a reload.
+        if (hasTabs) {
+          const seeded: Record<string, DashboardCardPlacement[]> = {}
+          for (const t of (config.tabs ?? [])) {
+            seeded[t.id] = t.cards ?? []
+          }
+          setTabCards(seeded)
+        }
       } catch {
         // Ignore storage errors
       }
@@ -322,7 +426,7 @@ export function UnifiedDashboard({
 
       {/* Cards grid */}
       <DashboardGrid
-        cards={hasTabs ? activeCards : cards}
+        cards={activeCards}
         features={features}
         onReorder={features.dragDrop !== false ? handleReorder : undefined}
         onRemoveCard={handleRemoveCard}
@@ -357,7 +461,7 @@ export function UnifiedDashboard({
         isOpen={isAddCardModalOpen}
         onClose={() => setIsAddCardModalOpen(false)}
         onAddCards={handleAddCards}
-        existingCardTypes={cards.map((c) => c.cardType)}
+        existingCardTypes={activeCards.map((c) => c.cardType)}
       />
 
       {/* Configure Card Modal */}

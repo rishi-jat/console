@@ -59,6 +59,12 @@ const SIDEBAR_MAX_WIDTH = 800
 const SIDEBAR_DEFAULT_WIDTH = 480
 const SIDEBAR_WIDTH_KEY = 'ksc-mission-sidebar-width'
 
+// Tablet breakpoint matches Tailwind's `lg` (1024px). Below this width the
+// mission sidebar is rendered as an overlay (position: fixed without pushing
+// main content) so tablet layouts don't get squeezed below the min sidebar
+// width. See issues 6388 / 6394.
+const TABLET_BREAKPOINT_PX = 1024
+
 function loadSavedWidth(): number {
   const maxW = typeof window !== 'undefined'
     ? Math.min(SIDEBAR_MAX_WIDTH, window.innerWidth * 0.6)
@@ -89,19 +95,37 @@ export function MissionSidebar() {
   const [isResizing, setIsResizing] = useState(false)
   const latestWidthRef = useRef(sidebarWidth)
 
+  // Track tablet range (>= mobile but < lg). In this range the sidebar is
+  // rendered as an overlay that does NOT push main content — pushing at
+  // tablet widths squeezes main below the sidebar min width and can cause
+  // ~10px content overlap (issue 6388).
+  const [isTablet, setIsTablet] = useState(() => {
+    if (typeof window === 'undefined') return false
+    return window.innerWidth < TABLET_BREAKPOINT_PX
+  })
+  useEffect(() => {
+    const mq = window.matchMedia(`(max-width: ${TABLET_BREAKPOINT_PX - 1}px)`)
+    const onChange = (e: MediaQueryListEvent) => setIsTablet(e.matches)
+    setIsTablet(mq.matches)
+    mq.addEventListener('change', onChange)
+    return () => mq.removeEventListener('change', onChange)
+  }, [])
+
   // Publish sidebar width as a CSS custom property so Layout.tsx can
   // adjust main-content margins without needing context plumbing.
+  // On tablet (< 1024px) we publish 0 so the sidebar floats as an overlay.
   useEffect(() => {
     const root = document.documentElement
-    if (!isMobile && isSidebarOpen && !isSidebarMinimized && !isFullScreen) {
+    const isOverlayMode = isMobile || isTablet
+    if (!isOverlayMode && isSidebarOpen && !isSidebarMinimized && !isFullScreen) {
       root.style.setProperty('--mission-sidebar-width', `${sidebarWidth}px`)
-    } else if (!isMobile && isSidebarOpen && isSidebarMinimized && !isFullScreen) {
+    } else if (!isOverlayMode && isSidebarOpen && isSidebarMinimized && !isFullScreen) {
       root.style.setProperty('--mission-sidebar-width', '48px')
     } else {
       root.style.setProperty('--mission-sidebar-width', '0px')
     }
     return () => { root.style.removeProperty('--mission-sidebar-width') }
-  }, [isMobile, isSidebarOpen, isSidebarMinimized, isFullScreen, sidebarWidth])
+  }, [isMobile, isTablet, isSidebarOpen, isSidebarMinimized, isFullScreen, sidebarWidth])
 
   // Re-clamp sidebar width when viewport is resized
   useEffect(() => {
@@ -211,12 +235,14 @@ export function MissionSidebar() {
   }
 
   // Deep-link: open MissionBrowser via ?mission= (specific) or ?browse=missions (explorer)
+  // Deep-link: open MissionControlDialog via ?mission-control=open (#6474)
   // Direct import: ?import= fetches and imports mission directly (no browser popup)
   const [searchParams, setSearchParams] = useSearchParams()
   const location = useLocation()
   const deepLinkMission = searchParams.get('mission')
   const directImportSlug = searchParams.get('import')
   const browseParam = searchParams.get('browse')
+  const missionControlParam = searchParams.get('mission-control')
   /** Mission pre-fetched by MissionLandingPage and passed via navigation state */
   const prefetchedMission = (location.state as { prefetchedMission?: MissionExport } | null)?.prefetchedMission
 
@@ -229,6 +255,18 @@ export function MissionSidebar() {
       setSearchParams(newParams, { replace: true })
     }
   }, [deepLinkMission, browseParam, searchParams, setSearchParams])
+
+  // #6474 — ?mission-control=open opens the MissionControlDialog.
+  // Parallel to the ?browse=missions deep-link above. Gives users a
+  // shareable URL and makes Missions.spec.ts e2e tests actually work.
+  useEffect(() => {
+    if (missionControlParam === 'open') {
+      setShowMissionControl(true)
+      const newParams = new URLSearchParams(searchParams)
+      newParams.delete('mission-control')
+      setSearchParams(newParams, { replace: true })
+    }
+  }, [missionControlParam, searchParams, setSearchParams])
 
   // Direct import from landing page — fetch mission content and import it
   // without opening the MissionBrowser dialog
@@ -494,7 +532,7 @@ export function MissionSidebar() {
     return (
       <div
         className={cn(
-        "fixed top-16 right-0 bottom-0 w-12 bg-card/95 backdrop-blur-sm border-l border-border shadow-xl z-40 flex flex-col items-center py-4",
+        "fixed top-16 right-0 bottom-0 w-12 bg-card/95 backdrop-blur-sm border-l border-border shadow-xl z-modal flex flex-col items-center py-4",
         "transition-transform duration-300 ease-in-out",
         !isSidebarOpen && "translate-x-full pointer-events-none"
       )}>
@@ -527,20 +565,36 @@ export function MissionSidebar() {
   return (
     <>
       {/* Mobile backdrop */}
+      {/* issue 6742 — tabIndex=-1 removes the backdrop from the Tab order, aria-hidden
+          hides it from assistive tech. The sidebar itself handles close semantics. */}
       {isMobile && isSidebarOpen && (
         <div
           className="fixed inset-0 bg-black/60 backdrop-blur-sm z-overlay md:hidden"
           onClick={closeSidebar}
+          tabIndex={-1}
+          aria-hidden="true"
+        />
+      )}
+      {/* Tablet backdrop — the sidebar renders as an overlay at < lg so main
+          content isn't squeezed. A tap-out backdrop mirrors mobile UX (issue 6388). */}
+      {!isMobile && isTablet && isSidebarOpen && !isFullScreen && (
+        <div
+          className="fixed inset-0 bg-black/40 backdrop-blur-sm z-overlay lg:hidden"
+          onClick={closeSidebar}
+          tabIndex={-1}
+          aria-hidden="true"
         />
       )}
 
       <div
         data-tour="ai-missions"
         className={cn(
-          "fixed bg-card border-border z-40 flex flex-col overflow-hidden shadow-2xl",
+          "fixed bg-card border-border z-modal flex flex-col overflow-hidden shadow-2xl",
           !isResizing && "transition-[width,top,border,transform] duration-300 ease-in-out",
           // Mobile: bottom sheet
-          isMobile && "inset-x-0 bottom-0 rounded-t-2xl border-t max-h-[80vh]",
+          // vh fallback before dvh so browsers without dynamic-viewport-unit
+          // support still cap the sheet height (#6548).
+          isMobile && "inset-x-0 bottom-0 rounded-t-2xl border-t max-h-[80vh] max-h-[80dvh]",
           isMobile && !isSidebarOpen && "translate-y-full pointer-events-none",
           isMobile && isSidebarOpen && "translate-y-0",
           // Desktop: right sidebar
@@ -677,7 +731,7 @@ export function MissionSidebar() {
             ))}
             <button
               onClick={closeSidebar}
-              className="p-1 rounded transition-colors hover:bg-black/5 dark:hover:bg-white/10"
+              className="min-w-[44px] min-h-[44px] p-2 rounded transition-colors hover:bg-black/5 dark:hover:bg-white/10 flex items-center justify-center"
               title={t('missionSidebar.closeSidebar')}
             >
               <X className="w-5 h-5 text-muted-foreground" />

@@ -25,6 +25,14 @@ const execAuthDeadline = 5 * time.Second
 // Messages exceeding this limit are silently dropped to prevent memory exhaustion.
 const execMaxStdinBytes = 1 * 1024 * 1024 // 1 MB
 
+// execPingInterval is how often the server sends a WebSocket ping to detect dead peers.
+const execPingInterval = 30 * time.Second
+
+// execPongTimeout is how long the server waits for a pong reply before declaring
+// the peer dead. Must be greater than execPingInterval so the deadline is always
+// in the future when a new ping is sent.
+const execPongTimeout = 45 * time.Second
+
 // execSessionRegistry tracks active exec sessions per user so that
 // CancelUserExecSessions can tear them down on logout (#6024).
 //
@@ -42,22 +50,24 @@ const execMaxStdinBytes = 1 * 1024 * 1024 // 1 MB
 // infrequent and always short; an RWMutex would add complexity for no gain.
 var (
 	execSessionsMu sync.Mutex
-	execSessions   = make(map[uuid.UUID]map[int64]context.CancelFunc)
-	execSessionSeq int64 // monotonic id generator, guarded by execSessionsMu
+	execSessions = make(map[uuid.UUID]map[uint64]context.CancelFunc)
+	// execSessionSeq is a monotonic id generator guarded by execSessionsMu.
+	// uint64 so we don't wrap to negative at MaxInt64.
+	execSessionSeq uint64
 )
 
 // registerExecSession records cancel under userID and returns the assigned
 // session id. The session id is used by unregisterExecSession to remove the
 // specific entry when the session ends normally, so the map does not grow
 // unbounded across many sessions by the same user.
-func registerExecSession(userID uuid.UUID, cancel context.CancelFunc) int64 {
+func registerExecSession(userID uuid.UUID, cancel context.CancelFunc) uint64 {
 	execSessionsMu.Lock()
 	defer execSessionsMu.Unlock()
 	execSessionSeq++
 	id := execSessionSeq
 	sessions, ok := execSessions[userID]
 	if !ok {
-		sessions = make(map[int64]context.CancelFunc)
+		sessions = make(map[uint64]context.CancelFunc)
 		execSessions[userID] = sessions
 	}
 	sessions[id] = cancel
@@ -68,7 +78,7 @@ func registerExecSession(userID uuid.UUID, cancel context.CancelFunc) int64 {
 // handler's deferred cleanup on normal session end so the registry stays
 // bounded by the number of concurrently live exec sessions, not the total
 // lifetime count.
-func unregisterExecSession(userID uuid.UUID, id int64) {
+func unregisterExecSession(userID uuid.UUID, id uint64) {
 	execSessionsMu.Lock()
 	defer execSessionsMu.Unlock()
 	sessions, ok := execSessions[userID]
@@ -269,8 +279,14 @@ func (h *ExecHandlers) HandleExec(c *websocket.Conn) {
 		"remote_addr", c.RemoteAddr().String(),
 	)
 
-	// Clear read deadline after successful auth
-	c.SetReadDeadline(time.Time{})
+	// Set up ping/pong heartbeat to detect dead peers (#6891).
+	// The pong handler resets the read deadline each time the client replies,
+	// so a half-open TCP connection (hard power failure, network drop) is
+	// detected within execPongTimeout and ReadMessage unblocks with an error.
+	c.SetReadDeadline(time.Now().Add(execPongTimeout))
+	c.SetPongHandler(func(string) error {
+		return c.SetReadDeadline(time.Now().Add(execPongTimeout))
+	})
 
 	// Create the cancellable context and register it BEFORE any of the long-
 	// running setup (init message read, k8s client lookup, executor build).
@@ -283,7 +299,7 @@ func (h *ExecHandlers) HandleExec(c *websocket.Conn) {
 	execCtx, execCancel := context.WithCancel(context.Background())
 	defer execCancel()
 
-	var execRegistrationID int64
+	var execRegistrationID uint64
 	if claims.UserID != uuid.Nil {
 		execRegistrationID = registerExecSession(claims.UserID, execCancel)
 		defer unregisterExecSession(claims.UserID, execRegistrationID)
@@ -378,7 +394,12 @@ func (h *ExecHandlers) HandleExec(c *websocket.Conn) {
 	}
 
 	// Send exec_started acknowledgment
-	startMsg, _ := json.Marshal(execMessage{Type: "exec_started"})
+	startMsg, mErr := json.Marshal(execMessage{Type: "exec_started"})
+	if mErr != nil {
+		slog.Error("[Exec] failed to marshal exec_started message", "error", mErr)
+		writeError(c, "internal error: failed to encode exec_started")
+		return
+	}
 	writeMu := &sync.Mutex{}
 	writeMu.Lock()
 	_ = c.WriteMessage(websocket.TextMessage, startMsg)
@@ -401,6 +422,30 @@ func (h *ExecHandlers) HandleExec(c *websocket.Conn) {
 	// execCtx / execCancel were created up-front (right after JWT validation)
 	// so the registry is populated before any long-running setup. See the
 	// comment above for the race-window rationale (#6075).
+
+	// Start a goroutine that sends periodic WebSocket pings (#6891).
+	// If the client has silently disconnected (half-open TCP), the pong
+	// never arrives, the read deadline expires, ReadMessage returns an
+	// error, and execCancel fires — preventing zombie goroutines.
+	go func() {
+		ticker := time.NewTicker(execPingInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				writeMu.Lock()
+				err := c.WriteMessage(websocket.PingMessage, nil)
+				writeMu.Unlock()
+				if err != nil {
+					// Write failed — peer is gone; cancel to unblock stream.
+					execCancel()
+					return
+				}
+			case <-execCtx.Done():
+				return
+			}
+		}
+	}()
 
 	// Start a goroutine to read WebSocket messages and route them
 	done := make(chan struct{})
@@ -463,7 +508,11 @@ func (h *ExecHandlers) HandleExec(c *websocket.Conn) {
 		slog.Error("[Exec] stream ended with error", "error", execErr)
 	}
 
-	exitMsg, _ := json.Marshal(execMessage{Type: "exit", ExitCode: exitCode})
+	exitMsg, mErr := json.Marshal(execMessage{Type: "exit", ExitCode: exitCode})
+	if mErr != nil {
+		slog.Error("[Exec] failed to marshal exit message", "error", mErr, "exit_code", exitCode)
+		return
+	}
 	writeMu.Lock()
 	_ = c.WriteMessage(websocket.TextMessage, exitMsg)
 	writeMu.Unlock()

@@ -8,6 +8,123 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// newFakeClient returns a bare Client with the minimum state needed for
+// lifecycle (Stop) and ID-routing tests. It has no backing process, no
+// stdin/stdout, and no stderr — only the pending map, done channel, and
+// stopOnce are populated.
+func newFakeClient(name string) *Client {
+	return &Client{
+		name:    name,
+		pending: make(map[string]chan *Response),
+		done:    make(chan struct{}),
+	}
+}
+
+// TestIDKey_JSONRoundTrip verifies that a request ID (int64) survives a
+// json.Marshal/Unmarshal round trip and still matches the pending-map key
+// it was stored under. Without the fix from #6622, the outgoing int64 ID
+// was stored as `interface{}` keyed by int64 while the decoded response ID
+// came back as float64, causing every call() to block until the context
+// deadline fired.
+func TestIDKey_JSONRoundTrip(t *testing.T) {
+	const wantID int64 = 42
+
+	req := Request{JSONRPC: "2.0", ID: wantID, Method: "ping"}
+	data, err := json.Marshal(req)
+	require.NoError(t, err)
+
+	// Build a response with the same numeric ID and marshal → unmarshal it
+	// the way readResponses does.
+	respWire := []byte(`{"jsonrpc":"2.0","id":42,"result":{}}`)
+	var resp Response
+	require.NoError(t, json.Unmarshal(respWire, &resp))
+
+	// resp.ID is interface{} — after default json.Unmarshal of a JSON
+	// number into an interface{}, Go returns float64, not int64.
+	if _, ok := resp.ID.(float64); !ok {
+		t.Logf("note: default decoder returned %T for numeric JSON ID", resp.ID)
+	}
+
+	sentKey := idKey(wantID)
+	recvKey := idKey(resp.ID)
+	require.Equal(t, sentKey, recvKey,
+		"sent and received ID keys must match after JSON round trip; "+
+			"got sent=%q recv=%q (req bytes=%s)", sentKey, recvKey, data)
+
+	// And the pending-map round trip: store a channel under the sent key
+	// and look it up under the received key.
+	pending := map[string]chan *Response{sentKey: make(chan *Response, 1)}
+	_, ok := pending[recvKey]
+	require.True(t, ok, "pending map lookup via received key must succeed")
+}
+
+// TestClient_Stop_Idempotent verifies Stop can be called multiple times
+// without panicking on the close(c.done) channel (#6623).
+func TestClient_Stop_Idempotent(t *testing.T) {
+	c := newFakeClient("test")
+
+	require.NotPanics(t, func() {
+		_ = c.Stop()
+	}, "first Stop should not panic")
+
+	require.NotPanics(t, func() {
+		_ = c.Stop()
+	}, "second Stop must not panic on already-closed done channel")
+
+	require.NotPanics(t, func() {
+		_ = c.Stop()
+	}, "third Stop must still not panic")
+}
+
+// TestBridge_Stop_StopsAssignedClients validates the tail of Bridge.Start's
+// rollback path (#6624): once a client has been assigned to the bridge, a
+// subsequent Stop must call Stop on every assigned client and must be safe
+// to invoke repeatedly.
+//
+// #6655: this test was previously named and commented as if it exercised
+// Bridge.Start directly and asserted that the rollback nils out the client
+// pointers. Neither claim was accurate — we can't spawn real MCP binaries
+// in unit tests, Bridge.Stop does not nil client pointers (see bridge.go
+// Stop), and this test never invoked Start. The name and comment have been
+// corrected to describe what is actually asserted: that Stop is Start's
+// rollback primitive, that it tears down every assigned client, and that
+// it is idempotent.
+func TestBridge_Stop_StopsAssignedClients(t *testing.T) {
+	bridge := NewBridge(BridgeConfig{})
+
+	// Simulate two successfully started clients.
+	opsC := newFakeClient("ops")
+	deployC := newFakeClient("deploy")
+	bridge.opsClient = opsC
+	bridge.deployClient = deployC
+
+	// Invoke Stop directly to confirm it handles fake clients without
+	// panicking — this is the path the Start rollback takes.
+	require.NotPanics(t, func() {
+		_ = bridge.Stop()
+	}, "Bridge.Stop on fake clients must not panic")
+
+	// After Stop, both fake clients' done channels should be closed (the
+	// observable side effect of Client.Stop). We detect this via a
+	// non-blocking receive on the channel.
+	select {
+	case <-opsC.done:
+	default:
+		t.Fatal("opsClient.done was not closed by bridge.Stop — Stop did not run")
+	}
+	select {
+	case <-deployC.done:
+	default:
+		t.Fatal("deployClient.done was not closed by bridge.Stop — Stop did not run")
+	}
+
+	// Second Stop must still not panic (idempotence at bridge level relies
+	// on Client.Stop being idempotent).
+	require.NotPanics(t, func() {
+		_ = bridge.Stop()
+	}, "second Bridge.Stop must not panic")
+}
+
 func TestNewBridge(t *testing.T) {
 	t.Run("returns non-nil bridge with config", func(t *testing.T) {
 		cfg := BridgeConfig{

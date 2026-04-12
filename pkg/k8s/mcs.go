@@ -2,27 +2,66 @@ package k8s
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"sync"
 	"time"
 
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
 	"github.com/kubestellar/console/pkg/api/v1alpha1"
 )
 
-// ListServiceExports lists all ServiceExport resources across all clusters
-func (m *MultiClusterClient) ListServiceExports(ctx context.Context) (*v1alpha1.ServiceExportList, error) {
-	m.mu.RLock()
-	clusters := make([]string, 0, len(m.clients))
-	for name := range m.clients {
-		clusters = append(clusters, name)
+// isCRDNotInstalled reports whether the given error indicates that the MCS
+// CRD (ServiceExport / ServiceImport) is not installed on the target cluster,
+// as opposed to a real failure (auth, network, server error). Only this
+// specific case should be treated as an empty-list success — everything else
+// must be surfaced to the caller so the handler can report per-cluster
+// failures rather than silently hiding them (#6510).
+func isCRDNotInstalled(err error) bool {
+	if err == nil {
+		return false
 	}
-	m.mu.RUnlock()
+	if apimeta.IsNoMatchError(err) {
+		return true
+	}
+	// Discovery returns a NotFound status error for the resource type when
+	// the CRD is absent. We also accept a plain error with the same message
+	// so cluster variants that surface the error via Writer/Transport still
+	// get recognized. Object-level NotFounds (`"foo" not found`) must NOT
+	// match, so we key off the resource-type wording specifically.
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "the server could not find the requested resource") {
+		return true
+	}
+	return false
+}
+
+// ListServiceExports lists all ServiceExport resources across all clusters.
+// Uses DeduplicatedClusters (not the lazy m.clients snapshot) so newly-added
+// kubeconfig contexts are picked up immediately on hot-reload, matching the
+// fix landed in argocd.go (#6476). Without this, freshly-loaded contexts
+// whose clients had not yet been lazily created were silently dropped (#6662).
+func (m *MultiClusterClient) ListServiceExports(ctx context.Context) (*v1alpha1.ServiceExportList, error) {
+	dedupClusters, err := m.DeduplicatedClusters(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list clusters: %w", err)
+	}
+	clusters := make([]string, 0, len(dedupClusters))
+	for _, c := range dedupClusters {
+		clusters = append(clusters, c.Name)
+	}
 
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	exports := make([]v1alpha1.ServiceExport, 0)
+	// Per-cluster error accumulator — must not silently drop whole clusters
+	// on a real error now that ListServiceExportsForCluster correctly returns
+	// non-CRD-missing errors (#6547). Mirrors the handler-level ClusterErrors
+	// pattern used by /api/service-exports (#6483).
+	clusterErrors := make([]v1alpha1.MCSClusterError, 0)
 
 	for _, clusterName := range clusters {
 		wg.Add(1)
@@ -31,6 +70,13 @@ func (m *MultiClusterClient) ListServiceExports(ctx context.Context) (*v1alpha1.
 
 			clusterExports, err := m.ListServiceExportsForCluster(ctx, cluster, "")
 			if err != nil {
+				mu.Lock()
+				clusterErrors = append(clusterErrors, v1alpha1.MCSClusterError{
+					Cluster:   cluster,
+					ErrorType: "list_failed",
+					Message:   err.Error(),
+				})
+				mu.Unlock()
 				return
 			}
 
@@ -43,8 +89,9 @@ func (m *MultiClusterClient) ListServiceExports(ctx context.Context) (*v1alpha1.
 	wg.Wait()
 
 	return &v1alpha1.ServiceExportList{
-		Items:      exports,
-		TotalCount: len(exports),
+		Items:         exports,
+		TotalCount:    len(exports),
+		ClusterErrors: clusterErrors,
 	}, nil
 }
 
@@ -63,8 +110,13 @@ func (m *MultiClusterClient) ListServiceExportsForCluster(ctx context.Context, c
 	}
 
 	if err != nil {
-		// MCS CRDs might not be installed - return empty list instead of error
-		return []v1alpha1.ServiceExport{}, nil
+		// Only treat "CRD is not installed on this cluster" as a benign empty
+		// list. Real failures (auth, network, server errors) are returned to
+		// the caller so the handler can report per-cluster errors (#6510).
+		if isCRDNotInstalled(err) {
+			return []v1alpha1.ServiceExport{}, nil
+		}
+		return nil, err
 	}
 
 	return m.parseServiceExportsFromList(list, contextName)
@@ -100,18 +152,23 @@ func (m *MultiClusterClient) parseServiceExportsFromList(list interface{}, conte
 	return exports, nil
 }
 
-// ListServiceImports lists all ServiceImport resources across all clusters
+// ListServiceImports lists all ServiceImport resources across all clusters.
+// See ListServiceExports for the DeduplicatedClusters rationale (#6662).
 func (m *MultiClusterClient) ListServiceImports(ctx context.Context) (*v1alpha1.ServiceImportList, error) {
-	m.mu.RLock()
-	clusters := make([]string, 0, len(m.clients))
-	for name := range m.clients {
-		clusters = append(clusters, name)
+	dedupClusters, err := m.DeduplicatedClusters(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list clusters: %w", err)
 	}
-	m.mu.RUnlock()
+	clusters := make([]string, 0, len(dedupClusters))
+	for _, c := range dedupClusters {
+		clusters = append(clusters, c.Name)
+	}
 
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	imports := make([]v1alpha1.ServiceImport, 0)
+	// Per-cluster error accumulator — see ListServiceExports for rationale (#6547).
+	clusterErrors := make([]v1alpha1.MCSClusterError, 0)
 
 	for _, clusterName := range clusters {
 		wg.Add(1)
@@ -120,6 +177,13 @@ func (m *MultiClusterClient) ListServiceImports(ctx context.Context) (*v1alpha1.
 
 			clusterImports, err := m.ListServiceImportsForCluster(ctx, cluster, "")
 			if err != nil {
+				mu.Lock()
+				clusterErrors = append(clusterErrors, v1alpha1.MCSClusterError{
+					Cluster:   cluster,
+					ErrorType: "list_failed",
+					Message:   err.Error(),
+				})
+				mu.Unlock()
 				return
 			}
 
@@ -132,8 +196,9 @@ func (m *MultiClusterClient) ListServiceImports(ctx context.Context) (*v1alpha1.
 	wg.Wait()
 
 	return &v1alpha1.ServiceImportList{
-		Items:      imports,
-		TotalCount: len(imports),
+		Items:         imports,
+		TotalCount:    len(imports),
+		ClusterErrors: clusterErrors,
 	}, nil
 }
 
@@ -152,8 +217,13 @@ func (m *MultiClusterClient) ListServiceImportsForCluster(ctx context.Context, c
 	}
 
 	if err != nil {
-		// MCS CRDs might not be installed - return empty list instead of error
-		return []v1alpha1.ServiceImport{}, nil
+		// Only treat "CRD is not installed on this cluster" as a benign empty
+		// list. Real failures (auth, network, server errors) are returned to
+		// the caller so the handler can report per-cluster errors (#6510).
+		if isCRDNotInstalled(err) {
+			return []v1alpha1.ServiceImport{}, nil
+		}
+		return nil, err
 	}
 
 	return m.parseServiceImportsFromList(list, contextName)

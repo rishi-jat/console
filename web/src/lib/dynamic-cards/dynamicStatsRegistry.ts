@@ -22,8 +22,20 @@ function notifyListeners() {
   listeners.forEach(fn => fn())
 }
 
-/** Register a dynamic stats definition (wraps core registerStats) */
+/** Register a dynamic stats definition (wraps core registerStats).
+ *
+ * #6712 — Id-based dedup: skip notifyListeners() when the incoming
+ * definition is structurally identical to what's already registered.
+ * This prevents HMR-triggered remount waves when source files that
+ * register at module load time are edited.
+ */
 export function registerDynamicStats(definition: StatsDefinition): void {
+  const existing = dynamicTypes.has(definition.type)
+    ? getStatsDefinition(definition.type)
+    : undefined
+  if (existing && JSON.stringify(existing) === JSON.stringify(definition)) {
+    return
+  }
   dynamicTypes.add(definition.type)
   registerStats(definition)
   notifyListeners()
@@ -36,6 +48,22 @@ export function unregisterDynamicStats(type: string): boolean {
   unregisterStats(type)
   notifyListeners()
   return true
+}
+
+/**
+ * Clear all dynamically-registered stats definitions.
+ *
+ * #6681 — Used by loadDynamicStats to reconcile removed entries: the store
+ * performs an atomic replace (clear then re-register from storage) so that
+ * definitions deleted from localStorage no longer linger in memory.
+ */
+export function clearDynamicStats(): void {
+  if (dynamicTypes.size === 0) return
+  for (const type of Array.from(dynamicTypes)) {
+    unregisterStats(type)
+  }
+  dynamicTypes.clear()
+  notifyListeners()
 }
 
 /** Get a dynamic stats definition */
@@ -74,6 +102,11 @@ export interface DynamicStatsRecord {
   blocks: StatBlockDefinition[]
   defaultCollapsed?: boolean
   grid?: StatsDefinition['grid']
+}
+
+// #6712 — HMR self-acceptance. See dynamicCardRegistry.ts for rationale.
+if (import.meta.hot) {
+  import.meta.hot.accept()
 }
 
 /** Convert StatsDefinition to a serializable record */

@@ -25,6 +25,15 @@ const (
 	clusterHealthCheckTimeout = 8 * time.Second
 	clusterProbeTimeout       = 5 * time.Second
 	k8sClientTimeout          = 45 * time.Second
+	// totalHealthTimeout bounds the whole multi-cluster health call so a single
+	// slow/unreachable cluster cannot block the aggregate response. Clusters
+	// that have not reported by this deadline are marked as timeout rather than
+	// blocking the caller (#6506).
+	totalHealthTimeout = 20 * time.Second
+	// perClusterHealthTimeout bounds each individual cluster probe inside
+	// GetAllClusterHealth. Must be less than totalHealthTimeout so a single
+	// cluster cannot consume the entire global budget.
+	perClusterHealthTimeout = 10 * time.Second
 	clusterCacheTTL           = 60 * time.Second
 	authFailureCacheTTL       = 10 * time.Minute // longer TTL for auth errors to avoid exec-plugin spam (#3158)
 	podIssueAgeThreshold      = 5 * time.Minute
@@ -47,6 +56,13 @@ type MultiClusterClient struct {
 	cacheTime       map[string]time.Time
 	watcher         *fsnotify.Watcher
 	stopWatch       chan struct{}
+	// #6469/#6470 — lifecycle flags guarding StartWatching/StopWatching.
+	// `watching` tracks whether a watchLoop goroutine is active; it is flipped
+	// under `mu` so concurrent Start/Stop calls are serialized. `stopWatchOnce`
+	// ensures we only close `stopWatch` once even if StopWatching is called
+	// multiple times (closing a closed channel panics).
+	watching        bool
+	stopWatchOnce   sync.Once
 	onReload        func()               // Callback when config is reloaded
 	onWatchError    func(error)          // Callback when watchLoop encounters an error (#5569)
 	inClusterConfig *rest.Config         // In-cluster config when running inside k8s
@@ -382,7 +398,24 @@ const (
 	gpuHealthClusterRoleBinding = "gpu-health-checker"
 	gpuHealthDefaultSchedule    = "*/5 * * * *" // every 5 minutes
 	gpuHealthDefaultNS          = "nvidia-gpu-operator"
-	gpuHealthCheckerImage       = "bitnami/kubectl:latest"
+	// Supply-chain hardening (#6693): pin the GPU health checker image by
+	// digest so a compromised or unexpected :latest retag cannot change the
+	// binary that runs as cluster-admin via the configured RBAC.
+	//
+	// NOTE on tag choice: Bitnami only publishes a `latest` tag for
+	// `bitnami/kubectl` on Docker Hub (numeric version tags such as
+	// `1.31.0` return 404 against registry-1.docker.io). The digest below
+	// was resolved from `bitnami/kubectl:latest` on 2026-04-11. Operators
+	// should refresh this digest when rotating to a newer kubectl by
+	// running:
+	//   crane digest bitnami/kubectl:latest
+	// or the equivalent Docker Registry HTTP API lookup used here:
+	//   curl -sI -H "Accept: application/vnd.oci.image.index.v1+json" \
+	//        -H "Authorization: Bearer $TOKEN" \
+	//        https://registry-1.docker.io/v2/bitnami/kubectl/manifests/latest
+	// TODO(#6693): when Bitnami restores semver tags, switch to
+	// bitnami/kubectl:<version>@sha256:<digest> for clearer intent.
+	gpuHealthCheckerImage = "bitnami/kubectl@sha256:59ad45e8bd79e7af7592ff2852b32adcb0da50792bc52ce44679d5c5f1b4d415"
 	gpuHealthConfigMapName      = "gpu-health-results"
 	gpuHealthScriptVersion      = 2 // bump when script changes
 	gpuHealthDefaultTier        = 2 // standard tier by default
@@ -682,13 +715,33 @@ type LimitRangeItem struct {
 	Min            map[string]string `json:"min,omitempty"`
 }
 
-// NewMultiClusterClient creates a new multi-cluster client
+// NewMultiClusterClient creates a new multi-cluster client.
+//
+// Kubeconfig discovery order (#6683):
+//  1. explicit argument
+//  2. $KUBECONFIG environment variable
+//  3. ~/.kube/config — only when os.UserHomeDir() succeeds AND the path
+//     is not "/" or "/root" (which indicates a container with no real
+//     home). Previously os.UserHomeDir() errors were discarded with
+//     `home, _ := os.UserHomeDir()` which produced kubeconfig="/.kube/config"
+//     inside containers, leading to confusing "no such file" errors
+//     instead of falling through to in-cluster config.
+//  4. in-cluster config (handled below via rest.InClusterConfig()).
 func NewMultiClusterClient(kubeconfig string) (*MultiClusterClient, error) {
 	if kubeconfig == "" {
 		kubeconfig = os.Getenv("KUBECONFIG")
 		if kubeconfig == "" {
-			home, _ := os.UserHomeDir()
-			kubeconfig = filepath.Join(home, ".kube", "config")
+			home, err := os.UserHomeDir()
+			if err != nil || home == "" || home == "/" || home == "/root" {
+				// Running in a container without a real home directory.
+				// Leave kubeconfig empty so the os.Stat below fails fast
+				// and we fall through to rest.InClusterConfig().
+				slog.Info("no usable home directory for kubeconfig; will try in-cluster config",
+					"homeErr", err, "home", home)
+				kubeconfig = ""
+			} else {
+				kubeconfig = filepath.Join(home, ".kube", "config")
+			}
 		}
 	}
 
@@ -703,8 +756,17 @@ func NewMultiClusterClient(kubeconfig string) (*MultiClusterClient, error) {
 		slowClusters:   make(map[string]time.Time),
 	}
 
-	// Try to detect if we're running in-cluster
-	if _, err := os.Stat(kubeconfig); os.IsNotExist(err) {
+	// Try to detect if we're running in-cluster.
+	// kubeconfig may be empty when running inside a container without a
+	// real home directory (see #6683); os.Stat("") returns an error that
+	// is NOT os.ErrNotExist, so explicitly check for the empty path too.
+	needInCluster := kubeconfig == ""
+	if !needInCluster {
+		if _, err := os.Stat(kubeconfig); os.IsNotExist(err) {
+			needInCluster = true
+		}
+	}
+	if needInCluster {
 		// No kubeconfig file, try in-cluster config
 		if inClusterConfig, err := rest.InClusterConfig(); err == nil {
 			slog.Info("Using in-cluster config (no kubeconfig file found)")
@@ -872,14 +934,32 @@ func (m *MultiClusterClient) RemoveContext(contextName string) error {
 // StartWatching starts watching the kubeconfig file for changes.
 // Uses fsnotify for instant detection plus a polling fallback every 5s
 // to catch changes that fsnotify misses (common on macOS after atomic writes).
+//
+// issue 6470 — Idempotent. Repeated calls return nil without spawning a
+// second watcher goroutine. Previously every call created a fresh
+// fsnotify.Watcher and watchLoop goroutine, orphaning the previous one.
 func (m *MultiClusterClient) StartWatching() error {
+	// PR #6518 item A + #6573 item A — hold the lock for the ENTIRE setup,
+	// not just the check-and-set. Previous impl set watching=true, released
+	// the lock, then did fsnotify.NewWatcher()+Add. A second caller arriving
+	// during that window saw watching=true and returned nil immediately —
+	// but the first caller's watcher might still fail setup, leaving the
+	// struct in a broken state after the second caller already declared
+	// success. Holding the lock across fsnotify setup is acceptable because
+	// setup is fast (microseconds) and StartWatching is only called at
+	// startup / after a Stop, not on any hot path.
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.watching {
+		slog.Info("kubeconfig watcher already running, skipping StartWatching")
+		return nil
+	}
+
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		return fmt.Errorf("failed to create watcher: %w", err)
 	}
-
-	m.watcher = watcher
-	m.stopWatch = make(chan struct{})
 
 	// Watch the kubeconfig file
 	if err := watcher.Add(m.kubeconfig); err != nil {
@@ -893,7 +973,24 @@ func (m *MultiClusterClient) StartWatching() error {
 		slog.Warn("could not watch kubeconfig directory", "error", err)
 	}
 
-	go m.watchLoop()
+	m.watcher = watcher
+	// issue 6472 — Recreate stopWatch and reset the once on every Start so
+	// Stop→Start sequences actually work. Previously Start only initialized
+	// stopWatch on first call; after StopWatching closed it, a second Start
+	// succeeded but watchLoop exited immediately because stopWatch was closed.
+	m.stopWatch = make(chan struct{})
+	m.stopWatchOnce = sync.Once{}
+	// Snapshot for the goroutine so it reads a stable value even if a
+	// concurrent Stop+Start rotates m.stopWatch.
+	stopCh := m.stopWatch
+	w := m.watcher
+	// Only flip watching=true after setup has fully succeeded. A concurrent
+	// caller arriving before this line sees watching=false and will block
+	// on m.mu until we return; by then setup is complete (or rolled back
+	// via the error path, leaving watching=false for a clean retry).
+	m.watching = true
+
+	go m.watchLoop(stopCh, w)
 	slog.Info("watching kubeconfig for changes", "path", m.kubeconfig)
 	return nil
 }
@@ -915,14 +1012,37 @@ func (m *MultiClusterClient) reloadAndNotify() {
 	}
 	slog.Info("Kubeconfig reloaded successfully")
 
-	// Re-add file watch — after atomic writes (rm+create or rename-over),
-	// the old inode-level watch is dead. This re-establishes it on the new inode.
-	if m.watcher != nil {
-		_ = m.watcher.Remove(m.kubeconfig)
+	// PR #6518 item H — Re-add file watch under the lock. This runs from
+	// a debounce timer on a separate goroutine; without locking it races
+	// with StartWatching / StopWatching which mutate m.watcher. We also
+	// check m.watching so a Stop-then-timer-fires sequence doesn't touch
+	// a closed watcher.
+	m.mu.Lock()
+	if m.watching && m.watcher != nil {
+		// #6692 — Log Remove errors (previously discarded with `_ =`).
+		// fsnotify returns a "can't remove non-existent watcher" error
+		// when the old inode has already been garbage-collected, which
+		// is benign; any other error (EACCES, ENOSPC, …) indicates a
+		// stale inode watch that will silently persist unless we notice.
+		if removeErr := m.watcher.Remove(m.kubeconfig); removeErr != nil {
+			// fsnotify doesn't expose typed errors; match on text.
+			errText := removeErr.Error()
+			isBenign := strings.Contains(errText, "non-existent") ||
+				strings.Contains(errText, "not found") ||
+				strings.Contains(errText, "can't remove")
+			if isBenign {
+				slog.Debug("fsnotify Remove returned benign 'not found'",
+					"path", m.kubeconfig, "error", removeErr)
+			} else {
+				slog.Warn("fsnotify Remove failed; stale inode watch may persist — will attempt Add anyway",
+					"path", m.kubeconfig, "error", removeErr)
+			}
+		}
 		if err := m.watcher.Add(m.kubeconfig); err != nil {
 			slog.Warn("could not re-watch kubeconfig file", "error", err)
 		}
 	}
+	m.mu.Unlock()
 
 	// Notify listeners
 	m.mu.RLock()
@@ -933,7 +1053,10 @@ func (m *MultiClusterClient) reloadAndNotify() {
 	}
 }
 
-func (m *MultiClusterClient) watchLoop() {
+// watchLoop runs until stopCh is closed. stopCh and watcher are passed in
+// rather than read from m.stopWatch / m.watcher so a concurrent Stop→Start
+// that rotates those fields does not race with this goroutine.
+func (m *MultiClusterClient) watchLoop(stopCh <-chan struct{}, watcher *fsnotify.Watcher) {
 	// Debounce timer to avoid reloading multiple times for rapid changes
 	var debounceTimer *time.Timer
 	debounceDelay := clusterEventDebounce
@@ -956,12 +1079,12 @@ func (m *MultiClusterClient) watchLoop() {
 
 	for {
 		select {
-		case <-m.stopWatch:
+		case <-stopCh:
 			if debounceTimer != nil {
 				debounceTimer.Stop()
 			}
 			return
-		case event, ok := <-m.watcher.Events:
+		case event, ok := <-watcher.Events:
 			if !ok {
 				return
 			}
@@ -975,11 +1098,21 @@ func (m *MultiClusterClient) watchLoop() {
 					triggerReload()
 				}
 			}
-		case err, ok := <-m.watcher.Errors:
+		case err, ok := <-watcher.Errors:
 			if !ok {
 				return
 			}
 			slog.Error("kubeconfig watcher error", "error", err)
+			// issue 6471 — Fire the public error callback so callers that
+			// registered SetOnWatchError() actually see channel errors.
+			// Previously this log was the only signal, silently breaking
+			// the documented SetOnWatchError contract.
+			m.mu.RLock()
+			errCallback := m.onWatchError
+			m.mu.RUnlock()
+			if errCallback != nil {
+				errCallback(err)
+			}
 		case <-pollTicker.C:
 			// Polling fallback: detect changes that fsnotify missed
 			info, err := os.Stat(m.kubeconfig)
@@ -995,13 +1128,34 @@ func (m *MultiClusterClient) watchLoop() {
 	}
 }
 
-// StopWatching stops watching the kubeconfig file
+// StopWatching stops watching the kubeconfig file.
+//
+// issue 6469 — Safe to call multiple times. Previously a second call
+// panicked because `close(m.stopWatch)` fires on an already-closed channel.
+// The sync.Once guards the close; the watching flag prevents double-close
+// of the fsnotify watcher too.
 func (m *MultiClusterClient) StopWatching() {
-	if m.stopWatch != nil {
-		close(m.stopWatch)
+	// PR #6518 item B — hold the lock through once.Do so a concurrent
+	// Stop→Start that replaces m.stopWatchOnce cannot race with this Do.
+	// Previously we captured &m.stopWatchOnce then released the lock; a
+	// concurrent StartWatching could assign a fresh sync.Once to that
+	// address while this goroutine was still inside Do, producing a
+	// data race on the Once's internal state.
+	m.mu.Lock()
+	if !m.watching {
+		m.mu.Unlock()
+		return
 	}
-	if m.watcher != nil {
-		m.watcher.Close()
+	m.watching = false
+	stopCh := m.stopWatch
+	w := m.watcher
+	if stopCh != nil {
+		m.stopWatchOnce.Do(func() { close(stopCh) })
+	}
+	m.mu.Unlock()
+
+	if w != nil {
+		w.Close()
 	}
 }
 
@@ -1180,16 +1334,22 @@ func (m *MultiClusterClient) WarmupHealthCache() {
 			client, clientErr := m.GetClient(ctxName)
 			if clientErr != nil {
 				errType := classifyError(clientErr.Error())
+				// Drop the write if the warmup context has already expired
+				// (#6497). Without this check a slow probe that returned
+				// after WarmupHealthCache's 8s deadline would stomp on fresh
+				// entries written by real request-path health checks.
 				m.mu.Lock()
-				m.healthCache[ctxName] = &ClusterHealth{
-					Cluster:      name,
-					Reachable:    false,
-					Healthy:      false,
-					ErrorType:    errType,
-					ErrorMessage: clientErr.Error(),
-					CheckedAt:    time.Now().Format(time.RFC3339),
+				if ctx.Err() == nil {
+					m.healthCache[ctxName] = &ClusterHealth{
+						Cluster:      name,
+						Reachable:    false,
+						Healthy:      false,
+						ErrorType:    errType,
+						ErrorMessage: clientErr.Error(),
+						CheckedAt:    time.Now().Format(time.RFC3339),
+					}
+					m.cacheTime[ctxName] = time.Now()
 				}
-				m.cacheTime[ctxName] = time.Now()
 				m.mu.Unlock()
 				if errType == "auth" {
 					slog.Info("[Warmup] auth failure — run credential refresh to restore access", "cluster", name)
@@ -1203,15 +1363,18 @@ func (m *MultiClusterClient) WarmupHealthCache() {
 			if listErr != nil {
 				errType := classifyError(listErr.Error())
 				m.mu.Lock()
-				m.healthCache[ctxName] = &ClusterHealth{
-					Cluster:      name,
-					Reachable:    false,
-					Healthy:      false,
-					ErrorType:    errType,
-					ErrorMessage: listErr.Error(),
-					CheckedAt:    time.Now().Format(time.RFC3339),
+				// See the GetClient-error branch above for #6497 rationale.
+				if ctx.Err() == nil {
+					m.healthCache[ctxName] = &ClusterHealth{
+						Cluster:      name,
+						Reachable:    false,
+						Healthy:      false,
+						ErrorType:    errType,
+						ErrorMessage: listErr.Error(),
+						CheckedAt:    time.Now().Format(time.RFC3339),
+					}
+					m.cacheTime[ctxName] = time.Now()
 				}
-				m.cacheTime[ctxName] = time.Now()
 				m.mu.Unlock()
 				if errType == "auth" {
 					slog.Info("[Warmup] auth failure (will cache to avoid exec-plugin spam)", "cluster", name, "cacheTTL", authFailureCacheTTL)
@@ -1220,13 +1383,16 @@ func (m *MultiClusterClient) WarmupHealthCache() {
 				}
 			} else {
 				m.mu.Lock()
-				m.healthCache[ctxName] = &ClusterHealth{
-					Cluster:   name,
-					Reachable: true,
-					Healthy:   true,
-					CheckedAt: time.Now().Format(time.RFC3339),
+				// See the GetClient-error branch above for #6497 rationale.
+				if ctx.Err() == nil {
+					m.healthCache[ctxName] = &ClusterHealth{
+						Cluster:   name,
+						Reachable: true,
+						Healthy:   true,
+						CheckedAt: time.Now().Format(time.RFC3339),
+					}
+					m.cacheTime[ctxName] = time.Now()
 				}
-				m.cacheTime[ctxName] = time.Now()
 				m.mu.Unlock()
 				slog.Info("[Warmup] reachable", "cluster", name)
 			}

@@ -5,7 +5,7 @@
  * Sources: KubeStellar Community repo, GitHub repos with kubestellar-missions, local files.
  */
 
-import { useState, useEffect, useRef, useMemo } from 'react'
+import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import {
   Search, X, Upload, Filter, Grid3X3, List, Sparkles, CheckCircle,
   Loader2, ExternalLink, RefreshCw } from 'lucide-react'
@@ -84,6 +84,27 @@ const WATCHED_PATHS_KEY = 'kc_mission_watched_paths'
 /** File extensions accepted by the mission browser */
 const MISSION_FILE_EXTENSIONS = ['.json', '.yaml', '.yml', '.md'] as const
 const MISSION_FILE_ACCEPT = '.json,.yaml,.yml,.md,application/json,text/yaml,text/markdown'
+
+/**
+ * #6421 — Matches any filesystem entry whose name begins with a dot.
+ * This exhaustively hides ALL dot-prefixed directories and files (the
+ * standard Unix hidden-entry convention) from the mission browser UI.
+ * The previous implementation only hid an enumerated set (.github, .gitkeep,
+ * index.json) which let .gitlab, .assets, .vscode, .well-known, etc. leak
+ * through whenever a new one was added to a source repo.
+ */
+const HIDDEN_ENTRY_REGEX = /^\./
+
+/**
+ * Returns true if an entry should be hidden from the browser listing.
+ * Hides dot-prefixed entries (directories AND files) and the legacy
+ * `index.json` manifest which is internal routing state, not a mission.
+ */
+function isHiddenEntry(name: string): boolean {
+  if (HIDDEN_ENTRY_REGEX.test(name)) return true
+  if (name === 'index.json') return true
+  return false
+}
 
 /** Check if a filename has a supported mission file extension */
 function isMissionFile(name: string): boolean {
@@ -377,7 +398,11 @@ export function MissionBrowser({ isOpen, onClose, onImport, initialMission }: Mi
   // Track the latest selection to prevent stale async responses from overwriting
   const latestSelectionRef = useRef<string>('')
 
-  const selectCardMission = async (mission: MissionExport) => {
+  // PR #6518 item F — wrap in useCallback so the deep-link effect below can
+  // safely list it in its dependency array without thrashing every render.
+  // All captured references are either state setters (stable) or module-level
+  // imports (fetchMissionContent) — so the callback itself is stable.
+  const selectCardMission = useCallback(async (mission: MissionExport) => {
     // Use title + type as unique key (MissionExport has no id field)
     const selectionKey = `${mission.title}::${mission.type}`
     latestSelectionRef.current = selectionKey
@@ -406,7 +431,7 @@ export function MissionBrowser({ isOpen, onClose, onImport, initialMission }: Mi
         setIsMissionLoading(false)
       }
     }
-  }
+  }, [])
 
   // ============================================================================
   // Copy shareable link for a mission
@@ -426,10 +451,19 @@ export function MissionBrowser({ isOpen, onClose, onImport, initialMission }: Mi
   // loaded yet — the ref keeps the slug alive for later matching).
   // ============================================================================
 
+  // issue 6467 — Deep-link slug tracking. Previously this updated the ref
+  // only on first render (`if (!deepLinkSlugRef.current)`), so when a user
+  // deep-linked into mission A and then clicked mission B without closing
+  // the browser, the effect below kept trying to match mission A's old
+  // slug. Update the ref whenever `initialMission` changes, and include
+  // `initialMission` in the effect's dep array so the effect re-runs when
+  // a new deep-link arrives.
   const deepLinkSlugRef = useRef<string | null>(null)
-  if (initialMission && !deepLinkSlugRef.current) {
-    deepLinkSlugRef.current = initialMission.toLowerCase()
-  }
+  useEffect(() => {
+    if (initialMission) {
+      deepLinkSlugRef.current = initialMission.toLowerCase()
+    }
+  }, [initialMission])
 
   useEffect(() => {
     const slug = deepLinkSlugRef.current
@@ -518,6 +552,10 @@ export function MissionBrowser({ isOpen, onClose, onImport, initialMission }: Mi
     if (installerMissions.length === 0 && fixerMissions.length === 0 && activeTab !== 'installers') {
       setActiveTab('installers')
     }
+    // PR #6518 item F — `selectCardMission` is now wrapped in useCallback
+    // with an empty dep array, so it's a stable reference across renders.
+    // Including it in the dep array satisfies react-hooks/exhaustive-deps
+    // without causing the effect to re-run on every render.
   }, [initialMission, isOpen, installerMissions, fixerMissions, selectedMission, activeTab, selectCardMission])
 
   // ============================================================================
@@ -608,10 +646,10 @@ export function MissionBrowser({ isOpen, onClose, onImport, initialMission }: Mi
           const { data: entries } = await api.get<BrowseEntry[]>(
             `/api/missions/browse?path=${encodeURIComponent(node.path)}`
           )
-          // Backend already filters .gitkeep and index.json, but guard client-side too
-          const HIDDEN_FILES = new Set(['.gitkeep', 'index.json'])
+          // Backend already filters infra/metadata, but guard client-side too.
+          // #6421 — filter ALL dot-prefixed entries (directories AND files).
           children = entries
-            .filter(e => e.type === 'directory' || !HIDDEN_FILES.has(e.name))
+            .filter(e => !isHiddenEntry(e.name))
             .map((e) => ({
               id: `${nodeId}/${e.name}`,
               name: e.name,
@@ -729,11 +767,12 @@ export function MissionBrowser({ isOpen, onClose, onImport, initialMission }: Mi
           const { data: entries } = await api.get<BrowseEntry[]>(
             `/api/missions/browse?path=${encodeURIComponent(node.path)}`
           )
-          // Hide infrastructure/metadata files that are not missions
-          const HIDDEN_FILES = new Set(['.gitkeep', 'index.json'])
+          // #6421 — Hide dot-prefixed entries and the index.json manifest.
+          // Only mission files or directories may appear in the listing.
           setDirectoryEntries(
             entries.filter(e =>
-              (e.type === 'directory' || isMissionFile(e.name)) && !HIDDEN_FILES.has(e.name)
+              !isHiddenEntry(e.name) &&
+              (e.type === 'directory' || isMissionFile(e.name))
             )
           )
         } else if (node.source === 'github') {
@@ -1170,14 +1209,6 @@ export function MissionBrowser({ isOpen, onClose, onImport, initialMission }: Mi
       {/* Top bar: search + filters */}
       {/* ================================================================== */}
       <div className="flex items-center gap-3 px-4 py-3 bg-card border-b border-border">
-        <button
-          onClick={onClose}
-          className="p-2 rounded-lg hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors"
-          title="Close (Esc)"
-        >
-          <X className="w-5 h-5" />
-        </button>
-
         <div className="flex-1 relative">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
           <input
@@ -1232,6 +1263,19 @@ export function MissionBrowser({ isOpen, onClose, onImport, initialMission }: Mi
             <List className="w-4 h-4" />
           </button>
         </div>
+
+        {/* #6308: close button moved to the RIGHT end of the top bar to
+            match every other modal in the app (BaseModal etc). Having
+            it on the left was a confusing one-off — users trained to
+            close modals via the top-right X were not finding it. */}
+        <button
+          onClick={onClose}
+          className="p-2 rounded-lg hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors"
+          title="Close (Esc)"
+          aria-label="Close mission browser"
+        >
+          <X className="w-5 h-5" />
+        </button>
       </div>
 
       {/* Filter bar — constrained height on mobile with scroll */}

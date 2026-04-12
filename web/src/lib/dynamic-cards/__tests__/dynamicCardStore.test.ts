@@ -20,6 +20,9 @@ vi.mock('../dynamicCardRegistry', () => ({
     mockCards.delete(id)
     return had
   }),
+  clearDynamicCards: vi.fn(() => {
+    mockCards.clear()
+  }),
 }))
 
 import {
@@ -52,13 +55,33 @@ describe('loadDynamicCards', () => {
   it('registers cards from localStorage', () => {
     const stored = [
       { id: 'card-1', title: 'Card 1', tier: 'tier1' },
-      { id: 'card-2', title: 'Card 2', tier: 'tier2' },
+      {
+        id: 'card-2',
+        title: 'Card 2',
+        tier: 'tier2',
+        sourceCode: 'module.exports.default = () => null',
+      },
     ]
     localStorage.setItem(STORAGE_KEY, JSON.stringify(stored))
 
     loadDynamicCards()
 
     expect(registerDynamicCard).toHaveBeenCalledTimes(2)
+  })
+
+  it('drops invalid stored entries (schema validation)', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const stored = [
+      { id: 'good', title: 'Good', tier: 'tier1' },
+      { id: 'bad id', title: 'Bad', tier: 'tier1' }, // invalid slug
+    ]
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(stored))
+
+    loadDynamicCards()
+
+    expect(registerDynamicCard).toHaveBeenCalledTimes(1)
+    expect(warn).toHaveBeenCalled()
+    warn.mockRestore()
   })
 
   it('handles corrupted localStorage gracefully', () => {
@@ -68,6 +91,43 @@ describe('loadDynamicCards', () => {
     expect(() => loadDynamicCards()).not.toThrow()
     expect(spy).toHaveBeenCalled()
     spy.mockRestore()
+  })
+
+  // #6681: reconcile removals on reload. Previously loadDynamicCards was
+  // additive and left entries that had been removed from storage still
+  // registered in memory.
+  it('reconciles removals when storage shrinks between loads', () => {
+    const three = [
+      { id: 'a', title: 'A', tier: 'tier1' },
+      { id: 'b', title: 'B', tier: 'tier1' },
+      { id: 'c', title: 'C', tier: 'tier1' },
+    ]
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(three))
+    loadDynamicCards()
+    expect(mockCards.size).toBe(3)
+
+    const two = [
+      { id: 'a', title: 'A', tier: 'tier1' },
+      { id: 'b', title: 'B', tier: 'tier1' },
+    ]
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(two))
+    loadDynamicCards()
+
+    expect(mockCards.size).toBe(2)
+    expect(mockCards.has('a')).toBe(true)
+    expect(mockCards.has('b')).toBe(true)
+    expect(mockCards.has('c')).toBe(false)
+  })
+
+  it('clears the registry when storage has been emptied', () => {
+    const one = [{ id: 'only', title: 'Only', tier: 'tier1' }]
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(one))
+    loadDynamicCards()
+    expect(mockCards.size).toBe(1)
+
+    localStorage.removeItem(STORAGE_KEY)
+    loadDynamicCards()
+    expect(mockCards.size).toBe(0)
   })
 })
 
@@ -103,6 +163,33 @@ describe('saveDynamicCard', () => {
     saveDynamicCard(def as never)
 
     expect(registerDynamicCard).toHaveBeenCalledWith(def)
+  })
+
+  it('throws when id fails the slug regex', () => {
+    const def = { id: 'bad id with spaces', title: 'X', tier: 'tier1' }
+    expect(() => saveDynamicCard(def as never)).toThrow(/Invalid dynamic card/)
+  })
+
+  it('throws when a tier2 card omits sourceCode', () => {
+    const def = { id: 'tier2-card', title: 'T2', tier: 'tier2' }
+    expect(() => saveDynamicCard(def as never)).toThrow(/sourceCode/)
+  })
+
+  it('throws when sourceCode exceeds the size limit', () => {
+    // MAX_CARD_SOURCE_BYTES = 50_000; use a hair over that.
+    const OVERSIZE_BYTES = 50_001
+    const def = {
+      id: 'tier2-big',
+      title: 'Big',
+      tier: 'tier2',
+      sourceCode: 'a'.repeat(OVERSIZE_BYTES),
+    }
+    expect(() => saveDynamicCard(def as never)).toThrow(/exceeds/)
+  })
+
+  it('throws when an unknown top-level field is present', () => {
+    const def = { id: 'x', title: 'X', tier: 'tier1', rogueField: 1 }
+    expect(() => saveDynamicCard(def as never)).toThrow(/Unknown field/)
   })
 })
 
@@ -140,34 +227,46 @@ describe('importDynamicCards', () => {
   it('imports valid cards and returns count', () => {
     const json = JSON.stringify([
       { id: 'i1', title: 'Import 1', tier: 'tier1' },
-      { id: 'i2', title: 'Import 2', tier: 'tier2' },
+      { id: 'i2', title: 'Import 2', tier: 'tier2', sourceCode: 'module.exports = () => null' },
     ])
 
-    const count = importDynamicCards(json)
-    expect(count).toBe(2)
+    const result = importDynamicCards(json)
+    expect(result.count).toBe(2)
+    expect(result.invalid).toHaveLength(0)
     expect(registerDynamicCard).toHaveBeenCalledTimes(2)
   })
 
-  it('skips entries missing required fields', () => {
+  it('reports invalid entries in the result', () => {
     const json = JSON.stringify([
       { id: 'valid', title: 'Valid', tier: 'tier1' },
       { id: 'no-title', tier: 'tier1' },
       { title: 'no-id', tier: 'tier1' },
+      { id: 'tier2-missing-source', title: 'T', tier: 'tier2' },
     ])
 
-    const count = importDynamicCards(json)
-    expect(count).toBe(1)
+    const result = importDynamicCards(json)
+    expect(result.count).toBe(1)
+    expect(result.invalid).toHaveLength(3)
+    expect(result.invalid[0].index).toBe(1)
   })
 
-  it('returns 0 for invalid JSON', () => {
+  it('returns error result for invalid JSON', () => {
     const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
-    const count = importDynamicCards('invalid json')
-    expect(count).toBe(0)
+    const result = importDynamicCards('invalid json')
+    expect(result.count).toBe(0)
+    expect(result.invalid[0].error).toMatch(/Parse error/)
     spy.mockRestore()
   })
 
-  it('returns 0 for empty array', () => {
-    const count = importDynamicCards('[]')
-    expect(count).toBe(0)
+  it('returns empty result for empty array', () => {
+    const result = importDynamicCards('[]')
+    expect(result.count).toBe(0)
+    expect(result.invalid).toHaveLength(0)
+  })
+
+  it('rejects non-array top-level values', () => {
+    const result = importDynamicCards('{"not":"array"}')
+    expect(result.count).toBe(0)
+    expect(result.invalid[0].error).toMatch(/not an array/)
   })
 })

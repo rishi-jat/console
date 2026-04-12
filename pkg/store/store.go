@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"time"
 
 	"github.com/google/uuid"
@@ -52,7 +53,10 @@ type Store interface {
 	CreateUser(user *models.User) error
 	UpdateUser(user *models.User) error
 	UpdateLastLogin(userID uuid.UUID) error
-	ListUsers() ([]models.User, error)
+	// ListUsers returns a page of users ordered newest first.
+	// #6595: limit/offset are required to prevent unbounded reads.
+	// Pass 0 for limit to use the store default.
+	ListUsers(limit, offset int) ([]models.User, error)
 	DeleteUser(id uuid.UUID) error
 	UpdateUserRole(userID uuid.UUID, role string) error
 	CountUsersByRole() (admins, editors, viewers int, err error)
@@ -64,7 +68,9 @@ type Store interface {
 
 	// Dashboards
 	GetDashboard(id uuid.UUID) (*models.Dashboard, error)
-	GetUserDashboards(userID uuid.UUID) ([]models.Dashboard, error)
+	// GetUserDashboards returns a page of a user's dashboards.
+	// #6596: limit/offset are required. Pass 0 for limit to use the default.
+	GetUserDashboards(userID uuid.UUID, limit, offset int) ([]models.Dashboard, error)
 	GetDefaultDashboard(userID uuid.UUID) (*models.Dashboard, error)
 	CreateDashboard(dashboard *models.Dashboard) error
 	UpdateDashboard(dashboard *models.Dashboard) error
@@ -85,23 +91,38 @@ type Store interface {
 
 	// Pending Swaps
 	GetPendingSwap(id uuid.UUID) (*models.PendingSwap, error)
-	GetUserPendingSwaps(userID uuid.UUID) ([]models.PendingSwap, error)
-	GetDueSwaps() ([]models.PendingSwap, error)
+	// GetUserPendingSwaps returns a page of a user's pending swaps.
+	// #6597: limit/offset are required. Pass 0 for limit to use the default.
+	GetUserPendingSwaps(userID uuid.UUID, limit, offset int) ([]models.PendingSwap, error)
+	// GetDueSwaps returns pending swaps whose swap_at time has arrived.
+	// #6598: limit/offset are required to prevent unbounded scans when the
+	// swap backlog grows large (e.g. scheduler outage). Pass 0 for limit to
+	// use the store default.
+	GetDueSwaps(limit, offset int) ([]models.PendingSwap, error)
 	CreatePendingSwap(swap *models.PendingSwap) error
 	UpdateSwapStatus(id uuid.UUID, status models.SwapStatus) error
 	SnoozeSwap(id uuid.UUID, newSwapAt time.Time) error
 
 	// User Events
 	RecordEvent(event *models.UserEvent) error
-	GetRecentEvents(userID uuid.UUID, since time.Duration) ([]models.UserEvent, error)
+	// GetRecentEvents returns a user's events within the given time window.
+	// #6599: limit/offset are required to bound event history reads.
+	// Pass 0 for limit to use the store default.
+	GetRecentEvents(userID uuid.UUID, since time.Duration, limit, offset int) ([]models.UserEvent, error)
 
 	// Feature Requests
 	CreateFeatureRequest(request *models.FeatureRequest) error
 	GetFeatureRequest(id uuid.UUID) (*models.FeatureRequest, error)
 	GetFeatureRequestByIssueNumber(issueNumber int) (*models.FeatureRequest, error)
 	GetFeatureRequestByPRNumber(prNumber int) (*models.FeatureRequest, error)
-	GetUserFeatureRequests(userID uuid.UUID) ([]models.FeatureRequest, error)
-	GetAllFeatureRequests() ([]models.FeatureRequest, error)
+	// GetUserFeatureRequests returns a user's feature requests, newest first.
+	// #6601: limit/offset required. Pass 0 for limit to use the store default.
+	GetUserFeatureRequests(userID uuid.UUID, limit, offset int) ([]models.FeatureRequest, error)
+	// GetAllFeatureRequests returns the global feature-request table, newest first.
+	// #6602: limit/offset required; admin dashboard uses a smaller default (100)
+	// because this is hit on every dashboard load. Pass 0 for limit to use the
+	// store default.
+	GetAllFeatureRequests(limit, offset int) ([]models.FeatureRequest, error)
 	UpdateFeatureRequest(request *models.FeatureRequest) error
 	UpdateFeatureRequestStatus(id uuid.UUID, status models.RequestStatus) error
 	CloseFeatureRequest(id uuid.UUID, closedByUser bool) error
@@ -123,6 +144,12 @@ type Store interface {
 
 	// GPU Reservations
 	CreateGPUReservation(reservation *models.GPUReservation) error
+	// CreateGPUReservationWithCapacity atomically enforces a cluster GPU
+	// capacity cap and inserts the reservation in a single SQL statement
+	// so concurrent creates cannot bypass the cap (#6612). A capacity
+	// value of 0 or less is treated as "no cap" and behaves like
+	// CreateGPUReservation.
+	CreateGPUReservationWithCapacity(reservation *models.GPUReservation, capacity int) error
 	GetGPUReservation(id uuid.UUID) (*models.GPUReservation, error)
 	ListGPUReservations() ([]models.GPUReservation, error)
 	ListUserGPUReservations(userID uuid.UUID) ([]models.GPUReservation, error)
@@ -153,12 +180,18 @@ type Store interface {
 	// returns the new state. Negative deltas are allowed but the resulting
 	// balance is clamped to MinCoinBalance (0) — callers receive the clamped
 	// row so they can display the effective balance.
-	IncrementUserCoins(userID string, delta int) (*UserRewards, error)
+	//
+	// #6613: accepts a context so handlers can thread the fiber request
+	// context through the BEGIN IMMEDIATE transaction. A cancelled ctx
+	// (client disconnected, request timeout) aborts the in-flight write.
+	IncrementUserCoins(ctx context.Context, userID string, delta int) (*UserRewards, error)
 	// ClaimDailyBonus atomically awards bonusAmount to the user if their
 	// LastDailyBonusAt is older than minInterval relative to now. Returns
 	// (nil, ErrDailyBonusUnavailable) when the cooldown has not elapsed so
 	// handlers can return a 429 without a second round-trip.
-	ClaimDailyBonus(userID string, bonusAmount int, minInterval time.Duration, now time.Time) (*UserRewards, error)
+	//
+	// #6613: accepts a context (see IncrementUserCoins).
+	ClaimDailyBonus(ctx context.Context, userID string, bonusAmount int, minInterval time.Duration, now time.Time) (*UserRewards, error)
 
 	// User Token Usage — persistent per-user token-usage counters that back
 	// the token budget widget. Mirrors the UserRewards persistence pattern.
@@ -177,7 +210,9 @@ type Store interface {
 	// (callers are asked to reset and re-send on their side), and rewrites
 	// the stored session marker — this mirrors the frontend restart
 	// detection from #6020 so both sides agree on what counts as a restart.
-	AddUserTokenDelta(userID string, category string, delta int64, agentSessionID string) (*UserTokenUsage, error)
+	//
+	// #6613: accepts a context (see IncrementUserCoins).
+	AddUserTokenDelta(ctx context.Context, userID string, category string, delta int64, agentSessionID string) (*UserTokenUsage, error)
 
 	// OAuth State (persisted across server restarts so in-flight OAuth
 	// flows survive a backend restart between /auth/login and /auth/callback).
@@ -185,7 +220,10 @@ type Store interface {
 	// ConsumeOAuthState atomically looks up and deletes an OAuth state token.
 	// Returns true only when the state was found, not expired, and successfully
 	// deleted (single-use). Returns false for missing, expired, or already-consumed states.
-	ConsumeOAuthState(state string) (bool, error)
+	//
+	// #6613: accepts a context so the OAuth callback handler can cancel
+	// the BEGIN IMMEDIATE transaction if the browser disconnects.
+	ConsumeOAuthState(ctx context.Context, state string) (bool, error)
 	CleanupExpiredOAuthStates() (int64, error)
 
 	// Lifecycle

@@ -1,8 +1,11 @@
 package handlers
 
 import (
+	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"log/slog"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
@@ -219,6 +222,12 @@ func (h *CardHandler) UpdateCard(c *fiber.Ctx) error {
 	}
 
 	if err := h.store.UpdateCard(card); err != nil {
+		// #6610: UpdateCard now returns sql.ErrNoRows when the row was
+		// deleted concurrently (or never existed). Surface that as 404
+		// so the client re-syncs instead of seeing a spurious 500.
+		if errors.Is(err, sql.ErrNoRows) {
+			return fiber.NewError(fiber.StatusNotFound, "Card not found")
+		}
 		return fiber.NewError(fiber.StatusInternalServerError, "Failed to update card")
 	}
 
@@ -303,13 +312,17 @@ func (h *CardHandler) RecordFocus(c *fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusInternalServerError, "Failed to update focus")
 	}
 
-	// Also record as event
+	// Also record as event. Failures here are telemetry-only and must not
+	// fail the user request — but log structurally so the failure is visible.
 	event := &models.UserEvent{
 		UserID:    userID,
 		EventType: models.EventTypeCardFocus,
 		CardID:    &cardID,
 	}
-	h.store.RecordEvent(event)
+	if err := h.store.RecordEvent(event); err != nil {
+		slog.Warn("[cards] failed to record focus event",
+			"user", userID, "card", cardID, "error", err)
+	}
 
 	return c.JSON(fiber.Map{"status": "ok"})
 }
@@ -331,6 +344,10 @@ func (h *CardHandler) GetHistory(c *fiber.Ctx) error {
 	history, err := h.store.GetUserCardHistory(userID, limit)
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, "Failed to get history")
+	}
+	// Never marshal a Go nil slice as JSON null; clients expect [].
+	if history == nil {
+		history = []models.CardHistory{}
 	}
 	return c.JSON(history)
 }
@@ -378,6 +395,24 @@ func (h *CardHandler) MoveCard(c *fiber.Ctx) error {
 	targetDashboard, err := h.store.GetDashboard(targetDashboardID)
 	if err != nil || targetDashboard == nil || targetDashboard.UserID != userID {
 		return fiber.NewError(fiber.StatusForbidden, "Access denied to target dashboard")
+	}
+
+	// Enforce per-dashboard card limit on the TARGET before moving.
+	// Without this, a Move can push a dashboard over MaxCardsPerDashboard,
+	// bypassing the limit that CreateCardWithLimit enforces on create.
+	// Note: if the source and target are the same dashboard this is a no-op
+	// from a count perspective, but we still allow it.
+	if card.DashboardID != targetDashboardID {
+		targetCards, cErr := h.store.GetDashboardCards(targetDashboardID)
+		if cErr != nil {
+			return fiber.NewError(fiber.StatusInternalServerError, "Failed to check target dashboard capacity")
+		}
+		if len(targetCards) >= MaxCardsPerDashboard {
+			return fiber.NewError(
+				fiber.StatusBadRequest,
+				fmt.Sprintf("Target dashboard already has %d cards (limit %d)", len(targetCards), MaxCardsPerDashboard),
+			)
+		}
 	}
 
 	// Update the card's dashboard ID

@@ -109,23 +109,25 @@ const sseCacheEvictInterval = 30 * time.Second
 // stream start/end) and reads (CancelUserSSEStreams on logout) are both
 // infrequent and always short; an RWMutex would add complexity for no gain.
 var (
-	sseSessionsMu  sync.Mutex
-	sseSessions    = make(map[uuid.UUID]map[int64]context.CancelFunc)
-	sseSessionSeq  int64 // monotonic id generator, guarded by sseSessionsMu
+	sseSessionsMu sync.Mutex
+	sseSessions   = make(map[uuid.UUID]map[uint64]context.CancelFunc)
+	// sseSessionSeq is a monotonic id generator guarded by sseSessionsMu.
+	// uint64 instead of int64 so we don't wrap to negative at MaxInt64.
+	sseSessionSeq uint64
 )
 
 // registerSSESession records cancel under userID and returns the assigned
 // session id. The session id is used by unregisterSSESession to remove the
 // specific entry when the stream ends normally, so the map does not grow
 // unbounded across many streams by the same user.
-func registerSSESession(userID uuid.UUID, cancel context.CancelFunc) int64 {
+func registerSSESession(userID uuid.UUID, cancel context.CancelFunc) uint64 {
 	sseSessionsMu.Lock()
 	defer sseSessionsMu.Unlock()
 	sseSessionSeq++
 	id := sseSessionSeq
 	sessions, ok := sseSessions[userID]
 	if !ok {
-		sessions = make(map[int64]context.CancelFunc)
+		sessions = make(map[uint64]context.CancelFunc)
 		sseSessions[userID] = sessions
 	}
 	sessions[id] = cancel
@@ -136,7 +138,7 @@ func registerSSESession(userID uuid.UUID, cancel context.CancelFunc) int64 {
 // handler's deferred cleanup on normal stream end so the registry stays
 // bounded by the number of concurrently live streams, not the total lifetime
 // count.
-func unregisterSSESession(userID uuid.UUID, id int64) {
+func unregisterSSESession(userID uuid.UUID, id uint64) {
 	sseSessionsMu.Lock()
 	defer sseSessionsMu.Unlock()
 	sessions, ok := sseSessions[userID]
@@ -212,18 +214,40 @@ func startSSECacheEvictor() {
 }
 
 func sseCacheGet(key string) interface{} {
-	sseCacheMu.Lock()
-	defer sseCacheMu.Unlock()
+	// Fast path: take a read lock for the common case (entry exists and is
+	// fresh). Previously this used an exclusive Lock which serialized every
+	// concurrent cache read.
+	sseCacheMu.RLock()
 	e, ok := sseCache[key]
 	if !ok {
+		sseCacheMu.RUnlock()
 		return nil
 	}
-	if time.Since(e.fetchedAt) >= sseCacheTTL {
-		// Delete expired entry on read to bound memory between eviction sweeps.
+	if time.Since(e.fetchedAt) < sseCacheTTL {
+		data := e.data
+		sseCacheMu.RUnlock()
+		return data
+	}
+	// Expired — upgrade to a write lock to delete. The background evictor
+	// also prunes expired entries, so losing the race here is harmless.
+	//
+	// #6591: Between releasing the RLock and acquiring the write Lock, another
+	// goroutine may have refreshed the entry via sseCacheSet. Re-check under
+	// the write lock and, if the entry is now fresh, return it instead of
+	// dropping a freshly-populated value on the floor (which would force the
+	// caller to re-fetch unnecessarily).
+	sseCacheMu.RUnlock()
+	sseCacheMu.Lock()
+	if e2, ok := sseCache[key]; ok {
+		if time.Since(e2.fetchedAt) < sseCacheTTL {
+			data := e2.data
+			sseCacheMu.Unlock()
+			return data
+		}
 		delete(sseCache, key)
-		return nil
 	}
-	return e.data
+	sseCacheMu.Unlock()
+	return nil
 }
 
 func sseCacheSet(key string, data interface{}) {
@@ -299,6 +323,15 @@ func streamClusters(
 	// the callback runs, so c.Locals is not safe to read inside it (#6029).
 	userID := middleware.GetUserID(c)
 
+	// Capture a standalone parent context derived from the request context so
+	// the SetBodyStreamWriter callback does not touch fiber.Ctx after it may
+	// have been reused (#6480). Previously the stream context derived from
+	// context.Background(), which meant client disconnect never propagated
+	// to the per-cluster goroutines — contradicting the comment below. We
+	// snapshot a Done channel from the fiber.Ctx here and merge it into the
+	// stream context inside the callback.
+	requestCtx := c.UserContext()
+
 	c.Set("Content-Type", "text/event-stream")
 	c.Set("Cache-Control", "no-cache")
 	c.Set("Connection", "keep-alive")
@@ -307,9 +340,13 @@ func streamClusters(
 	c.Context().SetBodyStreamWriter(func(w *bufio.Writer) {
 		// Create a cancellable context with the overall deadline so that all
 		// spawned goroutines are cancelled when the client disconnects or the
-		// deadline expires.  Previously context.Background() was used, which
-		// caused goroutine leaks on client disconnect (see #3291).
-		streamCtx, streamCancel := context.WithTimeout(context.Background(), sseOverallDeadline)
+		// deadline expires. Derived from the request context so that client
+		// disconnect propagates as promised (#6480). Previously
+		// context.Background() was used, which meant the comment below about
+		// disconnect-driven cancellation was a lie: nothing ever cancelled
+		// the goroutines on client disconnect — only the overall deadline or
+		// a Logout fired cancel().
+		streamCtx, streamCancel := context.WithTimeout(requestCtx, sseOverallDeadline)
 		defer streamCancel()
 
 		// Register this stream's cancel with the per-user SSE session
@@ -326,12 +363,28 @@ func streamClusters(
 		totalClusters := len(healthy) + len(offline)
 		completedClusters := 0
 
+		// emitEvent writes an SSE event and, on error (typically client
+		// disconnect), cancels the stream context so every in-flight
+		// goroutine aborts immediately instead of continuing to burn
+		// cluster-side work nobody will read (#6480). Returns true on
+		// success so callers can early-return on failure.
+		emitEvent := func(name string, data interface{}) bool {
+			if err := writeSSEEvent(w, name, data); err != nil {
+				slog.Info("[SSE] write failed, cancelling stream", "event", name, "error", err)
+				streamCancel()
+				return false
+			}
+			return true
+		}
+
 		// Instantly emit skipped events for offline clusters
 		for _, cl := range offline {
-			writeSSEEvent(w, sseEventClusterSkipped, fiber.Map{
+			if !emitEvent(sseEventClusterSkipped, fiber.Map{
 				"cluster": cl.Name,
 				"reason":  "offline",
-			})
+			}) {
+				return
+			}
 			completedClusters++
 		}
 
@@ -347,12 +400,15 @@ func streamClusters(
 			if cached := sseCacheGet(cacheKey); cached != nil {
 				mu.Lock()
 				completedClusters++
-				writeSSEEvent(w, sseEventClusterData, fiber.Map{
+				ok := emitEvent(sseEventClusterData, fiber.Map{
 					"cluster":   cl.Name,
 					cfg.demoKey: cached,
 					"source":    "cache",
 				})
 				mu.Unlock()
+				if !ok {
+					return
+				}
 				continue
 			}
 
@@ -388,7 +444,7 @@ func streamClusters(
 					// event type.
 					mu.Lock()
 					completedClusters++
-					writeSSEEvent(w, sseEventClusterError, fiber.Map{
+					emitEvent(sseEventClusterError, fiber.Map{
 						"cluster": clusterName,
 						"error":   fetchErr.Error(),
 					})
@@ -405,7 +461,7 @@ func streamClusters(
 
 				mu.Lock()
 				completedClusters++
-				writeSSEEvent(w, sseEventClusterData, fiber.Map{
+				emitEvent(sseEventClusterData, fiber.Map{
 					"cluster":   clusterName,
 					cfg.demoKey: data,
 					"source":    "k8s",
@@ -431,7 +487,7 @@ func streamClusters(
 		}
 
 		mu.Lock()
-		writeSSEEvent(w, sseEventDone, fiber.Map{
+		emitEvent(sseEventDone, fiber.Map{
 			"totalClusters":     totalClusters,
 			"completedClusters": completedClusters,
 			"skippedOffline":    len(offline),

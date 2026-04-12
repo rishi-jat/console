@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -147,6 +148,7 @@ type Server struct {
 	shuttingDown        int32        // atomic flag: 1 during graceful shutdown
 	gpuUtilWorker       *GPUUtilizationWorker
 	done                chan struct{} // closed on Shutdown to stop background goroutines
+	shutdownOnce        sync.Once     // ensures Shutdown is idempotent (#6478)
 }
 
 // NewServer creates a new API server. It starts a temporary loading page
@@ -163,13 +165,12 @@ func NewServer(cfg Config) (*Server, error) {
 		}
 	}
 
-	// JWT secret handling — in dev mode, a random secret is generated on each
-	// startup, which means existing JWTs (browser cookies, WebSocket tokens) are
-	// invalidated on restart. Set JWT_SECRET in .env to persist across restarts.
+	// JWT secret handling — in dev mode, generate a random secret and persist
+	// it to .jwt-secret so it survives server restarts and hot-reloads (#6850).
+	// Set JWT_SECRET in .env to use a fixed secret instead.
 	if cfg.JWTSecret == "" {
 		if cfg.DevMode {
-			cfg.JWTSecret = generateDevSecret()
-			slog.Warn("Using auto-generated JWT secret (tokens will not survive restart). Set JWT_SECRET in .env to persist sessions across restarts.")
+			cfg.JWTSecret = loadOrCreateDevSecret()
 		} else {
 			slog.Error("FATAL: JWT_SECRET environment variable is required in production mode. " +
 				"Set JWT_SECRET to a cryptographically secure random string (at least 32 characters).")
@@ -574,8 +575,18 @@ func (s *Server) setupRoutes() {
 	auth.SetHub(s.hub)
 	s.app.Get("/auth/github", authLimiter, auth.GitHubLogin)
 	s.app.Get("/auth/github/callback", authLimiter, auth.GitHubCallback)
-	s.app.Post("/auth/refresh", authLimiter, auth.RefreshToken)
-	s.app.Post("/auth/logout", authLimiter, auth.Logout)
+	// #6587 — /auth/logout now requires JWTAuth. Previously anyone could
+	// POST /auth/logout with any JWT (even a stolen one) because the route
+	// was registered without the auth middleware. Requiring JWTAuth proves
+	// the caller owns the token it is trying to revoke. The Logout handler
+	// itself still validates the token independently so it can surface an
+	// idempotent 200 when an expired token is presented.
+	//
+	// #6579 — /auth/refresh similarly requires JWTAuth so that a revoked
+	// token is rejected by the middleware before the handler even runs.
+	jwtAuth := middleware.JWTAuth(s.config.JWTSecret)
+	s.app.Post("/auth/refresh", authLimiter, jwtAuth, auth.RefreshToken)
+	s.app.Post("/auth/logout", authLimiter, jwtAuth, auth.Logout)
 
 	// Active users endpoint (public — returns only aggregate counts, no sensitive data)
 	s.app.Get("/api/active-users", func(c *fiber.Ctx) error {
@@ -1281,37 +1292,49 @@ func waitForPortRelease(port int, timeout time.Duration) error {
 // Shutdown gracefully shuts down the server.
 // Sets shuttingDown flag first so /health returns "shutting_down"
 // before services are torn down, giving the frontend time to notice.
+//
+// Shutdown is idempotent (#6478): subsequent calls are no-ops. Previously a
+// second call panicked with "close of closed channel" when close(s.done)
+// was invoked a second time.
 func (s *Server) Shutdown() error {
-	atomic.StoreInt32(&s.shuttingDown, 1)
+	var shutdownErr error
+	s.shutdownOnce.Do(func() {
+		atomic.StoreInt32(&s.shuttingDown, 1)
 
-	// Signal background goroutines (orbit scheduler, etc.) to stop.
-	close(s.done)
+		// Signal background goroutines (orbit scheduler, etc.) to stop.
+		close(s.done)
 
-	// If Shutdown is called before Start, the temporary loading server
-	// is still running and holding the port. Shut it down first.
-	if s.loadingSrv != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), serverHealthTimeout)
-		defer cancel()
-		s.loadingSrv.Shutdown(ctx)
-		s.loadingSrv = nil
-	}
-
-	if s.gpuUtilWorker != nil {
-		s.gpuUtilWorker.Stop()
-	}
-	s.hub.Close()
-	if s.k8sClient != nil {
-		s.k8sClient.StopWatching()
-	}
-	if s.bridge != nil {
-		if err := s.bridge.Stop(); err != nil {
-			slog.Error("[Server] MCP bridge shutdown error", "error", err)
+		// If Shutdown is called before Start, the temporary loading server
+		// is still running and holding the port. Shut it down first.
+		if s.loadingSrv != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), serverHealthTimeout)
+			defer cancel()
+			s.loadingSrv.Shutdown(ctx)
+			s.loadingSrv = nil
 		}
-	}
-	if err := s.store.Close(); err != nil {
-		return err
-	}
-	return s.app.Shutdown()
+
+		if s.gpuUtilWorker != nil {
+			s.gpuUtilWorker.Stop()
+		}
+		s.hub.Close()
+		// #6578 — stop the token revocation cleanup goroutine so tests
+		// and embedded usage don't leak it across Server lifecycles.
+		middleware.ShutdownTokenRevocation()
+		if s.k8sClient != nil {
+			s.k8sClient.StopWatching()
+		}
+		if s.bridge != nil {
+			if err := s.bridge.Stop(); err != nil {
+				slog.Error("[Server] MCP bridge shutdown error", "error", err)
+			}
+		}
+		if err := s.store.Close(); err != nil {
+			shutdownErr = err
+			return
+		}
+		shutdownErr = s.app.Shutdown()
+	})
+	return shutdownErr
 }
 
 func customErrorHandler(c *fiber.Ctx, err error) error {
@@ -1452,9 +1475,48 @@ func warnDefaultEnvVars(vars map[string]string) {
 // devSecretBytes is the number of random bytes used to generate a dev secret (32 bytes = 256 bits).
 const devSecretBytes = 32
 
-func generateDevSecret() string {
-	// Generate a cryptographically random secret each time the server starts.
-	// This ensures dev instances don't share a well-known secret.
+// devSecretFile is the filename used to persist the auto-generated JWT secret
+// across dev-mode restarts (#6850). The file is created in the working directory
+// and should be gitignored.
+const devSecretFile = ".jwt-secret"
+
+// loadOrCreateDevSecret reads a previously persisted dev secret from .jwt-secret,
+// or generates a new one and writes it to that file. This ensures tokens issued
+// before a dev-mode restart remain valid (#6850).
+func loadOrCreateDevSecret() string {
+	secretPath := filepath.Join(".", devSecretFile)
+
+	// Try to read an existing secret file.
+	data, err := os.ReadFile(secretPath)
+	if err == nil {
+		secret := strings.TrimSpace(string(data))
+		if len(secret) >= devSecretBytes {
+			slog.Info("Loaded persisted dev JWT secret from " + devSecretFile)
+			return secret
+		}
+		// File exists but content is too short / corrupt — regenerate.
+		slog.Warn("Existing " + devSecretFile + " is too short, regenerating")
+	}
+
+	// Generate a new random secret.
+	secret := generateRandomSecret()
+
+	// Persist to file so it survives restarts.
+	// File permissions 0600: owner read/write only.
+	const secretFilePerms = 0o600
+	if wErr := os.WriteFile(secretPath, []byte(secret+"\n"), secretFilePerms); wErr != nil {
+		slog.Warn("Could not persist dev JWT secret to "+devSecretFile+"; tokens will not survive restart",
+			"error", wErr)
+	} else {
+		slog.Info("Generated and persisted dev JWT secret to " + devSecretFile)
+	}
+
+	return secret
+}
+
+// generateRandomSecret produces a cryptographically random hex string for use
+// as a JWT signing secret.
+func generateRandomSecret() string {
 	b := make([]byte, devSecretBytes)
 	if _, err := rand.Read(b); err != nil {
 		// crypto/rand.Read should never fail on supported platforms;

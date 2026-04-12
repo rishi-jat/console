@@ -740,9 +740,13 @@ describe('useDeployMissions', () => {
   })
 
   // =========================================================================
-  // 24. Completed mission past CACHE_TTL with logs => skips polling
+  // 24. Completed mission past CACHE_TTL with logs + exhausted recovery budget
+  //     => skips polling. #6415: up to LOG_RECOVERY_EXTRA_POLLS (3) grace
+  //     polls are allowed AFTER logs first arrive so late-emitted error
+  //     lines (e.g. CrashLoopBackOff reasons) can be captured. Once the
+  //     budget is exhausted, polling stops for good.
   // =========================================================================
-  it('skips polling for completed missions past TTL that already have logs', async () => {
+  it('skips polling for completed missions past TTL after log recovery budget exhausted', async () => {
     const completedAt = Date.now() - CACHE_TTL_MS - 1
     const missions = [makeMission({
       id: 'ttl-skip', status: 'orbit',
@@ -752,6 +756,9 @@ describe('useDeployMissions', () => {
         cluster: 'c1', status: 'running', replicas: 1, readyReplicas: 1,
         logs: ['existing log'],
       }],
+      // Simulate 3 prior grace-window polls (the cap defined by
+      // LOG_RECOVERY_EXTRA_POLLS in useDeployMissions.ts).
+      logRecoveryPolls: 3,
     })]
     localStorage.setItem(MISSIONS_STORAGE_KEY, JSON.stringify(missions))
 
@@ -763,6 +770,41 @@ describe('useDeployMissions', () => {
     await advancePastInitialPoll()
 
     expect(fetchSpy).not.toHaveBeenCalled()
+  })
+
+  // =========================================================================
+  // 24b. Completed mission past CACHE_TTL with logs but recovery budget
+  //      NOT yet exhausted => continues polling (#6415).
+  // =========================================================================
+  it('continues polling completed missions within the log-recovery grace window', async () => {
+    const completedAt = Date.now() - CACHE_TTL_MS - 1
+    const missions = [makeMission({
+      id: 'ttl-grace', status: 'orbit',
+      startedAt: completedAt - MIN_ACTIVE_MS, completedAt,
+      targetClusters: ['c1'],
+      clusterStatuses: [{
+        cluster: 'c1', status: 'running', replicas: 1, readyReplicas: 1,
+        logs: ['existing log'],
+      }],
+      // logRecoveryPolls === 0 → first grace poll is still allowed.
+    })]
+    localStorage.setItem(MISSIONS_STORAGE_KEY, JSON.stringify(missions))
+
+    mockClusterCacheRef.clusters = [{ name: 'c1', context: 'ctx-c1' }]
+    const fetchSpy = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({
+        deployments: [{ name: 'nginx', replicas: 1, readyReplicas: 1 }],
+      }),
+    })
+    global.fetch = fetchSpy
+    mockKubectlExec.mockResolvedValue({ exitCode: 1, output: '' })
+
+    renderHook(() => useDeployMissions())
+
+    await advancePastInitialPoll()
+
+    expect(fetchSpy).toHaveBeenCalled()
   })
 
   // =========================================================================
@@ -1157,9 +1199,9 @@ describe('useDeployMissions', () => {
   })
 
   // =========================================================================
-  // 38. Agent fetch returns not-ok => falls through to REST
+  // 38. Agent fetch returns not-ok => counts as pending/failed (no REST fallback)
   // =========================================================================
-  it('falls to REST when agent fetch returns non-ok response', async () => {
+  it('counts agent non-ok as pending failure without falling to REST', async () => {
     const startedAt = Date.now() - MIN_ACTIVE_MS - 1
     const missions = [makeMission({
       id: 'agent-not-ok', status: 'deploying', startedAt,
@@ -1169,26 +1211,27 @@ describe('useDeployMissions', () => {
 
     mockClusterCacheRef.clusters = [{ name: 'c1', context: 'ctx-c1' }]
 
-    let callCount = 0
-    global.fetch = vi.fn().mockImplementation((url: string) => {
-      callCount++
-      if (callCount === 1) return Promise.resolve({ ok: false, status: 500 })
-      if (typeof url === 'string' && url.includes('/api/workloads/deploy-status/')) {
-        return Promise.resolve({
-          ok: true,
-          json: () => Promise.resolve({
-            status: 'Running', replicas: 1, readyReplicas: 1,
-          }),
-        })
-      }
-      return Promise.reject(new Error('unexpected'))
+    global.fetch = vi.fn().mockImplementation(() => {
+      // Agent returns non-OK — should NOT fall through to REST
+      return Promise.resolve({ ok: false, status: 500 })
     })
 
     const { result } = renderHook(() => useDeployMissions())
 
     await advancePastInitialPoll()
 
-    expect(result.current.missions[0].status).toBe('orbit')
+    // #6816 — Agent non-ok now returns pendingOrFailed() immediately;
+    // the cluster stays pending (first failure) and never hits REST.
+    const clusterStatus = result.current.missions[0].clusterStatuses[0]
+    expect(clusterStatus.status).toBe('pending')
+    expect(clusterStatus.consecutiveFailures).toBe(1)
+
+    // Verify no REST call was made (only the agent call)
+    const calls = (global.fetch as ReturnType<typeof vi.fn>).mock.calls
+    const restCalls = calls.filter((c: unknown[]) =>
+      typeof c[0] === 'string' && (c[0] as string).includes('/api/workloads/deploy-status/')
+    )
+    expect(restCalls).toHaveLength(0)
   })
 
   // =========================================================================
@@ -1285,9 +1328,10 @@ describe('useDeployMissions', () => {
   })
 
   // =========================================================================
-  // 42. #5501: partial mission stops polling after CACHE_TTL when logs exist
+  // 42. #5501 + #6415: partial mission stops polling after CACHE_TTL once
+  //      the log-recovery grace window has been exhausted.
   // =========================================================================
-  it('stops polling partial missions past TTL with existing logs', async () => {
+  it('stops polling partial missions past TTL after log recovery budget exhausted', async () => {
     const completedAt = Date.now() - CACHE_TTL_MS - 1
     const missions = [makeMission({
       id: 'partial-ttl', status: 'partial',
@@ -1297,6 +1341,8 @@ describe('useDeployMissions', () => {
         { cluster: 'c1', status: 'running', replicas: 1, readyReplicas: 1, logs: ['ok'] },
         { cluster: 'c2', status: 'failed', replicas: 1, readyReplicas: 0, logs: ['fail'] },
       ],
+      // #6415: simulate grace window already consumed.
+      logRecoveryPolls: 3,
     })]
     localStorage.setItem(MISSIONS_STORAGE_KEY, JSON.stringify(missions))
 
@@ -1451,8 +1497,13 @@ describe('useDeployMissions', () => {
 
     const cs = result.current.missions[0].clusterStatuses[0]
     expect(cs.status).toBe('pending')
-    // Should NOT have auth error message
-    expect(cs.logs).toBeUndefined()
+    // #6666 — Non-auth HTTP errors now append a "Backend error HTTP ..."
+    // log line so operators can see the backend is returning errors. The
+    // mission still stays in `pending` (not `failed`) and is NOT flagged
+    // as an auth error.
+    expect(cs.logs).toBeDefined()
+    expect(cs.logs?.some(l => /Backend error HTTP 500/.test(l))).toBe(true)
+    expect(cs.logs?.some(l => /Authentication failed/.test(l))).toBe(false)
   })
 
   // =========================================================================
@@ -1479,6 +1530,101 @@ describe('useDeployMissions', () => {
     // clearTimeout should have been called for the abort timer (among others)
     // The abort timer clearTimeout is called in the finally block
     expect(clearTimeoutSpy).toHaveBeenCalled()
+  })
+
+  // =========================================================================
+  // #6414: 403 with an RBAC body surfaces the permission message
+  // =========================================================================
+  it('surfaces RBAC permission message for 403 with a parseable body', async () => {
+    const startedAt = Date.now() - MIN_ACTIVE_MS - 1
+    const missions = [makeMission({
+      id: 'rbac-403', status: 'deploying', startedAt,
+      targetClusters: ['c1'],
+    })]
+    localStorage.setItem(MISSIONS_STORAGE_KEY, JSON.stringify(missions))
+
+    mockClusterCacheRef.clusters = []
+    // Build a Response-like mock with a .clone().text() chain returning a
+    // K8s-style Forbidden Status object. The hook should pull the message
+    // out rather than falling back to the legacy "token expired" line.
+    const rbacBody = JSON.stringify({
+      kind: 'Status',
+      reason: 'Forbidden',
+      message: 'deployments.apps is forbidden: User "alice" cannot list resource "deployments" in namespace "prod"',
+    })
+    const makeCloneable = () => ({
+      ok: false,
+      status: 403,
+      clone: () => ({ text: async () => rbacBody }),
+      text: async () => rbacBody,
+    })
+    global.fetch = vi.fn().mockResolvedValue(makeCloneable())
+
+    const { result } = renderHook(() => useDeployMissions())
+    await advancePastInitialPoll()
+
+    const cs = result.current.missions[0].clusterStatuses[0]
+    expect(cs.status).toBe('failed')
+    expect(cs.logs![0]).toContain('Permission denied')
+    expect(cs.logs![0]).toContain('cannot list')
+  })
+
+  // =========================================================================
+  // #6412: transient network failures do not flip the mission to failed
+  // =========================================================================
+  it('treats repeated pure-network failures as network-pending, not failed', async () => {
+    const missions = [makeMission({
+      id: 'net-blip', status: 'deploying',
+      startedAt: Date.now() - MIN_ACTIVE_MS - 1,
+      targetClusters: ['c1'],
+    })]
+    localStorage.setItem(MISSIONS_STORAGE_KEY, JSON.stringify(missions))
+
+    mockClusterCacheRef.clusters = []
+    // fetch throws on every call — simulates sustained network blackout
+    // that is still SHORT of the network-failure threshold.
+    global.fetch = vi.fn().mockRejectedValue(new Error('Network unreachable'))
+
+    const { result } = renderHook(() => useDeployMissions())
+    await advancePastInitialPoll()
+    // 6 more polls: with the old code this would have marked cluster failed.
+    for (let i = 0; i < 6; i++) await advancePollInterval()
+
+    const cs = result.current.missions[0].clusterStatuses[0]
+    // After 7 polls the HTTP failure count threshold (6) would have
+    // tripped; the network failure count threshold (60) has not.
+    expect(cs.status).toBe('pending')
+    expect(cs.networkFailureCount).toBeGreaterThanOrEqual(6)
+    // Status counter for HTTP errors stays at zero because these are
+    // network-level, not HTTP errors.
+    expect(cs.consecutiveFailures ?? 0).toBe(0)
+  })
+
+  // =========================================================================
+  // #6411: active-mission sort is deterministic for equal startedAt
+  // =========================================================================
+  it('orders missions deterministically when startedAt is identical', async () => {
+    const t = Date.now() - MIN_ACTIVE_MS - 1
+    const missions = [
+      makeMission({ id: 'mm-c', status: 'deploying', startedAt: t, targetClusters: ['c1'] }),
+      makeMission({ id: 'mm-a', status: 'deploying', startedAt: t, targetClusters: ['c1'] }),
+      makeMission({ id: 'mm-b', status: 'deploying', startedAt: t, targetClusters: ['c1'] }),
+    ]
+    localStorage.setItem(MISSIONS_STORAGE_KEY, JSON.stringify(missions))
+
+    mockClusterCacheRef.clusters = []
+    global.fetch = vi.fn().mockRejectedValue(new Error('not available'))
+
+    const { result } = renderHook(() => useDeployMissions())
+    await advancePastInitialPoll()
+
+    // All three share the same startedAt: tiebreaker should sort by id ascending.
+    const ids = result.current.missions.map(m => m.id)
+    expect(ids).toEqual(['mm-a', 'mm-b', 'mm-c'])
+
+    // Re-poll — order must be stable across polls.
+    await advancePollInterval()
+    expect(result.current.missions.map(m => m.id)).toEqual(['mm-a', 'mm-b', 'mm-c'])
   })
 
   // =========================================================================

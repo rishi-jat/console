@@ -358,7 +358,7 @@ export function Sidebar() {
                   if (e.key === 'Escape') { setEditingItemId(null); setEditingName('') }
                 }}
                 autoFocus
-                className="flex-1 bg-transparent border-b border-purple-500 outline-none text-foreground text-sm min-w-0"
+                className="w-[150px] md:w-full md:flex-1 shrink bg-transparent border-b border-purple-500 outline-none text-foreground text-sm min-w-0"
               />
             )}
             {!isCollapsed && <GripVertical className="w-3.5 h-3.5 text-muted-foreground/50 flex-shrink-0" />}
@@ -397,7 +397,7 @@ export function Sidebar() {
               )
             })()}
             {!isCollapsed && (
-              <span className="absolute right-5 top-1/2 -translate-y-1/2 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity bg-background/80 backdrop-blur-sm rounded px-1">
+              <span className="absolute right-5 top-1/2 -translate-y-1/2 flex items-center gap-1 opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity bg-background/80 backdrop-blur-sm rounded px-1">
                 {!PROTECTED_SIDEBAR_IDS.includes(item.id) && (
                   <span
                     role="button"
@@ -444,13 +444,13 @@ export function Sidebar() {
         onMouseEnter={handleSidebarMouseEnter}
         onMouseLeave={handleSidebarMouseLeave}
         className={cn(
-          'fixed left-0 top-16 bottom-0 glass border-r border-border/50 overflow-y-auto scroll-enhanced z-40',
+          'fixed left-0 top-16 bottom-0 glass border-r border-border/50 overflow-y-auto scroll-enhanced z-modal',
           !isResizing && 'transition-all duration-300',
           // Desktop: respect collapsed state
           !isMobile && (config.collapsed ? 'p-3' : 'p-4'),
           // Mobile: slide off-screen when closed
           isMobile && 'p-4',
-          isMobile && !config.isMobileOpen && '-translate-x-full',
+          isMobile && !config.isMobileOpen && '-translate-x-full hidden md:flex',
           isMobile && config.isMobileOpen && 'translate-x-0'
         )}
         style={{ width: isMobile ? SIDEBAR_DEFAULT_WIDTH_PX : sidebarWidth }}>
@@ -484,7 +484,7 @@ export function Sidebar() {
 
         {/* Snoozed card swaps */}
         {!isCollapsed && (
-          <div data-tour="snoozed">
+          <div data-tour="snoozed" className="min-w-0">
             <SnoozedCards
               onApplySwap={handleApplySwap}
               onApplyRecommendation={handleApplyRecommendation}
@@ -601,7 +601,7 @@ export function Sidebar() {
               }
             }}
             aria-expanded={!config.collapsed}
-            className="p-1.5 rounded-full border border-border bg-background text-muted-foreground hover:text-foreground hover:bg-black/5 dark:hover:bg-white/10 shadow-md transition-colors"
+            className="hidden md:flex items-center justify-center min-h-[44px] min-w-[44px] p-1.5 rounded-full border border-border bg-background text-muted-foreground hover:text-foreground hover:bg-black/5 dark:hover:bg-white/10 shadow-md transition-colors"
             title={config.collapsed ? t('layout.sidebar.expandSidebar') : t('layout.sidebar.collapseSidebar')}
           >
             {config.collapsed ? <ChevronRight className="w-3.5 h-3.5" aria-hidden="true" /> : <ChevronLeft className="w-3.5 h-3.5" aria-hidden="true" />}
@@ -626,7 +626,7 @@ export function Sidebar() {
         <div
           onMouseDown={handleResizeStart}
           className={cn(
-            "fixed bottom-0 cursor-col-resize z-sticky hover:bg-purple-500/30 transition-colors",
+            "fixed bottom-0 cursor-col-resize z-sticky hover:bg-purple-500/30 transition-colors hidden md:block",
             isResizing && "bg-purple-500/50"
           )}
           style={{ top: 160, left: sidebarWidth - 3, width: 6 }}

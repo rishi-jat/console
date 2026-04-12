@@ -3,7 +3,6 @@ import { HardDrive, Database, CheckCircle, AlertTriangle, Clock, Server } from '
 import { useClusters } from '../../hooks/useMCP'
 import { useCachedPVCs } from '../../hooks/useCachedData'
 import { useGlobalFilters } from '../../hooks/useGlobalFilters'
-import { useDrillDownActions } from '../../hooks/useDrillDown'
 import { useCardLoadingState } from './CardDataContext'
 import { formatStat, formatStorageStat } from '../../lib/formatStats'
 import { CardClusterFilter } from '../../lib/cards/CardComponents'
@@ -14,10 +13,9 @@ import { useDemoMode } from '../../hooks/useDemoMode'
 export function StorageOverview() {
   const { t } = useTranslation(['cards', 'common'])
   const { deduplicatedClusters: clusters, isLoading, isRefreshing: clustersRefreshing } = useClusters()
-  const { pvcs, isLoading: pvcsLoading, isRefreshing: pvcsRefreshing, consecutiveFailures, isFailed, isDemoFallback } = useCachedPVCs()
+  const { pvcs, isLoading: pvcsLoading, isRefreshing: pvcsRefreshing, consecutiveFailures, isFailed, isDemoFallback, error: pvcsError } = useCachedPVCs()
 
   const { selectedClusters, isAllClustersSelected } = useGlobalFilters()
-  const { drillToPVC } = useDrillDownActions()
   const { isDemoMode } = useDemoMode()
 
   // Report card data state
@@ -90,9 +88,10 @@ export function StorageOverview() {
       clustersWithStorage: filteredClusters.filter(c => (c.storageGB || 0) > 0).length }
   }, [filteredClusters, filteredPVCs])
 
-  // Check if we have real data from reachable clusters
+  // Check if we have real data from reachable clusters — storage data is valid
+  // regardless of nodeCount (#6808)
   const hasRealData = !isLoading && filteredClusters.length > 0 &&
-    filteredClusters.some(c => c.reachable !== false && c.storageGB !== undefined && c.nodeCount !== undefined && c.nodeCount > 0)
+    filteredClusters.some(c => c.reachable !== false && c.storageGB !== undefined)
 
   if (showSkeleton) {
     return (
@@ -140,6 +139,14 @@ export function StorageOverview() {
         </div>
       </div>
 
+      {/* Error banner */}
+      {pvcsError && (
+        <div className="mb-3 p-2 rounded-lg bg-red-500/10 border border-red-500/30 text-xs text-red-400 flex items-center gap-2">
+          <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0" />
+          <span>{t('storageOverview.fetchError', { defaultValue: 'Failed to load PVC data: {{error}}', error: pvcsError })}</span>
+        </div>
+      )}
+
       {/* Main stats */}
       <div className="grid grid-cols-2 gap-3 mb-4">
         <div
@@ -159,13 +166,8 @@ export function StorageOverview() {
         </div>
 
         <div
-          className={`p-3 rounded-lg bg-blue-500/10 border border-blue-500/20 ${stats.totalPVCs > 0 ? 'cursor-pointer hover:bg-blue-500/20' : 'cursor-default'} transition-colors`}
-          onClick={() => {
-            if (filteredPVCs.length > 0 && filteredPVCs[0]?.cluster) {
-              drillToPVC(filteredPVCs[0].cluster, filteredPVCs[0].namespace, filteredPVCs[0].name)
-            }
-          }}
-          title={stats.totalPVCs > 0 ? `${stats.totalPVCs} Persistent Volume Claims - Click to view details` : 'No PVCs found'}
+          className="p-3 rounded-lg bg-blue-500/10 border border-blue-500/20 cursor-default transition-colors"
+          title={stats.totalPVCs > 0 ? `${stats.totalPVCs} Persistent Volume Claims` : 'No PVCs found'}
         >
           <div className="flex items-center gap-2 mb-1">
             <HardDrive className="w-4 h-4 text-blue-400" />
@@ -181,14 +183,8 @@ export function StorageOverview() {
       {/* PVC Status breakdown */}
       <div className="grid grid-cols-3 gap-2 mb-4">
         <div
-          className={`p-2 rounded-lg bg-green-500/10 border border-green-500/20 ${stats.boundPVCs > 0 ? 'cursor-pointer hover:bg-green-500/20' : 'cursor-default'} transition-colors`}
-          onClick={() => {
-            const boundPVC = filteredPVCs.find(p => p.status === 'Bound')
-            if (boundPVC?.cluster) {
-              drillToPVC(boundPVC.cluster, boundPVC.namespace, boundPVC.name)
-            }
-          }}
-          title={stats.boundPVCs > 0 ? `${stats.boundPVCs} PVC${stats.boundPVCs !== 1 ? 's' : ''} successfully bound - Click to view` : 'No bound PVCs'}
+          className="p-2 rounded-lg bg-green-500/10 border border-green-500/20 cursor-default transition-colors"
+          title={stats.boundPVCs > 0 ? `${stats.boundPVCs} PVC${stats.boundPVCs !== 1 ? 's' : ''} successfully bound` : 'No bound PVCs'}
         >
           <div className="flex items-center gap-1.5 mb-1">
             <CheckCircle className="w-3 h-3 text-green-400" />
@@ -197,14 +193,8 @@ export function StorageOverview() {
           <span className="text-lg font-bold text-foreground">{formatStat(stats.boundPVCs)}</span>
         </div>
         <div
-          className={`p-2 rounded-lg bg-yellow-500/10 border border-yellow-500/20 ${stats.pendingPVCs > 0 ? 'cursor-pointer hover:bg-yellow-500/20' : 'cursor-default'} transition-colors`}
-          onClick={() => {
-            const pendingPVC = filteredPVCs.find(p => p.status === 'Pending')
-            if (pendingPVC?.cluster) {
-              drillToPVC(pendingPVC.cluster, pendingPVC.namespace, pendingPVC.name)
-            }
-          }}
-          title={stats.pendingPVCs > 0 ? `${stats.pendingPVCs} PVC${stats.pendingPVCs !== 1 ? 's' : ''} pending - Click to view` : 'No pending PVCs'}
+          className="p-2 rounded-lg bg-yellow-500/10 border border-yellow-500/20 cursor-default transition-colors"
+          title={stats.pendingPVCs > 0 ? `${stats.pendingPVCs} PVC${stats.pendingPVCs !== 1 ? 's' : ''} pending` : 'No pending PVCs'}
         >
           <div className="flex items-center gap-1.5 mb-1">
             <Clock className="w-3 h-3 text-yellow-400" />
@@ -213,14 +203,8 @@ export function StorageOverview() {
           <span className="text-lg font-bold text-foreground">{formatStat(stats.pendingPVCs)}</span>
         </div>
         <div
-          className={`p-2 rounded-lg bg-red-500/10 border border-red-500/20 ${stats.failedPVCs > 0 ? 'cursor-pointer hover:bg-red-500/20' : 'cursor-default'} transition-colors`}
-          onClick={() => {
-            const failedPVC = filteredPVCs.find(p => p.status !== 'Bound' && p.status !== 'Pending')
-            if (failedPVC?.cluster) {
-              drillToPVC(failedPVC.cluster, failedPVC.namespace, failedPVC.name)
-            }
-          }}
-          title={stats.failedPVCs > 0 ? `${stats.failedPVCs} PVC${stats.failedPVCs !== 1 ? 's' : ''} in failed/lost state - Click to view` : 'No failed PVCs'}
+          className="p-2 rounded-lg bg-red-500/10 border border-red-500/20 cursor-default transition-colors"
+          title={stats.failedPVCs > 0 ? `${stats.failedPVCs} PVC${stats.failedPVCs !== 1 ? 's' : ''} in failed/lost state` : 'No failed PVCs'}
         >
           <div className="flex items-center gap-1.5 mb-1">
             <AlertTriangle className="w-3 h-3 text-red-400" />

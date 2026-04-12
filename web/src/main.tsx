@@ -173,6 +173,32 @@ enableMocking()
     // Register unified card data hooks (background — ~300 KB chunk)
     import('./lib/unified/registerHooks').catch(() => { /* ignore — hook registration is non-critical */ })
 
+    // #6747 — Validate CARD_INSTALL_MAP keys against the live card registry
+    // at startup. The validator already logs a single console.warn listing
+    // any dead aliases (typos, cards retired from the registry but still
+    // present in the install map). We call it ONCE here from bootstrap so
+    // the check actually runs at runtime instead of only in tests. Dev-only
+    // so production bundles don't spend cycles on it.
+    if (import.meta.env.DEV) {
+      Promise.all([
+        import('./lib/cards/cardInstallMap'),
+        import('./config/cards'),
+        import('./components/cards/cardRegistry'),
+      ])
+        .then(([{ validateCardInstallMap }, { getUnifiedCardTypes }, { getRegisteredCardTypes }]) => {
+          // #6754 — validateCardInstallMap needs the union of config-based
+          // cards (getUnifiedCardTypes, from CARD_CONFIGS) AND component-only
+          // registered cards (getRegisteredCardTypes, from CARD_COMPONENTS).
+          // Using only config-based types would incorrectly flag component-only
+          // cards as install-map entries without a backing card type.
+          const knownTypes = Array.from(
+            new Set([...getUnifiedCardTypes(), ...getRegisteredCardTypes()]),
+          )
+          validateCardInstallMap(knownTypes)
+        })
+        .catch(() => { /* ignore — validation is non-critical diagnostic */ })
+    }
+
     // Prefetch route chunks for the user's top 5 most-visited dashboards.
     // Uses requestIdleCallback to avoid competing with initial render.
     prefetchTopDashboards(window.location.pathname)

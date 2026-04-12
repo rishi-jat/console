@@ -1,6 +1,7 @@
 package test
 
 import (
+	"context"
 	"time"
 
 	"github.com/google/uuid"
@@ -47,7 +48,7 @@ func (m *MockStore) UpdateLastLogin(userID uuid.UUID) error {
 
 // Implement other methods as needed or with empty mocks
 
-func (m *MockStore) ListUsers() ([]models.User, error)                  { return nil, nil }
+func (m *MockStore) ListUsers(limit, offset int) ([]models.User, error) { return nil, nil }
 func (m *MockStore) DeleteUser(id uuid.UUID) error                      { return nil }
 func (m *MockStore) UpdateUserRole(userID uuid.UUID, role string) error { return nil }
 func (m *MockStore) CountUsersByRole() (int, int, int, error)           { return 0, 0, 0, nil }
@@ -59,7 +60,9 @@ func (m *MockStore) GetOnboardingResponses(userID uuid.UUID) ([]models.Onboardin
 func (m *MockStore) SetUserOnboarded(userID uuid.UUID) error { return nil }
 
 func (m *MockStore) GetDashboard(id uuid.UUID) (*models.Dashboard, error)            { return nil, nil }
-func (m *MockStore) GetUserDashboards(userID uuid.UUID) ([]models.Dashboard, error)  { return nil, nil }
+func (m *MockStore) GetUserDashboards(userID uuid.UUID, limit, offset int) ([]models.Dashboard, error) {
+	return nil, nil
+}
 func (m *MockStore) GetDefaultDashboard(userID uuid.UUID) (*models.Dashboard, error) { return nil, nil }
 func (m *MockStore) CreateDashboard(dashboard *models.Dashboard) error               { return nil }
 func (m *MockStore) UpdateDashboard(dashboard *models.Dashboard) error               { return nil }
@@ -95,16 +98,18 @@ func (m *MockStore) GetUserCardHistory(userID uuid.UUID, limit int) ([]models.Ca
 }
 
 func (m *MockStore) GetPendingSwap(id uuid.UUID) (*models.PendingSwap, error) { return nil, nil }
-func (m *MockStore) GetUserPendingSwaps(userID uuid.UUID) ([]models.PendingSwap, error) {
+func (m *MockStore) GetUserPendingSwaps(userID uuid.UUID, limit, offset int) ([]models.PendingSwap, error) {
 	return nil, nil
 }
-func (m *MockStore) GetDueSwaps() ([]models.PendingSwap, error)                    { return nil, nil }
+func (m *MockStore) GetDueSwaps(limit, offset int) ([]models.PendingSwap, error) {
+	return nil, nil
+}
 func (m *MockStore) CreatePendingSwap(swap *models.PendingSwap) error              { return nil }
 func (m *MockStore) UpdateSwapStatus(id uuid.UUID, status models.SwapStatus) error { return nil }
 func (m *MockStore) SnoozeSwap(id uuid.UUID, newSwapAt time.Time) error            { return nil }
 
 func (m *MockStore) RecordEvent(event *models.UserEvent) error { return nil }
-func (m *MockStore) GetRecentEvents(userID uuid.UUID, since time.Duration) ([]models.UserEvent, error) {
+func (m *MockStore) GetRecentEvents(userID uuid.UUID, since time.Duration, limit, offset int) ([]models.UserEvent, error) {
 	return nil, nil
 }
 
@@ -116,10 +121,12 @@ func (m *MockStore) GetFeatureRequestByIssueNumber(issueNumber int) (*models.Fea
 func (m *MockStore) GetFeatureRequestByPRNumber(prNumber int) (*models.FeatureRequest, error) {
 	return nil, nil
 }
-func (m *MockStore) GetUserFeatureRequests(userID uuid.UUID) ([]models.FeatureRequest, error) {
+func (m *MockStore) GetUserFeatureRequests(userID uuid.UUID, limit, offset int) ([]models.FeatureRequest, error) {
 	return nil, nil
 }
-func (m *MockStore) GetAllFeatureRequests() ([]models.FeatureRequest, error)   { return nil, nil }
+func (m *MockStore) GetAllFeatureRequests(limit, offset int) ([]models.FeatureRequest, error) {
+	return nil, nil
+}
 func (m *MockStore) UpdateFeatureRequest(request *models.FeatureRequest) error { return nil }
 func (m *MockStore) UpdateFeatureRequestStatus(id uuid.UUID, status models.RequestStatus) error {
 	return nil
@@ -145,7 +152,10 @@ func (m *MockStore) MarkNotificationRead(id uuid.UUID) error                    
 func (m *MockStore) MarkNotificationReadByUser(id uuid.UUID, userID uuid.UUID) error { return nil }
 func (m *MockStore) MarkAllNotificationsRead(userID uuid.UUID) error                 { return nil }
 
-func (m *MockStore) CreateGPUReservation(reservation *models.GPUReservation) error  { return nil }
+func (m *MockStore) CreateGPUReservation(reservation *models.GPUReservation) error { return nil }
+func (m *MockStore) CreateGPUReservationWithCapacity(reservation *models.GPUReservation, capacity int) error {
+	return nil
+}
 func (m *MockStore) GetGPUReservation(id uuid.UUID) (*models.GPUReservation, error) { return nil, nil }
 func (m *MockStore) ListGPUReservations() ([]models.GPUReservation, error)          { return nil, nil }
 func (m *MockStore) ListUserGPUReservations(userID uuid.UUID) ([]models.GPUReservation, error) {
@@ -206,13 +216,14 @@ func (m *MockStore) UpdateUserRewards(rewards *store.UserRewards) error {
 }
 
 // IncrementUserCoins is overridable via testify/mock expectations.
-func (m *MockStore) IncrementUserCoins(userID string, delta int) (*store.UserRewards, error) {
+// #6613: signature accepts a context matching the Store interface.
+func (m *MockStore) IncrementUserCoins(ctx context.Context, userID string, delta int) (*store.UserRewards, error) {
 	if len(m.ExpectedCalls) == 0 {
 		return &store.UserRewards{UserID: userID, Level: store.DefaultUserLevel, Coins: delta}, nil
 	}
 	for _, call := range m.ExpectedCalls {
 		if call.Method == "IncrementUserCoins" {
-			args := m.Called(userID, delta)
+			args := m.Called(ctx, userID, delta)
 			if args.Get(0) == nil {
 				return nil, args.Error(1)
 			}
@@ -223,13 +234,14 @@ func (m *MockStore) IncrementUserCoins(userID string, delta int) (*store.UserRew
 }
 
 // ClaimDailyBonus is overridable via testify/mock expectations.
-func (m *MockStore) ClaimDailyBonus(userID string, bonusAmount int, minInterval time.Duration, now time.Time) (*store.UserRewards, error) {
+// #6613: signature accepts a context matching the Store interface.
+func (m *MockStore) ClaimDailyBonus(ctx context.Context, userID string, bonusAmount int, minInterval time.Duration, now time.Time) (*store.UserRewards, error) {
 	if len(m.ExpectedCalls) == 0 {
 		return &store.UserRewards{UserID: userID, Level: store.DefaultUserLevel, BonusPoints: bonusAmount, LastDailyBonusAt: &now}, nil
 	}
 	for _, call := range m.ExpectedCalls {
 		if call.Method == "ClaimDailyBonus" {
-			args := m.Called(userID, bonusAmount, minInterval, now)
+			args := m.Called(ctx, userID, bonusAmount, minInterval, now)
 			if args.Get(0) == nil {
 				return nil, args.Error(1)
 			}
@@ -271,7 +283,8 @@ func (m *MockStore) UpdateUserTokenUsage(usage *store.UserTokenUsage) error {
 }
 
 // AddUserTokenDelta is overridable via testify/mock expectations.
-func (m *MockStore) AddUserTokenDelta(userID string, category string, delta int64, agentSessionID string) (*store.UserTokenUsage, error) {
+// #6613: signature accepts a context matching the Store interface.
+func (m *MockStore) AddUserTokenDelta(ctx context.Context, userID string, category string, delta int64, agentSessionID string) (*store.UserTokenUsage, error) {
 	if len(m.ExpectedCalls) == 0 {
 		return &store.UserTokenUsage{
 			UserID:             userID,
@@ -282,7 +295,7 @@ func (m *MockStore) AddUserTokenDelta(userID string, category string, delta int6
 	}
 	for _, call := range m.ExpectedCalls {
 		if call.Method == "AddUserTokenDelta" {
-			args := m.Called(userID, category, delta, agentSessionID)
+			args := m.Called(ctx, userID, category, delta, agentSessionID)
 			if args.Get(0) == nil {
 				return nil, args.Error(1)
 			}
@@ -312,13 +325,14 @@ func (m *MockStore) StoreOAuthState(state string, ttl time.Duration) error {
 	return nil
 }
 
-func (m *MockStore) ConsumeOAuthState(state string) (bool, error) {
+// ConsumeOAuthState accepts a context matching the Store interface (#6613).
+func (m *MockStore) ConsumeOAuthState(ctx context.Context, state string) (bool, error) {
 	if len(m.ExpectedCalls) == 0 {
 		return false, nil
 	}
 	for _, call := range m.ExpectedCalls {
 		if call.Method == "ConsumeOAuthState" {
-			args := m.Called(state)
+			args := m.Called(ctx, state)
 			return args.Bool(0), args.Error(1)
 		}
 	}
