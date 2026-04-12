@@ -10,6 +10,7 @@ import { emitMissionStarted, emitMissionCompleted, emitMissionError, emitMission
 import { scanForMaliciousContent } from '../lib/missions/scanner/malicious'
 import { runPreflightCheck, type PreflightError } from '../lib/missions/preflightCheck'
 import { kubectlProxy } from '../lib/kubectlProxy'
+import { ConfirmMissionPromptDialog } from '../components/missions/ConfirmMissionPromptDialog'
 
 export type MissionStatus = 'pending' | 'running' | 'waiting_input' | 'completed' | 'failed' | 'saved' | 'blocked' | 'cancelling' | 'cancelled'
 
@@ -112,6 +113,17 @@ interface MissionContextValue {
   /** Whether AI is disabled (user selected 'none' or no agent) */
   isAIDisabled: boolean
 
+  /**
+   * Pending review state (#6455): when a mission is started without
+   * skipReview, it is stashed here so the UI can show the
+   * ConfirmMissionPromptDialog. Call `confirmPendingReview` with the
+   * (possibly edited) prompt to proceed, or `cancelPendingReview` to
+   * discard.
+   */
+  pendingReview: StartMissionParams | null
+  confirmPendingReview: (editedPrompt: string) => void
+  cancelPendingReview: () => void
+
   // Actions
   startMission: (params: StartMissionParams) => string
   saveMission: (params: SaveMissionParams) => string
@@ -144,6 +156,13 @@ interface StartMissionParams {
   context?: Record<string, unknown>
   /** When true, injects --dry-run=server instructions into the prompt */
   dryRun?: boolean
+  /**
+   * When true, skip the review-prompt dialog and start immediately.
+   * Defaults to false — all missions show the review dialog unless
+   * explicitly opted out (e.g., the sidebar text input where the user
+   * already composed the prompt). (#6455)
+   */
+  skipReview?: boolean
 }
 
 interface SaveMissionParams {
@@ -304,8 +323,9 @@ function loadMissions(): Mission[] {
             timestamp: new Date(msg.timestamp)
           }))
         }
-        // Mark running missions for reconnection - they'll be resumed when WS connects
-        if (mission.status === 'running') {
+        // Mark running/waiting_input missions for reconnection — they'll be
+        // resumed when WS connects (#6912, #6913).
+        if (mission.status === 'running' || mission.status === 'waiting_input') {
           return {
             ...mission,
             currentStep: 'Reconnecting...',
@@ -459,6 +479,10 @@ export function MissionProvider({ children }: { children: ReactNode }) {
   const [isSidebarOpen, setIsSidebarOpen] = useState(false)
   const [isSidebarMinimized, setIsSidebarMinimized] = useState(false)
   const [isFullScreen, setIsFullScreen] = useState(false)
+
+  // Pending review state (#6455): stash mission params here when the user
+  // needs to review/edit the prompt before the mission actually starts.
+  const [pendingReview, setPendingReview] = useState<StartMissionParams | null>(null)
   const [unreadMissionIds, setUnreadMissionIds] = useState<Set<string>>(() => loadUnreadMissionIds())
 
   // Agent state
@@ -873,7 +897,7 @@ export function MissionProvider({ children }: { children: ReactNode }) {
 
           setMissions(prev => {
             const candidates = prev.filter(m =>
-              m.status === 'running' && m.context?.needsReconnect
+              (m.status === 'running' || m.status === 'waiting_input') && m.context?.needsReconnect
             )
 
             if (candidates.length > 0) {
@@ -947,6 +971,12 @@ export function MissionProvider({ children }: { children: ReactNode }) {
             return prev
           })
 
+          // #6916 — Track which reconnecting missions were in waiting_input
+          // so we can restart their timeout watchdog after resend.
+          const waitingInputMissionIds = new Set(
+            missionsToReconnect.filter(m => m.status === 'waiting_input').map(m => m.id)
+          )
+
           // Side effect: schedule reconnection OUTSIDE the state updater.
           // #6832 — Deduplicate by mission ID. React StrictMode may invoke the
           // state updater twice, pushing the same mission into the array twice.
@@ -971,6 +1001,19 @@ export function MissionProvider({ children }: { children: ReactNode }) {
             }
             setTimeout(() => {
               dedupedMissions.forEach(mission => {
+                // #6914 — Check if the mission was cancelled during the
+                // reconnect delay. Without this guard, a user who cancels
+                // during the MISSION_RECONNECT_DELAY_MS window would still
+                // have their prompt resent to the backend.
+                if (cancelIntents.current.has(mission.id)) {
+                  finalizeCancellation(mission.id, 'Mission cancelled by user during reconnect.')
+                  return
+                }
+                const currentState = missionsRef.current.find(m => m.id === mission.id)
+                if (currentState && (currentState.status === 'cancelled' || currentState.status === 'failed' || currentState.status === 'cancelling')) {
+                  return
+                }
+
                 // Find the last user message to re-send
                 const userMessages = mission.messages.filter(msg => msg.role === 'user')
                 const lastUserMessage = userMessages[userMessages.length - 1]
@@ -1037,6 +1080,14 @@ export function MissionProvider({ children }: { children: ReactNode }) {
                       m.id === mId ? { ...m, status: 'failed', currentStep: 'WebSocket reconnect failed' } : m
                     ))
                   })
+
+                  // #6916 — Restart the waiting_input timeout watchdog for
+                  // missions that were in waiting_input before disconnect.
+                  // The original timer was cleared on disconnect; without
+                  // restarting it the mission could hang indefinitely.
+                  if (waitingInputMissionIds.has(mId)) {
+                    startWaitingInputTimeout(mId)
+                  }
                 }
               })
             }, MISSION_RECONNECT_DELAY_MS)
@@ -1125,7 +1176,7 @@ export function MissionProvider({ children }: { children: ReactNode }) {
 
 The WebSocket connection to the agent at \`${LOCAL_AGENT_WS_URL}\` was lost and reconnection attempts were exhausted. Please verify the agent is running and reachable, then retry the mission.`
               setMissions(prev => prev.map(m => {
-                if (pendingMissionIds.has(m.id) && m.status === 'running') {
+                if (pendingMissionIds.has(m.id) && (m.status === 'running' || m.status === 'waiting_input')) {
                   return {
                     ...m,
                     status: 'failed',
@@ -1143,11 +1194,11 @@ The WebSocket connection to the agent at \`${LOCAL_AGENT_WS_URL}\` was lost and 
                 return m
               }))
             } else {
-              // Transient disconnect — keep mission in 'running' but mark it
-              // as needing reconnect. The UI will show "Reconnecting..." and
-              // the onopen handler will resume the mission automatically.
+              // Transient disconnect — keep mission in 'running'/'waiting_input'
+              // but mark it as needing reconnect (#6912). The UI will show
+              // "Reconnecting..." and the onopen handler will resume the mission.
               setMissions(prev => prev.map(m => {
-                if (pendingMissionIds.has(m.id) && m.status === 'running') {
+                if (pendingMissionIds.has(m.id) && (m.status === 'running' || m.status === 'waiting_input')) {
                   return {
                     ...m,
                     currentStep: 'Reconnecting...',
@@ -2023,6 +2074,17 @@ The WebSocket connection to the agent at \`${LOCAL_AGENT_WS_URL}\` was lost and 
   }
 
   const startMission = (params: StartMissionParams): string => {
+    // (#6455) When skipReview is not set, stash the params so the UI can
+    // show ConfirmMissionPromptDialog for ALL mission types, not just
+    // install missions.  Callers that already present their own review
+    // dialog (e.g. CardWrapper install CTA) pass skipReview: true.
+    if (!params.skipReview) {
+      setPendingReview(params)
+      // Return empty — the real mission ID is generated when the user
+      // confirms via confirmPendingReview.
+      return ''
+    }
+
     const missionId = `mission-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`
 
     const { enhancedPrompt, matchedResolutions, isInstallMission } = buildEnhancedPrompt(params)
@@ -2073,7 +2135,7 @@ The WebSocket connection to the agent at \`${LOCAL_AGENT_WS_URL}\` was lost and 
   const executeMission = (
     missionId: string,
     enhancedPrompt: string,
-    params: { context?: Record<string, unknown>; type?: string },
+    params: { context?: Record<string, unknown>; type?: string; dryRun?: boolean },
   ) => {
     // #6384 item 1 (dup of #6381) — if a cancel intent is already set for
     // this missionId we must not clear it and proceed to send. This
@@ -2112,7 +2174,11 @@ The WebSocket connection to the agent at \`${LOCAL_AGENT_WS_URL}\` was lost and 
           sessionId: missionId,
           agent: selectedAgentRef.current || undefined,
           // Include mission context for the agent to use
-          context: params.context }
+          context: params.context,
+          // Server-enforced dry-run gate (#6442): when true, the backend
+          // tracks this session as dry-run and rejects mutating kubectl
+          // commands at the server level, not just in the prompt.
+          dryRun: params.dryRun || false }
       }), () => {
         setMissions(prev => prev.map(m =>
           m.id === missionId ? { ...m, status: 'failed', currentStep: 'WebSocket connection lost' } : m
@@ -2783,6 +2849,15 @@ Install the console locally with the KubeStellar Console agent to use AI mission
     }
   }, [])
 
+  // (#6455) Confirm or cancel the pending prompt review.
+  const confirmPendingReview = (editedPrompt: string) => {
+    if (!pendingReview) return
+    const params = { ...pendingReview, initialPrompt: editedPrompt, skipReview: true }
+    setPendingReview(null)
+    startMission(params)
+  }
+  const cancelPendingReview = () => setPendingReview(null)
+
   // #6730 — Memoize the context value so consumers of MissionContext don't
   // re-render on every render of MissionProvider. Prior to this fix, the
   // inline object literal created a fresh reference on every parent render,
@@ -2804,13 +2879,13 @@ Install the console locally with the KubeStellar Console agent to use AI mission
     retryPreflight, cancelMission, dismissMission, renameMission, rateMission,
     setActiveMission, markMissionAsRead, selectAgent, connectToAgent,
     toggleSidebar, openSidebar, closeSidebar, minimizeSidebar, expandSidebar,
-    handleSetFullScreen })
+    handleSetFullScreen, confirmPendingReview, cancelPendingReview })
   handlersRef.current = {
     startMission, saveMission, runSavedMission, updateSavedMission, sendMessage,
     retryPreflight, cancelMission, dismissMission, renameMission, rateMission,
     setActiveMission, markMissionAsRead, selectAgent, connectToAgent,
     toggleSidebar, openSidebar, closeSidebar, minimizeSidebar, expandSidebar,
-    handleSetFullScreen }
+    handleSetFullScreen, confirmPendingReview, cancelPendingReview }
   // Stable proxies. Created once via useMemo with an empty dep array; every
   // call forwards to the currently-live handler on `handlersRef.current`.
   const stableHandlers = useMemo(() => ({
@@ -2849,6 +2924,10 @@ Install the console locally with the KubeStellar Console agent to use AI mission
     expandSidebar: () => handlersRef.current.expandSidebar(),
     setFullScreen: (fullScreen: boolean) =>
       handlersRef.current.handleSetFullScreen(fullScreen),
+    confirmPendingReview: (editedPrompt: string) =>
+      handlersRef.current.confirmPendingReview(editedPrompt),
+    cancelPendingReview: () =>
+      handlersRef.current.cancelPendingReview(),
   }), [])
 
   const contextValue = useMemo(() => ({
@@ -2864,6 +2943,7 @@ Install the console locally with the KubeStellar Console agent to use AI mission
     defaultAgent,
     agentsLoading,
     isAIDisabled: selectedAgent === 'none' || !selectedAgent,
+    pendingReview,
     ...stableHandlers,
   }), [
     missions,
@@ -2876,12 +2956,25 @@ Install the console locally with the KubeStellar Console agent to use AI mission
     selectedAgent,
     defaultAgent,
     agentsLoading,
+    pendingReview,
     stableHandlers,
   ])
 
   return (
     <MissionContext.Provider value={contextValue}>
       {children}
+      {/* Global prompt-review dialog (#6455): shown for every mission that
+          does not opt out via skipReview: true. */}
+      {pendingReview && (
+        <ConfirmMissionPromptDialog
+          open={!!pendingReview}
+          missionTitle={pendingReview.title}
+          missionDescription={pendingReview.description}
+          initialPrompt={pendingReview.initialPrompt}
+          onCancel={cancelPendingReview}
+          onConfirm={confirmPendingReview}
+        />
+      )}
     </MissionContext.Provider>
   )
 }
@@ -2908,6 +3001,9 @@ const MISSIONS_FALLBACK: MissionContextValue = {
   defaultAgent: null,
   agentsLoading: false,
   isAIDisabled: true,
+  pendingReview: null,
+  confirmPendingReview: () => {},
+  cancelPendingReview: () => {},
   startMission: () => '',
   saveMission: () => '',
   runSavedMission: () => {},

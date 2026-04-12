@@ -352,7 +352,7 @@ interface AlertsContextValue {
   acknowledgeAlerts: (alertIds: string[], acknowledgedBy?: string) => void
   resolveAlert: (alertId: string) => void
   deleteAlert: (alertId: string) => void
-  runAIDiagnosis: (alertId: string) => string | null
+  runAIDiagnosis: (alertId: string) => Promise<string | null> | string | null
   evaluateConditions: () => void
   createRule: (rule: Omit<AlertRule, 'id' | 'createdAt' | 'updatedAt'>) => AlertRule
   updateRule: (id: string, updates: Partial<AlertRule>) => void
@@ -458,10 +458,10 @@ export function AlertsProvider({ children }: { children: ReactNode }) {
       const currentClusters = clustersRef.current
       if (!currentClusters.length) return
 
+      // (#6857) Return { cluster, data } from each callback to avoid shared mutation.
       const API_BASE = import.meta.env.VITE_API_BASE_URL || ''
-      const results: Record<string, GPUHealthCheckResult[]> = {}
 
-      await settledWithConcurrency(
+      const settled = await settledWithConcurrency(
         currentClusters.map((cluster) => async () => {
           try {
             const resp = await fetch(
@@ -471,14 +471,22 @@ export function AlertsProvider({ children }: { children: ReactNode }) {
             if (resp.ok) {
               const data = await resp.json().catch(() => null)
               if (data?.results && data.results.length > 0) {
-                results[cluster.name] = data.results
+                return { cluster: cluster.name, data: data.results as GPUHealthCheckResult[] }
               }
             }
           } catch {
             // Silent — CronJob may not be installed on this cluster
           }
+          return null
         })
       )
+
+      const results: Record<string, GPUHealthCheckResult[]> = {}
+      for (const result of settled) {
+        if (result.status === 'fulfilled' && result.value) {
+          results[result.value.cluster] = result.value.data
+        }
+      }
 
       if (!unmounted) cronJobResultsRef.current = results
     }
@@ -963,8 +971,8 @@ export function AlertsProvider({ children }: { children: ReactNode }) {
     }
   }
 
-  // Run AI diagnosis on an alert
-  const runAIDiagnosis = (alertId: string) => {
+  // Run AI diagnosis on an alert (#6915 — include runbook evidence in prompt)
+  const runAIDiagnosis = async (alertId: string) => {
       const alert = alerts.find(a => a.id === alertId)
       if (!alert) return null
 
@@ -973,39 +981,42 @@ export function AlertsProvider({ children }: { children: ReactNode }) {
       const conditionType = rule?.condition.type
       const runbook = conditionType ? findRunbookForCondition(conditionType) : undefined
 
-      // If a runbook matches, execute it in the background to gather evidence
-      // and build an enriched prompt. Fall back to the default prompt otherwise.
-      const initialPrompt = `Please analyze this alert and provide diagnosis with suggestions:
+      const basePrompt = `Please analyze this alert and provide diagnosis with suggestions:
 
 Alert: ${alert.ruleName}
 Severity: ${alert.severity}
 Message: ${alert.message}
 Cluster: ${alert.cluster || 'N/A'}
 Resource: ${alert.resource || 'N/A'}
-Details: ${JSON.stringify(alert.details, null, 2)}
+Details: ${JSON.stringify(alert.details, null, 2)}`
+
+      // #6915 — If a runbook matches, execute it first and include the
+      // gathered evidence directly in the AI prompt so the diagnosis is
+      // grounded in real cluster data, not just the alert metadata.
+      let runbookEvidence = ''
+      if (runbook) {
+        try {
+          const result = await executeRunbook(runbook, {
+            cluster: alert.cluster,
+            namespace: alert.namespace,
+            resource: alert.resource,
+            resourceKind: alert.resourceKind,
+            alertMessage: alert.message })
+          if (result.enrichedPrompt) {
+            runbookEvidence = `\n\n--- Runbook Evidence (${runbook.title}) ---\n${result.enrichedPrompt}`
+            console.debug(`Runbook "${runbook.title}" gathered ${result.stepResults.length} evidence steps`)
+          }
+        } catch {
+          // Silent failure - runbook is best-effort enhancement
+        }
+      }
+
+      const initialPrompt = `${basePrompt}${runbookEvidence}
 
 Please provide:
 1. A summary of the issue
 2. The likely root cause
 3. Suggested actions to resolve this alert`
-
-      if (runbook) {
-        // Fire-and-forget: runbook evidence will enrich the AI prompt asynchronously
-        executeRunbook(runbook, {
-          cluster: alert.cluster,
-          namespace: alert.namespace,
-          resource: alert.resource,
-          resourceKind: alert.resourceKind,
-          alertMessage: alert.message }).then(result => {
-          if (result.enrichedPrompt) {
-            // The mission has already started; the enriched prompt will be
-            // available for subsequent AI interactions in the mission context.
-            console.debug(`Runbook "${runbook.title}" gathered ${result.stepResults.length} evidence steps`)
-          }
-        }).catch(() => {
-          // Silent failure - runbook is best-effort enhancement
-        })
-      }
 
       const missionId = startMission({
         title: `Diagnose: ${alert.ruleName}`,
